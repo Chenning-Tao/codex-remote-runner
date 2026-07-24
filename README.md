@@ -1,5 +1,7 @@
 # Codex Remote Runner
 
+[简体中文](README.zh-CN.md)
+
 Codex Remote Runner is a command-line application for submitting durable work to
 a project-owned pool of remote machines. It keeps queue and execution state on a
 controller host, runs an exact clean Git revision, and lets clients reconnect to
@@ -43,7 +45,14 @@ not as a hostile multi-tenant scheduler.
 
 ## Install
 
-Until a package release is published, install from a checkout:
+Install a published release with `uv`:
+
+```bash
+uv tool install 'codex-remote-runner[tui]'
+remote-runner --help
+```
+
+To install from a checkout instead:
 
 ```bash
 git clone https://github.com/Chenning-Tao/codex-remote-runner.git

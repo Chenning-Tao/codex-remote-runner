@@ -29,6 +29,7 @@ SERVER_COLUMN_LABELS = (
 )
 SERVER_TASK_COLUMN_INDEX = 4
 SERVER_TASK_MAX_WIDTH = 32
+COUNTDOWN_EPSILON_SECONDS = 1e-6
 
 
 def _progress_percent(run: dict[str, Any]) -> float | None:
@@ -112,6 +113,11 @@ def _duration(seconds: float) -> str:
         return f"{hours}h{minutes:02d}m"
     days, hours = divmod(hours, 24)
     return f"{days}d{hours:02d}h"
+
+
+def _countdown_seconds(deadline: float, now: float) -> int:
+    remaining = deadline - now
+    return max(0, math.ceil(remaining - COUNTDOWN_EPSILON_SECONDS))
 
 
 def _run_label(run: dict[str, Any]) -> str:
@@ -389,7 +395,7 @@ class RemoteRunnerTui(App[None]):
             probe_text = "probe in progress"
         elif self.last_error is not None:
             state = f"refresh failed: {self.last_error}"
-            remaining = max(0, math.ceil(self.next_probe_at - now))
+            remaining = _countdown_seconds(self.next_probe_at, now)
             probe_text = f"next probe {_duration(remaining)}"
         else:
             state = (
@@ -397,7 +403,7 @@ class RemoteRunnerTui(App[None]):
                 if self.snapshot is not None
                 else "controller unavailable"
             )
-            remaining = max(0, math.ceil(self.next_probe_at - now))
+            remaining = _countdown_seconds(self.next_probe_at, now)
             probe_text = f"next probe {_duration(remaining)}"
         self.query_one("#topline", Static).update(
             Text(f"REMOTE RUNNER | {state} | snapshot age {age_text} | {probe_text}")
