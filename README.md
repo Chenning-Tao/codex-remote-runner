@@ -45,10 +45,10 @@ not as a hostile multi-tenant scheduler.
 
 ## Install
 
-Install a published release with `uv`:
+Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[tui]'
+uv tool install 'codex-remote-runner[tui] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.1.0'
 remote-runner --help
 ```
 
