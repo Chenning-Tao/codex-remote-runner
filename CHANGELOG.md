@@ -19,7 +19,13 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 - Replaced deployment-specific host examples and diagnostics with configured or
   neutral names.
 
+### Fixed
+
+- Stabilized the TUI probe countdown at integer boundaries.
+
 ### Security
 
 - Removed local development workflow state from the tracked and packaged source.
 - Added explicit source-distribution boundaries and archive content validation.
+- Updated the pytest development dependency to a release that fixes
+  CVE-2025-71176.
