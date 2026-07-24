@@ -53,6 +53,7 @@ def check_archive(archive: Path) -> None:
         required = {
             PurePosixPath("LICENSE"),
             PurePosixPath("README.md"),
+            PurePosixPath("README.zh-CN.md"),
             PurePosixPath("pyproject.toml"),
             PurePosixPath("src/remote_runner/cli.py"),
             PurePosixPath("tests/test_cli_contract.py"),
