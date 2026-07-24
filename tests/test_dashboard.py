@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import subprocess
+from threading import Barrier
 
 from remote_runner._internal.config import load_managed_project_config
 from remote_runner._internal.controller import dashboard as controller_dashboard
@@ -266,3 +267,31 @@ def test_controller_dashboard_combines_overview_and_server_snapshot(
     assert result["servers"][0]["timeout"] == 7
     assert result["probe_interval_seconds"] == 60
     assert isinstance(result["collected_at"], str)
+
+
+def test_controller_dashboard_collects_status_and_snapshot_concurrently(
+    monkeypatch,
+) -> None:
+    started = Barrier(2)
+    monkeypatch.setattr(
+        controller_service,
+        "_read_object",
+        lambda _noun: {"schema_version": 1, "servers": [dashboard_server()]},
+    )
+
+    def status(_args):
+        started.wait(timeout=1)
+        return {"queue": [], "runs": [], "summary": {}}
+
+    def snapshot(_servers, *, timeout):
+        started.wait(timeout=1)
+        assert timeout == 7
+        return []
+
+    monkeypatch.setattr(controller_service, "status", status)
+    monkeypatch.setattr(controller_service, "collect_server_snapshot", snapshot)
+
+    result = controller_service.dashboard(argparse.Namespace(timeout=7, interval=60))
+
+    assert result["queue"] == []
+    assert result["servers"] == []

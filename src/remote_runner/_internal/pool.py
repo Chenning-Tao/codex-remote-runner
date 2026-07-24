@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from .config import ManagedProjectConfig
 from .execution_registry import load_yaml
+from .remote_shell import ssh_connection_options
 from .scheduling import normalize_minimum_cores
 
 
@@ -15,6 +17,7 @@ DEFAULT_SERVER_REGISTRY = Path("~/.codex/remote-servers.yaml").expanduser()
 DEFAULT_SSH_PROFILE = "auto"
 AUTO_SSH_PROFILES = {"auto", "default"}
 ALL_SERVERS = "all"
+MAX_POOL_PROBE_WORKERS = 8
 
 
 def normalize_explicit_server(value: object) -> str | None:
@@ -43,12 +46,7 @@ def probe_endpoint(ssh: str, timeout: int) -> dict[str, Any]:
         raise ValueError("endpoint probe timeout must be positive")
     command = [
         "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        f"ConnectTimeout={timeout}",
+        *ssh_connection_options(timeout),
         ssh,
         f"sh -c {shlex.quote('true')}",
     ]
@@ -175,6 +173,48 @@ def _configured_candidates(
     return candidates
 
 
+def _probe_candidate(
+    item: dict[str, Any],
+    *,
+    ssh_profile: str,
+    timeout: int,
+) -> dict[str, Any]:
+    result = dict(item)
+    attempts: list[dict[str, Any]] = []
+    selected_ssh: str | None = None
+    selected_profile: str | None = None
+    last_probe: dict[str, Any] = {"reachable": False, "error": "no endpoint attempted"}
+    for ssh, profile in resolve_ssh_targets(item["server"], item["name"], ssh_profile):
+        last_probe = probe_endpoint(ssh, timeout)
+        attempts.append({"ssh": ssh, "ssh_profile": profile, "probe": last_probe})
+        if last_probe.get("reachable") is True:
+            selected_ssh = ssh
+            selected_profile = profile
+            break
+    result["ssh"] = selected_ssh or attempts[-1]["ssh"]
+    result["ssh_profile"] = selected_profile or attempts[-1]["ssh_profile"]
+    result["requested_ssh_profile"] = ssh_profile
+    result["endpoint_attempts"] = attempts
+    result["probe"] = last_probe
+    return result
+
+
+def _probe_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    ssh_profile: str,
+    timeout: int,
+) -> list[dict[str, Any]]:
+    def probe(item: dict[str, Any]) -> dict[str, Any]:
+        return _probe_candidate(item, ssh_profile=ssh_profile, timeout=timeout)
+
+    if len(candidates) <= 1:
+        return [probe(item) for item in candidates]
+    workers = min(MAX_POOL_PROBE_WORKERS, len(candidates))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(probe, candidates))
+
+
 def probe_project_pool(
     project_config: ManagedProjectConfig,
     server_registry_path: Path,
@@ -193,21 +233,8 @@ def probe_project_pool(
         candidate_servers,
         minimum_cores,
     )
-    for item in candidates:
-        attempts: list[dict[str, Any]] = []
-        selected_ssh: str | None = None
-        selected_profile: str | None = None
-        last_probe: dict[str, Any] = {"reachable": False, "error": "no endpoint attempted"}
-        for ssh, profile in resolve_ssh_targets(item["server"], item["name"], ssh_profile):
-            last_probe = probe_endpoint(ssh, timeout)
-            attempts.append({"ssh": ssh, "ssh_profile": profile, "probe": last_probe})
-            if last_probe.get("reachable") is True:
-                selected_ssh = ssh
-                selected_profile = profile
-                break
-        item["ssh"] = selected_ssh or attempts[-1]["ssh"]
-        item["ssh_profile"] = selected_profile or attempts[-1]["ssh_profile"]
-        item["requested_ssh_profile"] = ssh_profile
-        item["endpoint_attempts"] = attempts
-        item["probe"] = last_probe
-    return candidates
+    return _probe_candidates(
+        candidates,
+        ssh_profile=ssh_profile,
+        timeout=timeout,
+    )

@@ -5,6 +5,15 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.1.1 - 2026-07-25
+
+### Changed
+
+- Parallelized candidate-pool, controller-capacity, and active-run probes while
+  preserving candidate order and per-server endpoint fallback.
+- Reused short-lived SSH control connections across lifecycle probes and overlapped
+  dashboard status collection with its server-capacity snapshot.
+
 ## 0.1.0 - 2026-07-24
 
 ### Added

@@ -7,6 +7,7 @@ import subprocess
 from typing import Any
 
 from ..config import ManagedProjectConfig
+from ..remote_shell import ssh_connection_options
 from .layout import controller_release_layout
 
 
@@ -62,12 +63,7 @@ def call_controller(
     ]
     ssh_argv = [
         "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        f"ConnectTimeout={timeout}",
+        *ssh_connection_options(timeout),
     ]
     if overall_timeout is not None:
         ssh_argv.extend(

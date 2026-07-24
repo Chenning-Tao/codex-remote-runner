@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -405,19 +406,13 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
             ]
         elif overview:
             rows = [row for row in rows if _active_execution(row)]
-        for row in rows:
-            try:
-                monitored = monitoring.monitor_row(
-                    execution_paths,
-                    row,
-                    args.timeout,
-                    no_write=False,
-                )
-            except Exception as exc:  # noqa: BLE001 - isolate each controller record
-                monitored = dict(row)
-                monitored["observation"] = "unknown"
-                monitored["error"] = f"monitor failed for this run: {exc}"
-            runs.append(monitored)
+        runs = monitoring.monitor_rows(
+            execution_paths,
+            rows,
+            args.timeout,
+            no_write=False,
+            isolate_errors=True,
+        )
     if any(
         item["state"]["status"] in {"queued", "dispatching"} for item in queue
     ) or any(
@@ -682,8 +677,15 @@ def update_server_drain(args: argparse.Namespace, *, drained: bool) -> dict[str,
 def dashboard(args: argparse.Namespace) -> dict[str, Any]:
     payload = _read_object("dashboard request")
     servers = validate_payload(payload)
-    overview = status(args)
-    snapshot = collect_server_snapshot(servers, timeout=args.timeout)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        overview_future = executor.submit(status, args)
+        snapshot_future = executor.submit(
+            collect_server_snapshot,
+            servers,
+            timeout=args.timeout,
+        )
+        overview = overview_future.result()
+        snapshot = snapshot_future.result()
     runs = overview.get("runs", [])
     if not isinstance(runs, list):
         raise RuntimeError("controller overview returned invalid runs")

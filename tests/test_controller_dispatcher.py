@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -102,6 +103,28 @@ def test_server_probe_checks_an_exact_run_session(tmp_path: Path) -> None:
     assert call_log.read_text(encoding="utf-8").splitlines() == [
         f"has-session -t ={RUN_ID}"
     ]
+
+
+def test_capacity_probes_servers_concurrently_and_preserves_order(monkeypatch) -> None:
+    started = Barrier(2)
+
+    def probe(ssh: str, _python: str, _timeout: int) -> dict[str, object]:
+        started.wait(timeout=1)
+        return {
+            "reachable": True,
+            "load5": 1.0 if ssh == "compute-b" else 2.0,
+            "active_run_ids": (),
+        }
+
+    monkeypatch.setattr(controller_dispatcher, "probe_server_state", probe)
+    servers = job(two_servers=True)["prepared_servers"]
+    assert isinstance(servers, list)
+
+    reachable, failures = controller_dispatcher._probe_prepared_servers(servers, 8)
+
+    assert failures == []
+    assert [item.capacity.name for item in reachable] == ["compute-b", "archive"]
+    assert [item.capacity.load5 for item in reachable] == [1.0, 2.0]
 
 
 def test_dispatch_waits_for_live_lease_on_interrupted_head(tmp_path: Path) -> None:
