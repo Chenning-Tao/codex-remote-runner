@@ -1,0 +1,37 @@
+project_id: example
+
+controller:
+  ssh: controller.example
+  root: /srv/remote-runner
+
+source:
+  mode: git-worktree
+  local_repo: .
+
+remote:
+  compute-a:
+    enabled: true
+    auto_select: true
+    bare_repo: /srv/example/repo.git
+    worktree_root: /srv/example/worktrees
+    python: /srv/example/venv/bin/python
+    output_root: /srv/example/output
+  archive:
+    enabled: true
+    auto_select: false
+    bare_repo: /srv/example/repo.git
+    worktree_root: /srv/example/worktrees
+    python: /srv/example/venv/bin/python
+    output_root: /srv/archive/example
+
+parallelism:
+  default_arg: --num-workers
+  default_value: selected_server.cores
+
+scheduling:
+  strategy: max_available_cores
+  lease_seconds: 120
+  probe_interval_seconds: 60
+  testing:
+    servers:
+      - compute-a

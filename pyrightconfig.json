@@ -1,0 +1,8 @@
+{
+  "include": ["src/remote_runner", "scripts"],
+  "extraPaths": ["src"],
+  "typeCheckingMode": "basic",
+  "reportUnreachable": "error",
+  "reportUnusedImport": "error",
+  "reportUnusedVariable": "error"
+}

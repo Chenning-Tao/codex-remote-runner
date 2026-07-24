@@ -1,0 +1,4 @@
+interface:
+  display_name: "Remote Runner"
+  short_description: "Run and follow durable remote workloads"
+  default_prompt: "Use $remote-runner to submit my clean committed HEAD, then keep a foreground wait or register one event-driven wakeup for the exact run cohort and report only authoritative terminal or attention states."

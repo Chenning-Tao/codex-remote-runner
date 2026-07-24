@@ -1,0 +1,57 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install --yes tmux procps
+      - name: Install locked environment
+        run: uv sync --frozen --group dev --no-editable --managed-python
+      - name: Test
+        run: uv run --frozen --no-sync pytest -q tests
+      - name: Lint
+        run: uv run --frozen --no-sync ruff check src/remote_runner tests scripts
+      - name: Type check
+        run: uv run --frozen --no-sync pyright --project pyrightconfig.json
+      - name: Compile
+        run: uv run --frozen --no-sync python -m compileall -q src/remote_runner tests
+
+  package-smoke:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Build package
+        run: uv build
+      - name: Validate distribution contents
+        run: python scripts/check_dist.py dist
+      - name: Install isolated tool
+        shell: bash
+        run: |
+          export UV_TOOL_DIR="$RUNNER_TEMP/uv-tools"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/uv-bin"
+          wheel=(dist/*.whl)
+          uv tool install --force "${wheel[0]}[tui]"
+          "$UV_TOOL_BIN_DIR/remote-runner" --help
+          "$UV_TOOL_DIR/codex-remote-runner/bin/python" -c \
+            'import rich; import textual; import remote_runner.tui'
+          sdist=(dist/*.tar.gz)
+          uv tool install --force "${sdist[0]}[tui]"
+          "$UV_TOOL_BIN_DIR/remote-runner" --version

@@ -1,0 +1,13 @@
+servers:
+  compute-a:
+    ssh: compute-a
+    cores: 64
+    enabled: true
+    priority: 10
+    testing:
+      slots: 1
+  archive:
+    ssh: archive
+    cores: 16
+    enabled: true
+    priority: 0
