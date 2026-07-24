@@ -22,6 +22,7 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: false
+          python-version: "3.12"
       - name: Verify release tag
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
