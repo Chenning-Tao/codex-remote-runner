@@ -9,6 +9,7 @@ from remote_runner.tui import (
     RemoteRunnerTui,
     _countdown_seconds,
     _duration,
+    _elapsed_seconds,
     _progress_bar,
     _progress_eta,
     _progress_percent,
@@ -23,6 +24,14 @@ def test_countdown_ignores_sub_microsecond_float_noise() -> None:
     assert _countdown_seconds(50.0 + 1e-10, 0.0) == 50
     assert _countdown_seconds(50.001, 0.0) == 51
     assert _countdown_seconds(10.0, 11.0) == 0
+
+
+def test_elapsed_ignores_sub_microsecond_float_noise() -> None:
+    started_at = 1016.800718678379
+    now = started_at + 10.0
+    assert now - started_at < 10.0
+    assert _elapsed_seconds(started_at, now) == 10
+    assert _elapsed_seconds(10.0, 9.0) == 0
 
 
 def test_tui_formats_progress_bar() -> None:

@@ -21,7 +21,7 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ### Fixed
 
-- Stabilized the TUI probe countdown at integer boundaries.
+- Stabilized the TUI probe countdown and snapshot age at integer boundaries.
 
 ### Security
 

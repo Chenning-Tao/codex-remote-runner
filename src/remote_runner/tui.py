@@ -29,7 +29,7 @@ SERVER_COLUMN_LABELS = (
 )
 SERVER_TASK_COLUMN_INDEX = 4
 SERVER_TASK_MAX_WIDTH = 32
-COUNTDOWN_EPSILON_SECONDS = 1e-6
+DISPLAY_TIME_EPSILON_SECONDS = 1e-6
 
 
 def _progress_percent(run: dict[str, Any]) -> float | None:
@@ -117,7 +117,12 @@ def _duration(seconds: float) -> str:
 
 def _countdown_seconds(deadline: float, now: float) -> int:
     remaining = deadline - now
-    return max(0, math.ceil(remaining - COUNTDOWN_EPSILON_SECONDS))
+    return max(0, math.ceil(remaining - DISPLAY_TIME_EPSILON_SECONDS))
+
+
+def _elapsed_seconds(started_at: float, now: float) -> int:
+    elapsed = now - started_at
+    return max(0, math.floor(elapsed + DISPLAY_TIME_EPSILON_SECONDS))
 
 
 def _run_label(run: dict[str, Any]) -> str:
@@ -388,7 +393,7 @@ class RemoteRunnerTui(App[None]):
 
     def _tick(self) -> None:
         now = self._clock()
-        age = now - self.last_refresh if self.last_refresh else 0.0
+        age = _elapsed_seconds(self.last_refresh, now) if self.last_refresh else 0
         age_text = _duration(age) if self.snapshot is not None else "--"
         if self.probe_in_progress:
             state = "probing controller"
