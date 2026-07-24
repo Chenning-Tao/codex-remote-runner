@@ -1,3 +1,3 @@
 """Durable execution for project-configured remote workloads."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 import yaml
@@ -120,6 +121,27 @@ def run_probe(
         monitoring, "ssh_capture", lambda *_args, **_kwargs: (0, stdout, "")
     )
     return monitoring.remote_probe(row(kind, authority), timeout=1)
+
+
+def test_monitor_rows_runs_concurrently_and_preserves_order(monkeypatch) -> None:
+    started = Barrier(2)
+
+    def monitor_row(_paths, item, _timeout, *, no_write):
+        assert no_write is False
+        started.wait(timeout=1)
+        return {**item, "observation": "running"}
+
+    monkeypatch.setattr(monitoring, "monitor_row", monitor_row)
+    rows = [{"run_id": "first"}, {"run_id": "second"}]
+
+    result = monitoring.monitor_rows(
+        object(),
+        rows,
+        8,
+        no_write=False,
+    )
+
+    assert [item["run_id"] for item in result] == ["first", "second"]
 
 
 def test_remote_status_exposes_workload_class_with_legacy_default() -> None:

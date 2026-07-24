@@ -49,6 +49,9 @@ def test_controller_call_uses_batch_ssh_and_private_stdin(tmp_path: Path, monkey
     argv = observed["argv"]
     assert isinstance(argv, list)
     assert argv[:4] == ["ssh", "-o", "BatchMode=yes", "-o"]
+    assert "ControlMaster=auto" in argv
+    assert "ControlPersist=60" in argv
+    assert "ControlPath=~/.ssh/remote-runner-%C" in argv
     assert argv[-2] == "controller_host"
     assert "/Users/test/.remote-runner/runner/current/venv/bin/python" in argv[-1]
     assert "-m remote_runner._internal.controller" in argv[-1]

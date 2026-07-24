@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import shlex
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ REMOTE_STATUS_PREFIX = "remote_status_json="
 LOG_TAIL_MARKER = "__REMOTE_RUNNER_LOG_TAIL__"
 TERMINAL_STATUSES = {"succeeded", "failed", "stopped"}
 REMOTE_STATUS_STATES = TERMINAL_STATUSES | {"running"}
+MAX_MONITOR_WORKERS = 8
 
 FAILURE_PATTERNS: list[tuple[str, str]] = [
     ("resource", "out of memory"),
@@ -559,6 +561,32 @@ def monitor_row(
             _manifest, current = load_current_run(paths, str(row["run_id"]))
             combined.update(_current_state_projection(current))
     return combined
+
+
+def monitor_rows(
+    paths: ProjectPaths,
+    rows: list[dict[str, Any]],
+    timeout: int,
+    *,
+    no_write: bool,
+    isolate_errors: bool = False,
+) -> list[dict[str, Any]]:
+    def monitor(row: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return monitor_row(paths, row, timeout, no_write=no_write)
+        except Exception as exc:
+            if not isolate_errors:
+                raise
+            failed = dict(row)
+            failed["observation"] = "unknown"
+            failed["error"] = f"monitor failed for this run: {exc}"
+            return failed
+
+    if len(rows) <= 1:
+        return [monitor(row) for row in rows]
+    workers = min(MAX_MONITOR_WORKERS, len(rows))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(monitor, rows))
 
 
 def summarize(rows: list[dict[str, Any]]) -> str:

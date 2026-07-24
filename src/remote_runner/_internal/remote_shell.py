@@ -4,6 +4,29 @@ import shlex
 import subprocess
 
 
+SSH_CONTROL_PATH = "~/.ssh/remote-runner-%C"
+SSH_CONTROL_PERSIST_SECONDS = 60
+
+
+def ssh_connection_options(timeout: int) -> list[str]:
+    if timeout <= 0:
+        raise ValueError("SSH timeout must be positive")
+    return [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        f"ConnectTimeout={timeout}",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPersist={SSH_CONTROL_PERSIST_SECONDS}",
+        "-o",
+        f"ControlPath={SSH_CONTROL_PATH}",
+    ]
+
+
 def ssh_capture(
     ssh_target: str,
     remote_command: str,
@@ -14,12 +37,7 @@ def ssh_capture(
     remote_shell_command = f"bash -c {shlex.quote(remote_command)}"
     command = [
         "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        f"ConnectTimeout={timeout}",
+        *ssh_connection_options(timeout),
         ssh_target,
         remote_shell_command,
     ]

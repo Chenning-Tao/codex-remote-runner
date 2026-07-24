@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from ..execution_registry import (
     write_yaml,
 )
 from ..output_paths import resolve_output_path
-from ..remote_shell import remote_python_stdin_command
+from ..remote_shell import remote_python_stdin_command, ssh_connection_options
 from ..scheduling import CapacityCandidate, rank_candidates, resolve_worker_command
 from ..worktree import prepare_remote_worktree
 from .registry import (
@@ -97,6 +98,7 @@ print(json.dumps({
     "remote_cores": os.cpu_count(),
 }))
 '''
+MAX_CAPACITY_PROBE_WORKERS = 8
 
 
 @dataclass(frozen=True)
@@ -118,12 +120,7 @@ class ProbedServer:
 def probe_server_state(ssh: str, python: str, timeout: int) -> dict[str, Any]:
     argv = [
         "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        f"ConnectTimeout={timeout}",
+        *ssh_connection_options(timeout),
         ssh,
         remote_python_stdin_command(python),
     ]
@@ -228,6 +225,27 @@ def _probe_prepared_server(server: dict[str, Any], timeout: int) -> ProbedServer
     )
 
 
+def _probe_prepared_servers(
+    servers: list[dict[str, Any]],
+    timeout: int,
+) -> tuple[list[ProbedServer], list[str]]:
+    def probe(server: dict[str, Any]) -> tuple[ProbedServer | None, str | None]:
+        try:
+            return _probe_prepared_server(server, timeout), None
+        except RuntimeError as exc:
+            return None, f"{server['name']}: {exc}"
+
+    if len(servers) <= 1:
+        results = [probe(server) for server in servers]
+    else:
+        workers = min(MAX_CAPACITY_PROBE_WORKERS, len(servers))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(executor.map(probe, servers))
+    reachable = [result for result, _failure in results if result is not None]
+    failures = [failure for _result, failure in results if failure is not None]
+    return reachable, failures
+
+
 def _has_workload_capacity(workload_class: str, candidate: ProbedServer) -> bool:
     if workload_class == "standard":
         return candidate.active_standard_count == 0
@@ -272,8 +290,7 @@ def _select_server_for_job(
 ) -> tuple[ProbedServer | None, str]:
     workload_class = str(job["workload_class"])
     drained_servers = set(list_drained_servers(paths))
-    reachable: list[ProbedServer] = []
-    failures: list[str] = []
+    eligible_servers = []
     for server in job["prepared_servers"]:
         if str(server["name"]) in drained_servers:
             continue
@@ -282,10 +299,8 @@ def _select_server_for_job(
             and str(server["name"]) not in allowed_server_names
         ):
             continue
-        try:
-            reachable.append(_probe_prepared_server(server, timeout))
-        except RuntimeError as exc:
-            failures.append(f"{server['name']}: {exc}")
+        eligible_servers.append(server)
+    reachable, failures = _probe_prepared_servers(eligible_servers, timeout)
     if not reachable:
         prepared_names = {str(server["name"]) for server in job["prepared_servers"]}
         if prepared_names and prepared_names <= drained_servers:
@@ -646,15 +661,17 @@ def dispatch_loop(
         active = False
         if paths.config_path.is_file():
             execution_paths = project_paths(paths.config_path)
-            for row in monitoring.load_registry_rows(execution_paths):
-                if row.get("registry_kind") != "current":
-                    continue
-                monitored = monitoring.monitor_row(
-                    execution_paths,
-                    row,
-                    timeout,
-                    no_write=False,
-                )
+            rows = [
+                row
+                for row in monitoring.load_registry_rows(execution_paths)
+                if row.get("registry_kind") == "current"
+            ]
+            for monitored in monitoring.monitor_rows(
+                execution_paths,
+                rows,
+                timeout,
+                no_write=False,
+            ):
                 if monitored.get("authoritative_status") not in TERMINAL_STATUSES:
                     active = True
         while True:
