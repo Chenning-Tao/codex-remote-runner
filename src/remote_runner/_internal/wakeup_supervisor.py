@@ -15,6 +15,10 @@ from .wakeup import WakeupPaths
 LAUNCHD_LABEL = "com.openai.codex-remote-runner-wakeup"
 
 
+def _is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
 def launch_agent_path(home: Path | None = None) -> Path:
     return (home or Path.home()) / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 
@@ -60,7 +64,7 @@ def _run_launchctl(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 def supervisor_status(paths: WakeupPaths) -> dict[str, Any]:
     plist_path = launch_agent_path()
-    available = sys.platform == "darwin"
+    available = _is_macos()
     service_loaded = False
     if available:
         service_loaded = _run_launchctl("print", _service_target()).returncode == 0
@@ -110,7 +114,7 @@ def _write_plist_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def install(paths: WakeupPaths) -> dict[str, Any]:
-    if sys.platform != "darwin":
+    if not _is_macos():
         raise RuntimeError("wakeup restart recovery currently requires macOS launchd")
     paths.root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(paths.root, 0o700)
@@ -149,7 +153,7 @@ def install(paths: WakeupPaths) -> dict[str, Any]:
 
 
 def uninstall(paths: WakeupPaths) -> dict[str, Any]:
-    if sys.platform != "darwin":
+    if not _is_macos():
         raise RuntimeError("wakeup restart recovery currently requires macOS launchd")
     plist_path = launch_agent_path()
     status = supervisor_status(paths)
