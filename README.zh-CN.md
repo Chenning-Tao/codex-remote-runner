@@ -42,7 +42,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.2.0'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.3.0'
 remote-runner --help
 ```
 
@@ -83,7 +83,7 @@ Remote Runner 使用两个 YAML 文件：
 remote-runner web --project-config /absolute/path/to/.remote-runner.yaml
 ```
 
-该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示与 TUI 相同的 controller snapshot。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置；目前唯一会修改 controller 状态的网页操作，是在详情栏明确确认后停止一个精确的排队中或运行中任务。
+该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示与 TUI 相同的 controller snapshot。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置。详情栏可以停止一个精确的排队中或运行中任务，也可以修改排队任务的优先级和可用服务器；如果新选择的兼容服务器尚未准备，Web 进程会先为任务的精确 revision 完成准备，再启用该服务器。队列写操作使用 controller revision 和有时限的准备租约，旧快照修改或已经进入调度的任务会被拒绝。
 
 ## 运行
 

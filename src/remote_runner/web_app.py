@@ -26,6 +26,7 @@ from ._internal.execution_registry import (
     resolve_project_config,
     validate_current_run_id,
 )
+from ._internal.queue_control import QueuePreparationError, request_queue_update
 from ._internal.stopping import request_stop
 
 
@@ -34,6 +35,7 @@ DEFAULT_WEB_PORT = 8765
 STATIC_ROOT = Path(__file__).with_name("web_static")
 SnapshotQuery = Callable[[argparse.Namespace], dict[str, Any]]
 StopQuery = Callable[[argparse.Namespace], dict[str, Any]]
+QueueUpdateQuery = Callable[[argparse.Namespace, str, dict[str, Any]], dict[str, Any]]
 
 
 def _concise_controller_error(exc: Exception) -> str:
@@ -217,6 +219,7 @@ def create_app(
     static_root: Path = STATIC_ROOT,
     manage_probe: bool = True,
     stop_query: StopQuery = request_stop,
+    queue_update_query: QueueUpdateQuery = request_queue_update,
 ) -> Starlette:
     if not (static_root / "index.html").is_file():
         raise RuntimeError(
@@ -291,6 +294,98 @@ def create_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    async def queue_update_endpoint(request: Request) -> Response:
+        if request.headers.get("x-remote-runner-action") != "update-queue":
+            return JSONResponse(
+                {"error": "missing queue update action header"}, status_code=403
+            )
+        content_type = (
+            request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        )
+        if content_type != "application/json":
+            return JSONResponse(
+                {"error": "queue update request must use application/json"},
+                status_code=415,
+            )
+        run_id = request.path_params["run_id"]
+        try:
+            validate_current_run_id(run_id)
+            payload = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        allowed = {
+            "run_id",
+            "expected_revision",
+            "queue_priority",
+            "eligible_servers",
+            "move",
+        }
+        if (
+            not isinstance(payload, dict)
+            or set(payload) - allowed
+            or payload.get("run_id") != run_id
+            or isinstance(payload.get("expected_revision"), bool)
+            or not isinstance(payload.get("expected_revision"), int)
+            or not any(
+                field in payload
+                for field in ("queue_priority", "eligible_servers", "move")
+            )
+        ):
+            return JSONResponse(
+                {"error": "queue update request is invalid"}, status_code=400
+            )
+        controller_payload = dict(payload)
+        controller_payload.pop("run_id")
+        update_args = argparse.Namespace(**vars(probe.args))
+        try:
+            result = await asyncio.to_thread(
+                queue_update_query,
+                update_args,
+                run_id,
+                controller_payload,
+            )
+        except QueuePreparationError as exc:
+            await probe.probe_once()
+            return JSONResponse(
+                {"error": "queue_preparation_failed", "detail": str(exc)},
+                status_code=409,
+                headers={"Cache-Control": "no-store"},
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            detail = _concise_controller_error(exc)
+            if detail.startswith("queued run does not exist:"):
+                await probe.probe_once()
+                return JSONResponse(
+                    {"error": "queue_not_found"},
+                    status_code=404,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if detail == "queued state revision conflict" or detail.endswith(
+                "placement update in progress"
+            ):
+                await probe.probe_once()
+                return JSONResponse(
+                    {"error": "queue_conflict"},
+                    status_code=409,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if detail.endswith(", not editable"):
+                await probe.probe_once()
+                return JSONResponse(
+                    {"error": "queue_not_editable"},
+                    status_code=409,
+                    headers={"Cache-Control": "no-store"},
+                )
+            return JSONResponse(
+                {"error": "invalid_queue_update", "detail": detail},
+                status_code=400,
+            )
+        await probe.probe_once()
+        return JSONResponse(
+            {"status": "updated", "run_id": run_id, "result": result},
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def events_endpoint(request: Request) -> Response:
         async def stream() -> AsyncIterator[str]:
             sequence = -1
@@ -317,6 +412,11 @@ def create_app(
             Route("/api/snapshot", snapshot_endpoint),
             Route("/api/events", events_endpoint),
             Route("/api/runs/{run_id:str}/stop", stop_endpoint, methods=["POST"]),
+            Route(
+                "/api/queue/{run_id:str}",
+                queue_update_endpoint,
+                methods=["PATCH"],
+            ),
             Mount("/", StaticFiles(directory=static_root, html=True), name="web"),
         ],
         lifespan=lifespan,

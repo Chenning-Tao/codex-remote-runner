@@ -45,7 +45,14 @@ def validate_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
         names.add(name)
         enabled = raw.get("enabled")
         auto_select = raw.get("auto_select")
-        if not isinstance(enabled, bool) or not isinstance(auto_select, bool):
+        testing_enabled = raw.get("testing_enabled")
+        output_root_configured = raw.get("output_root_configured")
+        if (
+            not isinstance(enabled, bool)
+            or not isinstance(auto_select, bool)
+            or not isinstance(testing_enabled, bool)
+            or not isinstance(output_root_configured, bool)
+        ):
             raise ValueError("dashboard server enablement fields must be boolean")
         endpoints_raw = raw.get("endpoints")
         if not isinstance(endpoints_raw, list):
@@ -70,6 +77,8 @@ def validate_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "name": name,
                 "enabled": enabled,
                 "auto_select": auto_select,
+                "testing_enabled": testing_enabled,
+                "output_root_configured": output_root_configured,
                 "python": _text(raw.get("python"), "python"),
                 "configured_cores": _optional_non_negative_int(
                     raw.get("configured_cores"), "configured_cores"
@@ -92,6 +101,8 @@ def _probe_server(server: dict[str, Any], timeout: int) -> dict[str, Any]:
             "name",
             "enabled",
             "auto_select",
+            "testing_enabled",
+            "output_root_configured",
             "configured_cores",
             "test_slots",
         )

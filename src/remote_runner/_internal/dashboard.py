@@ -47,6 +47,8 @@ def build_server_inventory(
             "python": runtime.python,
             "configured_cores": None,
             "test_slots": 0,
+            "testing_enabled": name in config.scheduling.testing_servers,
+            "output_root_configured": runtime.output_root is not None,
             "endpoints": [],
         }
         if raw is None:

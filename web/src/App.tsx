@@ -80,13 +80,15 @@ function queueMatches(entry: QueueEntry, query: string): boolean {
 }
 
 export default function App() {
-  const { document, connection, initialError, reconnect, stopRun } = useDashboard();
+  const { document, connection, initialError, reconnect, stopRun, updateQueue } = useDashboard();
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") ?? "");
   const [priority, setPriority] = useState<PriorityFilter>(initialPriority);
   const [mobileView, setMobileView] = useState<MobileView>(initialMobileView);
   const [queuePage, setQueuePage] = useState(initialQueuePage);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [now, setNow] = useState(Date.now());
+  const [mutatingRunId, setMutatingRunId] = useState<string | null>(null);
+  const [queueActionError, setQueueActionError] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -129,6 +131,30 @@ export default function App() {
     (currentQueuePage - 1) * QUEUE_PAGE_SIZE,
     currentQueuePage * QUEUE_PAGE_SIZE,
   );
+  const queueMovement = useMemo(() => {
+    const result = new Map<string, { up: boolean; down: boolean }>();
+    const lanes = new Map<string, QueueEntry[]>();
+    for (const entry of document?.snapshot?.queue ?? []) {
+      if (
+        entry.state.status !== "queued"
+        || entry.state.placement_update
+        || !entry.job.run_id
+      ) continue;
+      const key = `${entry.job.queue_priority ?? "normal"}\0${entry.job.workload_class ?? "standard"}`;
+      const lane = lanes.get(key) ?? [];
+      lane.push(entry);
+      lanes.set(key, lane);
+    }
+    for (const lane of lanes.values()) {
+      lane.forEach((entry, index) => {
+        result.set(entry.job.run_id!, {
+          up: index > 0,
+          down: index < lane.length - 1,
+        });
+      });
+    }
+    return result;
+  }, [document]);
   const drainedServers = useMemo(() => {
     const raw = document?.snapshot?.server_drains?.servers;
     return new Set(Array.isArray(raw) ? raw : Object.keys(raw ?? {}));
@@ -137,6 +163,17 @@ export default function App() {
   useEffect(() => {
     if (document && queuePage !== currentQueuePage) setQueuePage(currentQueuePage);
   }, [currentQueuePage, document, queuePage]);
+
+  useEffect(() => {
+    setSelection((current) => {
+      if (current?.kind !== "queue") return current;
+      const runId = current.value.job.run_id;
+      const refreshed = document?.snapshot?.queue?.find(
+        (entry) => entry.job.run_id === runId,
+      );
+      return refreshed ? { kind: "queue", value: refreshed } : null;
+    });
+  }, [document]);
 
   function changeQueuePage(page: number) {
     setQueuePage(page);
@@ -148,8 +185,29 @@ export default function App() {
     });
   }
 
+  async function moveQueueEntry(entry: QueueEntry, direction: "up" | "down") {
+    const runId = entry.job.run_id;
+    const revision = entry.state.revision;
+    if (!runId || typeof revision !== "number" || mutatingRunId) return;
+    setMutatingRunId(runId);
+    setQueueActionError(null);
+    try {
+      await updateQueue(runId, revision, { move: direction });
+    } catch (error: unknown) {
+      setQueueActionError(error instanceof Error ? error.message : "调整队列顺序失败");
+    } finally {
+      setMutatingRunId(null);
+    }
+  }
+
   const panel = selection ? (
-    <DetailPanel selection={selection} onClose={() => setSelection(null)} onStop={stopRun} />
+    <DetailPanel
+      selection={selection}
+      onClose={() => setSelection(null)}
+      onStop={stopRun}
+      onQueueUpdate={updateQueue}
+      availableServers={document?.snapshot?.servers ?? []}
+    />
   ) : null;
 
   return (
@@ -268,7 +326,24 @@ export default function App() {
                           当前控制器仅返回 {queue.length} / {queuedTotal} 项任务；升级控制器后可查看全部分页。
                         </div>
                       )}
-                      <QueueTable entries={paginatedQueue} now={now} onSelect={setSelection} />
+                      {queueActionError && (
+                        <Alert
+                          isInline
+                          variant="danger"
+                          title="队列顺序修改失败"
+                          className="rr-queue-action-alert"
+                        >
+                          {queueActionError}
+                        </Alert>
+                      )}
+                      <QueueTable
+                        entries={paginatedQueue}
+                        now={now}
+                        onSelect={setSelection}
+                        onMove={moveQueueEntry}
+                        movement={queueMovement}
+                        mutatingRunId={mutatingRunId}
+                      />
                       <QueuePagination
                         page={currentQueuePage}
                         pageCount={queuePageCount}

@@ -14,9 +14,11 @@ from remote_runner._internal.controller.registry import (
     acquire_dispatch_lease,
     controller_paths,
     load_job,
+    reserve_queued_job_update,
     set_server_drained,
     submit_job,
     transition_queued_state,
+    update_queued_job,
 )
 from remote_runner._internal.execution_registry import sha256_bytes, write_yaml
 from remote_runner._internal.worktree import WorktreeResult
@@ -188,7 +190,9 @@ def test_dispatch_recovers_registered_execution_after_controller_restart(
     )
     write_yaml(paths.config_path, {"controller_registry": True})
     monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
-    monkeypatch.setattr(controller_dispatcher, "registry_kind", lambda _paths, _run_id: "current")
+    monkeypatch.setattr(
+        controller_dispatcher, "registry_kind", lambda _paths, _run_id: "current"
+    )
 
     outcome = controller_dispatcher.dispatch_once(paths)
 
@@ -329,6 +333,58 @@ def test_dispatch_selects_urgent_job_ahead_of_older_normal_job(
     assert load_job(paths, RUN_ID)[1]["status"] == "queued"
 
 
+def test_dispatch_skips_job_while_server_preparation_is_reserved(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, job(), now="2026-01-01T00:00:00+00:00")
+    reserve_queued_job_update(
+        paths,
+        RUN_ID,
+        expected_revision=0,
+        requested_servers=["compute-b"],
+        ttl_seconds=60,
+    )
+    second = job()
+    second["run_id"] = "rr-fedcba9876543210"
+    submit_job(paths, second, now="2026-01-01T00:00:01+00:00")
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "probe_server_state",
+        lambda _ssh, _python, _timeout: {
+            "reachable": True,
+            "load5": 0.0,
+            "active_run_ids": (),
+        },
+    )
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "prepare_remote_worktree",
+        lambda **_kwargs: WorktreeResult(
+            "/srv/example/worktrees/" + "a" * 40,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "_register_execution",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
+    monkeypatch.setattr(
+        controller_dispatcher.launch,
+        "launch",
+        lambda *_args, **_kwargs: None,
+    )
+
+    outcome = controller_dispatcher.dispatch_once(paths)
+
+    assert outcome.action == "started"
+    assert outcome.run_id == "rr-fedcba9876543210"
+    assert load_job(paths, RUN_ID)[1]["status"] == "queued"
+
+
 def test_saturated_runner_owned_work_stays_queued(
     tmp_path: Path,
     monkeypatch,
@@ -421,7 +477,9 @@ def test_external_saturation_without_runner_work_still_dispatches(
         lambda _paths, _job, server, **kwargs: recorded.update(server=server, **kwargs),
     )
     monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
-    monkeypatch.setattr(controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
 
     outcome = controller_dispatcher.dispatch_once(paths)
 
@@ -455,7 +513,9 @@ def test_dispatch_prefers_absolute_headroom(tmp_path: Path, monkeypatch) -> None
         lambda _paths, _job, server, **kwargs: selected.update(server=server, **kwargs),
     )
     monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
-    monkeypatch.setattr(controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
 
     outcome = controller_dispatcher.dispatch_once(paths)
 
@@ -463,7 +523,53 @@ def test_dispatch_prefers_absolute_headroom(tmp_path: Path, monkeypatch) -> None
     assert selected["workers"] == 256
 
 
-def test_dispatch_avoids_active_server_before_load5_rises(tmp_path: Path, monkeypatch) -> None:
+def test_dispatch_only_probes_manually_enabled_servers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, job(two_servers=True))
+    update_queued_job(
+        paths,
+        RUN_ID,
+        expected_revision=0,
+        eligible_servers=["archive"],
+    )
+    probed: list[str] = []
+
+    def probe(ssh: str, _python: str, _timeout: int) -> dict[str, object]:
+        probed.append(ssh)
+        return {"reachable": True, "load5": 0.0, "active_run_ids": ()}
+
+    monkeypatch.setattr(controller_dispatcher, "probe_server_state", probe)
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "prepare_remote_worktree",
+        lambda **_kwargs: WorktreeResult(
+            "/srv/example/worktrees/" + "a" * 40,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "_register_execution",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
+
+    outcome = controller_dispatcher.dispatch_once(paths)
+
+    assert outcome.action == "started"
+    assert outcome.server == "archive"
+    assert set(probed) == {"archive"}
+
+
+def test_dispatch_avoids_active_server_before_load5_rises(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = controller_paths(tmp_path / "controller", "example")
     queued = job(two_servers=True)
     queued["output_relpath"] = "validation/result.json"
@@ -492,7 +598,9 @@ def test_dispatch_avoids_active_server_before_load5_rises(tmp_path: Path, monkey
         ),
     )
     monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
-    monkeypatch.setattr(controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
 
     outcome = controller_dispatcher.dispatch_once(paths)
 
@@ -575,9 +683,7 @@ def test_blocked_test_head_backfills_on_unreserved_server(
     def probe(ssh: str, *_args) -> dict[str, object]:
         active = ()
         if ssh == "compute-b":
-            active = (
-                {"run_id": "rr-testing00000000", "workload_class": "test"},
-            )
+            active = ({"run_id": "rr-testing00000000", "workload_class": "test"},)
         return {"reachable": True, "load5": 0.0, "active_runs": active}
 
     monkeypatch.setattr(controller_dispatcher, "probe_server_state", probe)
@@ -596,7 +702,9 @@ def test_blocked_test_head_backfills_on_unreserved_server(
         ),
     )
     monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
-    monkeypatch.setattr(controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
 
     outcome = controller_dispatcher.dispatch_once(paths)
 
@@ -687,7 +795,9 @@ def test_blocked_urgent_job_backfills_normal_on_unreserved_server(
         ),
     )
     monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
-    monkeypatch.setattr(controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
 
     outcome = controller_dispatcher.dispatch_once(paths)
 
@@ -789,9 +899,7 @@ def test_test_pool_uses_another_server_when_one_server_is_full(
     def probe(ssh: str, *_args) -> dict[str, object]:
         active = ()
         if ssh == "compute-b":
-            active = (
-                {"run_id": "rr-testing00000000", "workload_class": "test"},
-            )
+            active = ({"run_id": "rr-testing00000000", "workload_class": "test"},)
         return {"reachable": True, "load5": 0.0, "active_runs": active}
 
     monkeypatch.setattr(controller_dispatcher, "probe_server_state", probe)
@@ -800,9 +908,13 @@ def test_test_pool_uses_another_server_when_one_server_is_full(
         "prepare_remote_worktree",
         lambda **_kwargs: WorktreeResult("/srv/example/worktrees/" + "a" * 40, False),
     )
-    monkeypatch.setattr(controller_dispatcher, "_register_execution", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_dispatcher, "_register_execution", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
-    monkeypatch.setattr(controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
 
     outcome = controller_dispatcher.dispatch_once(paths)
 
@@ -860,12 +972,16 @@ def test_unknown_launch_outcome_stays_reconcilable(tmp_path: Path, monkeypatch) 
         "prepare_remote_worktree",
         lambda **_kwargs: WorktreeResult("/srv/example/worktrees/" + "a" * 40, False),
     )
-    monkeypatch.setattr(controller_dispatcher, "_register_execution", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        controller_dispatcher, "_register_execution", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
 
     def unknown(*_args, **_kwargs) -> None:
         try:
-            raise controller_dispatcher.launch.BootstrapOutcomeUnknown("connection dropped")
+            raise controller_dispatcher.launch.BootstrapOutcomeUnknown(
+                "connection dropped"
+            )
         except controller_dispatcher.launch.BootstrapOutcomeUnknown as exc:
             raise RuntimeError(str(exc)) from exc
 

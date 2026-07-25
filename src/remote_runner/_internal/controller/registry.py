@@ -5,11 +5,13 @@ import fcntl
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -250,7 +252,9 @@ def _load_run_tombstone_unlocked(
         raise ValueError(f"invalid run tombstone replacement policy: {path}")
     for field in ("target_provenance_sha256",):
         value = tombstone.get(field)
-        if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        if not isinstance(value, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", value
+        ):
             raise ValueError(f"invalid run tombstone {field}: {path}")
     replacement_digest = tombstone.get("replacement_provenance_sha256")
     if policy == "replacement" and replacement_digest is None:
@@ -466,8 +470,7 @@ def create_task_tombstone(
         purging_run = _purging_run_for_task_unlocked(paths, identity)
         if purging_run is not None:
             raise RuntimeError(
-                "cannot purge a task while one of its runs is purging: "
-                f"{purging_run}"
+                f"cannot purge a task while one of its runs is purging: {purging_run}"
             )
         tombstone = {
             "schema_version": 1,
@@ -534,6 +537,20 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
         job["queue_priority"] = "normal"
     else:
         job["queue_priority"] = normalize_queue_priority(job["queue_priority"])
+    try:
+        default_queue_position = int(
+            datetime.fromisoformat(str(job["created_at"])).timestamp() * 1_000_000_000
+        )
+    except (OverflowError, ValueError):
+        default_queue_position = 0
+    queue_position = job.get("queue_position", default_queue_position)
+    if (
+        isinstance(queue_position, bool)
+        or not isinstance(queue_position, int)
+        or queue_position < 0
+    ):
+        raise ValueError("queued job queue_position must be a non-negative integer")
+    job["queue_position"] = queue_position
     if "workload_class" not in job:
         job["workload_class"] = "standard"
     else:
@@ -608,6 +625,26 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
         ):
             raise ValueError("queued prepared server test_slots must be non-negative")
         item["test_slots"] = test_slots
+    eligible = job.get("eligible_servers")
+    if eligible is None:
+        eligible = [str(item["name"]) for item in prepared]
+    if not isinstance(eligible, list) or not eligible:
+        raise ValueError("queued job eligible_servers must be a non-empty list")
+    if any(not isinstance(name, str) or not name for name in eligible):
+        raise ValueError("queued job eligible server names must be non-empty strings")
+    if len(set(eligible)) != len(eligible):
+        raise ValueError("queued job eligible_servers must not contain duplicates")
+    unknown = set(eligible) - names
+    if unknown:
+        raise ValueError(
+            "queued job eligible_servers contains an unprepared server: "
+            + ", ".join(sorted(unknown))
+        )
+    job["eligible_servers"] = eligible
+    eligible_servers_locked = job.get("eligible_servers_locked", False)
+    if not isinstance(eligible_servers_locked, bool):
+        raise ValueError("queued job eligible_servers_locked must be boolean")
+    job["eligible_servers_locked"] = eligible_servers_locked
     if job["workload_class"] == "test":
         if any(int(server["test_slots"]) <= 0 for server in prepared):
             raise ValueError("queued test workload requires positive test_slots")
@@ -670,6 +707,33 @@ def _validate_state(state: dict[str, Any], run_id: str) -> dict[str, Any]:
     revision = state.get("revision")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
         raise ValueError("queued state revision must be non-negative")
+    placement_update = state.get("placement_update")
+    if placement_update is not None:
+        if not isinstance(placement_update, dict):
+            raise ValueError("queued state placement_update must be a mapping")
+        token_sha256 = placement_update.get("token_sha256")
+        expires_at = placement_update.get("expires_at")
+        requested_servers = placement_update.get("requested_servers")
+        if not isinstance(token_sha256, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", token_sha256
+        ):
+            raise ValueError("queued state placement update token is invalid")
+        if (
+            isinstance(expires_at, bool)
+            or not isinstance(expires_at, (int, float))
+            or expires_at <= 0
+        ):
+            raise ValueError("queued state placement update expiry is invalid")
+        if (
+            not isinstance(requested_servers, list)
+            or not requested_servers
+            or any(
+                not isinstance(name, str) or not PROJECT_ID_RE.fullmatch(name)
+                for name in requested_servers
+            )
+            or len(set(requested_servers)) != len(requested_servers)
+        ):
+            raise ValueError("queued state placement update servers are invalid")
     return state
 
 
@@ -688,6 +752,7 @@ def submit_job(
             "run_id": run_id,
             "project_id": paths.project_id,
             "created_at": created_at,
+            "queue_position": time.time_ns(),
         }
     )
     _validate_job(job)
@@ -706,8 +771,7 @@ def submit_job(
         tombstone = _load_task_tombstone_unlocked(paths, job["task_id"])
         if tombstone is not None:
             raise ValueError(
-                "task has been purged and cannot accept new runs: "
-                f"{job['task_id']}"
+                f"task has been purged and cannot accept new runs: {job['task_id']}"
             )
         if _load_run_tombstone_unlocked(paths, run_id) is not None:
             raise ValueError(f"run id has been purged and cannot be reused: {run_id}")
@@ -767,10 +831,307 @@ def list_queued(paths: ControllerPaths) -> list[tuple[dict[str, Any], dict[str, 
         rows,
         key=lambda item: (
             -queue_priority_rank(item[0]["queue_priority"]),
+            int(item[0]["queue_position"]),
             str(item[0]["created_at"]),
             str(item[0]["run_id"]),
         ),
     )
+
+
+def placement_update_active(
+    state: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    placement_update = state.get("placement_update")
+    return (
+        isinstance(placement_update, dict)
+        and float(placement_update.get("expires_at", 0)) > (time.time() if now is None else now)
+    )
+
+
+def _placement_token_matches(state: dict[str, Any], token: str) -> bool:
+    placement_update = state.get("placement_update")
+    return isinstance(placement_update, dict) and placement_update.get(
+        "token_sha256"
+    ) == sha256_bytes(token.encode("utf-8"))
+
+
+def reserve_queued_job_update(
+    paths: ControllerPaths,
+    run_id: str,
+    *,
+    expected_revision: int,
+    requested_servers: list[str],
+    ttl_seconds: int,
+    now: float | None = None,
+) -> dict[str, Any]:
+    validated_run_id = validate_current_run_id(run_id)
+    if (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 0
+    ):
+        raise ValueError("queue update expected_revision must be non-negative")
+    if (
+        not isinstance(requested_servers, list)
+        or not requested_servers
+        or any(
+            not isinstance(name, str) or not PROJECT_ID_RE.fullmatch(name)
+            for name in requested_servers
+        )
+        or len(set(requested_servers)) != len(requested_servers)
+    ):
+        raise ValueError("queue update requested_servers are invalid")
+    if (
+        isinstance(ttl_seconds, bool)
+        or not isinstance(ttl_seconds, int)
+        or not 1 <= ttl_seconds <= 3600
+    ):
+        raise ValueError("queue update ttl_seconds must be between 1 and 3600")
+
+    with _queue_lock(paths):
+        if not _queue_entry_dir(paths, validated_run_id).is_dir():
+            raise FileNotFoundError(f"queued run does not exist: {validated_run_id}")
+        _job, state = load_job(paths, validated_run_id)
+        if state["status"] != "queued":
+            raise ValueError(
+                f"queued run {validated_run_id} is {state['status']}, not editable"
+            )
+        if int(state["revision"]) != expected_revision:
+            raise RuntimeError("queued state revision conflict")
+        timestamp = time.time() if now is None else now
+        if placement_update_active(state, now=timestamp):
+            raise RuntimeError("queued run already has a placement update in progress")
+
+        token = secrets.token_urlsafe(32)
+        updated = {
+            **state,
+            "revision": expected_revision + 1,
+            "updated_at": utc_now(),
+            "placement_update": {
+                "token_sha256": sha256_bytes(token.encode("utf-8")),
+                "expires_at": timestamp + ttl_seconds,
+                "requested_servers": list(requested_servers),
+            },
+        }
+        _validate_state(updated, validated_run_id)
+        write_yaml(_queue_entry_dir(paths, validated_run_id) / "state.yaml", updated)
+        return {"token": token, "state": updated}
+
+
+def release_queued_job_update(
+    paths: ControllerPaths,
+    run_id: str,
+    *,
+    token: str,
+) -> dict[str, Any]:
+    validated_run_id = validate_current_run_id(run_id)
+    if not isinstance(token, str) or not token:
+        raise ValueError("queue update token must be a non-empty string")
+    with _queue_lock(paths):
+        _job, state = load_job(paths, validated_run_id)
+        if state.get("placement_update") is None:
+            return {"changed": False, "state": state}
+        if not _placement_token_matches(state, token):
+            raise RuntimeError("queue update reservation token mismatch")
+        updated = {
+            key: value for key, value in state.items() if key != "placement_update"
+        }
+        updated.update(
+            {
+                "revision": int(state["revision"]) + 1,
+                "updated_at": utc_now(),
+            }
+        )
+        _validate_state(updated, validated_run_id)
+        write_yaml(_queue_entry_dir(paths, validated_run_id) / "state.yaml", updated)
+        return {"changed": True, "state": updated}
+
+
+def eligible_prepared_servers(job: dict[str, Any]) -> list[dict[str, Any]]:
+    eligible = set(
+        job.get("eligible_servers")
+        or [str(server["name"]) for server in job["prepared_servers"]]
+    )
+    return [server for server in job["prepared_servers"] if server["name"] in eligible]
+
+
+def update_queued_job(
+    paths: ControllerPaths,
+    run_id: str,
+    *,
+    expected_revision: int,
+    queue_priority: str | None = None,
+    eligible_servers: list[str] | None = None,
+    move: str | None = None,
+    placement_token: str | None = None,
+) -> dict[str, Any]:
+    validated_run_id = validate_current_run_id(run_id)
+    if (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 0
+    ):
+        raise ValueError("queued job expected_revision must be a non-negative integer")
+    if queue_priority is not None:
+        queue_priority = normalize_queue_priority(queue_priority)
+    if move not in {None, "up", "down"}:
+        raise ValueError("queued job move must be 'up' or 'down'")
+    if queue_priority is None and eligible_servers is None and move is None:
+        raise ValueError("queued job update does not contain any changes")
+
+    with _queue_lock(paths):
+        if not _queue_entry_dir(paths, validated_run_id).is_dir():
+            raise FileNotFoundError(f"queued run does not exist: {validated_run_id}")
+        job, state = load_job(paths, validated_run_id)
+        if state["status"] != "queued":
+            raise ValueError(
+                f"queued run {validated_run_id} is {state['status']}, not editable"
+            )
+        if int(state["revision"]) != expected_revision:
+            raise RuntimeError("queued state revision conflict")
+        has_active_reservation = placement_update_active(state)
+        if has_active_reservation and (
+            placement_token is None or not _placement_token_matches(state, placement_token)
+        ):
+            raise RuntimeError("queued run has a placement update in progress")
+        if placement_token is not None and not has_active_reservation:
+            raise RuntimeError("queue update reservation expired")
+
+        queued_rows = [
+            row
+            for row in list_jobs(paths, statuses={"queued"})
+            if _load_task_tombstone_unlocked(paths, row[0]["task_id"]) is None
+        ]
+        updated_job = dict(job)
+        changed = has_active_reservation
+
+        if eligible_servers is not None:
+            if not isinstance(eligible_servers, list) or not eligible_servers:
+                raise ValueError("queued job eligible_servers must be a non-empty list")
+            if any(not isinstance(name, str) or not name for name in eligible_servers):
+                raise ValueError(
+                    "queued job eligible server names must be non-empty strings"
+                )
+            if len(set(eligible_servers)) != len(eligible_servers):
+                raise ValueError(
+                    "queued job eligible_servers must not contain duplicates"
+                )
+            supported = {str(server["name"]) for server in job["prepared_servers"]}
+            unknown = set(eligible_servers) - supported
+            if unknown:
+                raise ValueError(
+                    "queued job eligible_servers contains an unprepared server: "
+                    + ", ".join(sorted(unknown))
+                )
+            ordered = [
+                str(server["name"])
+                for server in job["prepared_servers"]
+                if server["name"] in set(eligible_servers)
+            ]
+            if ordered != job["eligible_servers"] or not job["eligible_servers_locked"]:
+                updated_job["eligible_servers"] = ordered
+                updated_job["eligible_servers_locked"] = True
+                changed = True
+
+        if queue_priority is not None and queue_priority != job["queue_priority"]:
+            updated_job["queue_priority"] = queue_priority
+            destination = [
+                candidate
+                for candidate, _candidate_state in queued_rows
+                if candidate["run_id"] != validated_run_id
+                and candidate["workload_class"] == job["workload_class"]
+                and candidate["queue_priority"] == queue_priority
+            ]
+            updated_job["queue_position"] = (
+                max(
+                    (int(candidate["queue_position"]) for candidate in destination),
+                    default=0,
+                )
+                + 1024
+            )
+            changed = True
+
+        jobs_to_write: dict[str, dict[str, Any]] = {}
+        if move is not None:
+            lane = []
+            for candidate, _candidate_state in queued_rows:
+                current = (
+                    updated_job
+                    if candidate["run_id"] == validated_run_id
+                    else candidate
+                )
+                if (
+                    current["workload_class"] == updated_job["workload_class"]
+                    and current["queue_priority"] == updated_job["queue_priority"]
+                ):
+                    lane.append(current)
+            lane.sort(
+                key=lambda candidate: (
+                    int(candidate["queue_position"]),
+                    str(candidate["created_at"]),
+                    str(candidate["run_id"]),
+                )
+            )
+            index = next(
+                i
+                for i, candidate in enumerate(lane)
+                if candidate["run_id"] == validated_run_id
+            )
+            destination_index = index - 1 if move == "up" else index + 1
+            if 0 <= destination_index < len(lane):
+                neighbor = lane[destination_index]
+                target_position = int(updated_job["queue_position"])
+                neighbor_position = int(neighbor["queue_position"])
+                if target_position == neighbor_position:
+                    base = min(int(candidate["queue_position"]) for candidate in lane)
+                    for position, candidate in enumerate(lane):
+                        positioned = {
+                            **candidate,
+                            "queue_position": base + position * 2,
+                        }
+                        jobs_to_write[str(positioned["run_id"])] = positioned
+                    updated_job = jobs_to_write[validated_run_id]
+                    neighbor = jobs_to_write[str(neighbor["run_id"])]
+                    target_position = int(updated_job["queue_position"])
+                    neighbor_position = int(neighbor["queue_position"])
+                updated_job["queue_position"] = neighbor_position
+                moved_neighbor = {**neighbor, "queue_position": target_position}
+                jobs_to_write[str(moved_neighbor["run_id"])] = moved_neighbor
+                changed = True
+
+        if not changed:
+            return {"changed": False, "job": job, "state": state}
+
+        _validate_job(updated_job)
+        jobs_to_write[validated_run_id] = updated_job
+        for changed_run_id, changed_job in jobs_to_write.items():
+            _validate_job(changed_job)
+            write_yaml(
+                _queue_entry_dir(paths, changed_run_id) / "job.yaml", changed_job
+            )
+
+        updated_at = utc_now()
+        updated_state = state
+        # Invalidate any dispatcher selection made from the previous ordering.
+        for candidate, candidate_state in queued_rows:
+            bumped = {
+                **candidate_state,
+                "revision": int(candidate_state["revision"]) + 1,
+                "updated_at": updated_at,
+            }
+            if candidate["run_id"] == validated_run_id and has_active_reservation:
+                bumped.pop("placement_update", None)
+            _validate_state(bumped, str(candidate["run_id"]))
+            write_yaml(
+                _queue_entry_dir(paths, str(candidate["run_id"])) / "state.yaml",
+                bumped,
+            )
+            if candidate["run_id"] == validated_run_id:
+                updated_state = bumped
+
+        return {"changed": True, "job": updated_job, "state": updated_state}
 
 
 def list_queued_all(paths: ControllerPaths) -> list[dict[str, Any]]:
@@ -820,6 +1181,11 @@ def extend_queued_all(
                     {"run_id": run_id, "status": "skipped", "reason": state["status"]}
                 )
                 continue
+            if placement_update_active(state):
+                results.append(
+                    {"run_id": run_id, "status": "skipped", "reason": "updating"}
+                )
+                continue
             if job["server_scope"] != "all" or job["revision"] != revision:
                 results.append(
                     {"run_id": run_id, "status": "skipped", "reason": "job changed"}
@@ -838,6 +1204,10 @@ def extend_queued_all(
                 continue
             updated = dict(job)
             updated["prepared_servers"] = merged
+            if not job["eligible_servers_locked"]:
+                updated["eligible_servers"] = [
+                    str(server["name"]) for server in merged
+                ]
             _validate_job(updated)
             write_yaml(_queue_entry_dir(paths, run_id) / "job.yaml", updated)
             results.append(
@@ -856,6 +1226,7 @@ def extend_queued_job(
     *,
     revision: str,
     prepared_servers: list[dict[str, Any]],
+    placement_token: str | None = None,
 ) -> dict[str, Any]:
     validate_current_run_id(run_id)
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -871,6 +1242,13 @@ def extend_queued_job(
             raise ValueError(
                 f"queued run {run_id} is {state['status']}, not eligible for extension"
             )
+        active_update = placement_update_active(state)
+        if active_update and (
+            placement_token is None or not _placement_token_matches(state, placement_token)
+        ):
+            raise RuntimeError("queued run has a placement update in progress")
+        if placement_token is not None and not active_update:
+            raise RuntimeError("queue update reservation expired")
         if job["revision"] != revision:
             raise ValueError(f"queued run {run_id} revision changed")
         existing = {str(server["name"]) for server in job["prepared_servers"]}
@@ -891,6 +1269,8 @@ def extend_queued_job(
 
         updated = dict(job)
         updated["prepared_servers"] = merged
+        if not job["eligible_servers_locked"]:
+            updated["eligible_servers"] = [str(server["name"]) for server in merged]
         _validate_job(updated)
         write_yaml(_queue_entry_dir(paths, run_id) / "job.yaml", updated)
         return {
@@ -1014,9 +1394,10 @@ def transition_queued_state(
         if int(state["revision"]) != expected_revision:
             raise RuntimeError("queued state revision conflict")
         current = str(state["status"])
-        if status == "dispatching" and _load_task_tombstone_unlocked(
-            paths, job["task_id"]
-        ) is not None:
+        if (
+            status == "dispatching"
+            and _load_task_tombstone_unlocked(paths, job["task_id"]) is not None
+        ):
             raise RuntimeError("cannot dispatch a tombstoned task")
         if status != current and status not in allowed[current]:
             raise ValueError(f"illegal queued state transition {current} -> {status}")
@@ -1081,9 +1462,8 @@ def _load_drained_servers_unlocked(
         requested_by_project = metadata.get("requested_by_project")
         if not isinstance(drained_at, str) or not drained_at:
             raise ValueError(f"drained-server metadata for {name!r} lacks drained_at")
-        if (
-            not isinstance(requested_by_project, str)
-            or not PROJECT_ID_RE.fullmatch(requested_by_project)
+        if not isinstance(requested_by_project, str) or not PROJECT_ID_RE.fullmatch(
+            requested_by_project
         ):
             raise ValueError(
                 f"drained-server metadata for {name!r} has invalid project identity"

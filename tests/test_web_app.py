@@ -6,6 +6,7 @@ from pathlib import Path
 
 from starlette.testclient import TestClient
 
+from remote_runner._internal.queue_control import QueuePreparationError
 from remote_runner.web_app import DashboardProbe, create_app
 
 
@@ -260,3 +261,178 @@ def test_web_stop_refreshes_stale_snapshot_when_run_no_longer_exists(
     assert response.json() == {"error": "run_not_found"}
     assert response.headers["cache-control"] == "no-store"
     assert probe.document()["snapshot"] == {"servers": [], "queue": []}
+
+
+def test_web_queue_update_requires_revision_and_refreshes_snapshot(
+    tmp_path: Path,
+) -> None:
+    snapshots = iter(
+        (
+            {
+                "servers": [],
+                "queue": [
+                    {
+                        "job": {
+                            "run_id": "rr-0123456789abcdef",
+                            "queue_priority": "normal",
+                        },
+                        "state": {"status": "queued", "revision": 3},
+                    }
+                ],
+            },
+            {
+                "servers": [],
+                "queue": [
+                    {
+                        "job": {
+                            "run_id": "rr-0123456789abcdef",
+                            "queue_priority": "urgent",
+                        },
+                        "state": {"status": "queued", "revision": 4},
+                    }
+                ],
+            },
+        )
+    )
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: next(snapshots),
+    )
+    asyncio.run(probe.probe_once())
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def update_query(
+        _args: argparse.Namespace,
+        run_id: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        calls.append((run_id, payload))
+        return {"changed": True}
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        queue_update_query=update_query,
+    )
+
+    with TestClient(app) as client:
+        rejected = client.patch(
+            "/api/queue/rr-0123456789abcdef",
+            json={
+                "run_id": "rr-0123456789abcdef",
+                "expected_revision": 3,
+                "queue_priority": "urgent",
+            },
+        )
+        assert rejected.status_code == 403
+
+        response = client.patch(
+            "/api/queue/rr-0123456789abcdef",
+            headers={"x-remote-runner-action": "update-queue"},
+            json={
+                "run_id": "rr-0123456789abcdef",
+                "expected_revision": 3,
+                "queue_priority": "urgent",
+                "eligible_servers": ["compute-b"],
+            },
+        )
+
+    assert response.status_code == 200
+    assert calls == [
+        (
+            "rr-0123456789abcdef",
+            {
+                "expected_revision": 3,
+                "queue_priority": "urgent",
+                "eligible_servers": ["compute-b"],
+            },
+        )
+    ]
+    assert probe.document()["snapshot"]["queue"][0]["job"]["queue_priority"] == "urgent"
+
+
+def test_web_queue_update_reports_conflict_and_refreshes_snapshot(
+    tmp_path: Path,
+) -> None:
+    snapshots = iter(
+        (
+            {"servers": [], "queue": [{"job": {"run_id": "rr-0123456789abcdef"}}]},
+            {"servers": [], "queue": []},
+        )
+    )
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: next(snapshots),
+    )
+    asyncio.run(probe.probe_once())
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        queue_update_query=lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("queued state revision conflict")
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/queue/rr-0123456789abcdef",
+            headers={"x-remote-runner-action": "update-queue"},
+            json={
+                "run_id": "rr-0123456789abcdef",
+                "expected_revision": 2,
+                "move": "up",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "queue_conflict"}
+    assert probe.document()["snapshot"] == {"servers": [], "queue": []}
+
+
+def test_web_queue_update_reports_server_preparation_failure(
+    tmp_path: Path,
+) -> None:
+    snapshots = iter(
+        (
+            {"servers": [], "queue": [{"job": {"run_id": "rr-0123456789abcdef"}}]},
+            {"servers": [], "queue": [{"job": {"run_id": "rr-0123456789abcdef"}}]},
+        )
+    )
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: next(snapshots),
+    )
+    asyncio.run(probe.probe_once())
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        queue_update_query=lambda *_args: (_ for _ in ()).throw(
+            QueuePreparationError("compute-b: push failed")
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/queue/rr-0123456789abcdef",
+            headers={"x-remote-runner-action": "update-queue"},
+            json={
+                "run_id": "rr-0123456789abcdef",
+                "expected_revision": 2,
+                "eligible_servers": ["compute-b"],
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "queue_preparation_failed",
+        "detail": "compute-b: push failed",
+    }

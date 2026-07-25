@@ -42,10 +42,14 @@ from .registry import (
     list_queued,
     list_queued_all,
     load_job,
+    placement_update_active,
     purge_queue_entry,
+    release_queued_job_update,
+    reserve_queued_job_update,
     set_server_drained,
     submit_job,
     transition_queued_state,
+    update_queued_job,
     extend_queued_all,
     extend_queued_job,
 )
@@ -202,14 +206,109 @@ def extend_job(args: argparse.Namespace) -> dict[str, Any]:
     payload = _read_object("queued job extension")
     revision = payload.get("revision")
     prepared_servers = payload.get("prepared_servers")
+    placement_token = payload.get("placement_token")
     if not isinstance(revision, str) or not isinstance(prepared_servers, list):
         raise ValueError("queued job extension requires revision and prepared_servers")
+    if placement_token is not None and not isinstance(placement_token, str):
+        raise ValueError("queued job extension placement_token must be a string")
     result = extend_queued_job(
         paths,
         args.run_id,
         revision=revision,
         prepared_servers=prepared_servers,
+        placement_token=placement_token,
     )
+    dispatcher_started = ensure_dispatcher(
+        controller_root=args.controller_root,
+        project_id=args.project_id,
+        timeout=args.timeout,
+        interval=args.interval,
+    )
+    return {**result, "dispatcher_started": dispatcher_started}
+
+
+def edit_queued_job(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    payload = _read_object("queued job update")
+    allowed = {
+        "expected_revision",
+        "queue_priority",
+        "eligible_servers",
+        "move",
+        "placement_token",
+    }
+    unexpected = set(payload) - allowed
+    if unexpected:
+        raise ValueError(
+            "queued job update contains unexpected fields: "
+            + ", ".join(sorted(unexpected))
+        )
+    expected_revision = payload.get("expected_revision")
+    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+        raise ValueError("queued job update requires an integer expected_revision")
+    queue_priority = payload.get("queue_priority")
+    if queue_priority is not None and not isinstance(queue_priority, str):
+        raise ValueError("queued job queue_priority must be a string")
+    eligible_servers = payload.get("eligible_servers")
+    if eligible_servers is not None and not isinstance(eligible_servers, list):
+        raise ValueError("queued job eligible_servers must be a list")
+    move = payload.get("move")
+    if move is not None and not isinstance(move, str):
+        raise ValueError("queued job move must be a string")
+    placement_token = payload.get("placement_token")
+    if placement_token is not None and not isinstance(placement_token, str):
+        raise ValueError("queued job placement_token must be a string")
+    result = update_queued_job(
+        paths,
+        args.run_id,
+        expected_revision=expected_revision,
+        queue_priority=queue_priority,
+        eligible_servers=eligible_servers,
+        move=move,
+        placement_token=placement_token,
+    )
+    dispatcher_started = False
+    if result["changed"]:
+        dispatcher_started = ensure_dispatcher(
+            controller_root=args.controller_root,
+            project_id=args.project_id,
+            timeout=args.timeout,
+            interval=args.interval,
+        )
+    return {
+        "changed": result["changed"],
+        "job": _compact_queue_item(result["job"], result["state"])["job"],
+        "state": result["state"],
+        "dispatcher_started": dispatcher_started,
+    }
+
+
+def reserve_queue_update(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    payload = _read_object("queue update reservation")
+    if set(payload) != {"expected_revision", "requested_servers", "ttl_seconds"}:
+        raise ValueError("queue update reservation payload is invalid")
+    result = reserve_queued_job_update(
+        paths,
+        args.run_id,
+        expected_revision=payload["expected_revision"],
+        requested_servers=payload["requested_servers"],
+        ttl_seconds=payload["ttl_seconds"],
+    )
+    return {
+        "token": result["token"],
+        "state": _compact_queue_item(load_job(paths, args.run_id)[0], result["state"])[
+            "state"
+        ],
+    }
+
+
+def release_queue_update(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    payload = _read_object("queue update release")
+    if set(payload) != {"token"} or not isinstance(payload.get("token"), str):
+        raise ValueError("queue update release payload is invalid")
+    result = release_queued_job_update(paths, args.run_id, token=payload["token"])
     dispatcher_started = ensure_dispatcher(
         controller_root=args.controller_root,
         project_id=args.project_id,
@@ -277,13 +376,41 @@ def _compact_queue_item(
             "result_intent",
             "workload_class",
             "queue_priority",
+            "queue_position",
+            "minimum_cores",
             "server_scope",
             "created_at",
         )
         if field in job
     }
-    compact_job["eligible_servers"] = eligible_servers
-    return {"job": compact_job, "state": state}
+    compact_job["supported_servers"] = eligible_servers
+    selected = job.get("eligible_servers")
+    compact_job["eligible_servers"] = (
+        [str(name) for name in selected]
+        if isinstance(selected, list)
+        else eligible_servers
+    )
+    compact_job["portable_output"] = job.get("output_path") is None
+    compact_job["requires_output_root"] = job.get("output_relpath") is not None
+    compact_state = {
+        field: state[field]
+        for field in (
+            "status",
+            "revision",
+            "created_at",
+            "updated_at",
+            "error",
+        )
+        if field in state
+    }
+    placement_update = state.get("placement_update")
+    if isinstance(placement_update, dict) and placement_update_active(state):
+        compact_state["placement_update"] = {
+            "status": "preparing",
+            "expires_at": placement_update.get("expires_at"),
+            "requested_servers": placement_update.get("requested_servers"),
+        }
+    return {"job": compact_job, "state": compact_state}
 
 
 def _compact_execution(row: dict[str, Any]) -> dict[str, Any]:
@@ -400,9 +527,7 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
         rows = all_rows
         if task_selector is not None:
             rows = [
-                row
-                for row in rows
-                if _task_key(row.get("task_id")) == task_selector
+                row for row in rows if _task_key(row.get("task_id")) == task_selector
             ]
         elif overview:
             rows = [row for row in rows if _active_execution(row)]
@@ -554,10 +679,7 @@ def _wait_runs_request() -> tuple[int, list[tuple[str, str | None]]]:
         raise ValueError(
             "wait-runs request must contain schema_version, wait_seconds, and runs"
         )
-    if (
-        isinstance(payload["schema_version"], bool)
-        or payload["schema_version"] != 1
-    ):
+    if isinstance(payload["schema_version"], bool) or payload["schema_version"] != 1:
         raise ValueError("unsupported wait-runs request schema")
     wait_seconds = payload["wait_seconds"]
     if (
@@ -584,8 +706,7 @@ def _wait_runs_request() -> tuple[int, list[tuple[str, str | None]]]:
         seen.add(run_id)
         after_etag = raw["after_etag"]
         if after_etag is not None and (
-            not isinstance(after_etag, str)
-            or ETAG_RE.fullmatch(after_etag) is None
+            not isinstance(after_etag, str) or ETAG_RE.fullmatch(after_etag) is None
         ):
             raise ValueError("after_etag must be null or a remote-runner run-view etag")
         requests.append((run_id, after_etag))
@@ -887,6 +1008,12 @@ def build_parser() -> argparse.ArgumentParser:
     queued_job_parser.add_argument("--run-id", required=True)
     extend_job_parser = subparsers.add_parser("extend-job")
     extend_job_parser.add_argument("--run-id", required=True)
+    edit_job_parser = subparsers.add_parser("update-queued-job")
+    edit_job_parser.add_argument("--run-id", required=True)
+    reserve_job_parser = subparsers.add_parser("reserve-queue-update")
+    reserve_job_parser.add_argument("--run-id", required=True)
+    release_job_parser = subparsers.add_parser("release-queue-update")
+    release_job_parser.add_argument("--run-id", required=True)
     status_parser = subparsers.add_parser("status")
     status_selector = status_parser.add_mutually_exclusive_group()
     status_selector.add_argument("--run-id")
@@ -940,6 +1067,12 @@ def main(argv: list[str] | None = None) -> int:
             result = queued_job(args)
         elif args.action == "extend-job":
             result = extend_job(args)
+        elif args.action == "update-queued-job":
+            result = edit_queued_job(args)
+        elif args.action == "reserve-queue-update":
+            result = reserve_queue_update(args)
+        elif args.action == "release-queue-update":
+            result = release_queue_update(args)
         elif args.action == "status":
             result = status(args)
         elif args.action == "wait-run":

@@ -1,5 +1,6 @@
 import {
   Button,
+  Checkbox,
   DescriptionList,
   DescriptionListDescription,
   DescriptionListGroup,
@@ -10,16 +11,21 @@ import {
   DrawerPanelBody,
   DrawerPanelContent,
   Label,
+  ToggleGroup,
+  ToggleGroupItem,
 } from "@patternfly/react-core";
 import {
   Activity,
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   CircleOff,
   Gauge,
   LoaderCircle,
+  Save,
   ShieldAlert,
   CircleStop,
   WifiOff,
@@ -38,10 +44,11 @@ import type {
   ConnectionState,
   DashboardDocument,
   QueueEntry,
+  QueueUpdateChanges,
   Selection,
   ServerSnapshot,
 } from "./types";
-import { StopRunError } from "./useDashboard";
+import { QueueUpdateError, StopRunError } from "./useDashboard";
 
 interface StatusVisual {
   text: string;
@@ -311,10 +318,16 @@ export function QueueTable({
   entries,
   now,
   onSelect,
+  onMove,
+  movement,
+  mutatingRunId,
 }: {
   entries: QueueEntry[];
   now: number;
   onSelect: (selection: Selection) => void;
+  onMove: (entry: QueueEntry, direction: "up" | "down") => void;
+  movement: Map<string, { up: boolean; down: boolean }>;
+  mutatingRunId: string | null;
 }) {
   if (!entries.length) return <div className="rr-empty">没有符合当前条件的排队任务。</div>;
   return (
@@ -326,16 +339,21 @@ export function QueueTable({
             <th scope="col">任务</th>
             <th scope="col">优先级</th>
             <th scope="col">等待时间</th>
+            <th scope="col"><span className="rr-visually-hidden">调整顺序</span></th>
           </tr>
         </thead>
         <tbody>
-          {entries.map((entry) => (
-            <tr key={entry.job.run_id ?? entry.job.label}>
+          {entries.map((entry) => {
+            const runId = entry.job.run_id ?? "";
+            const allowed = movement.get(runId) ?? { up: false, down: false };
+            const busy = mutatingRunId !== null;
+            return (
+            <tr key={runId || entry.job.label}>
               <td>
                 <button type="button" className="rr-queue-task" onClick={() => onSelect({ kind: "queue", value: entry })}>
                   <strong>{entry.job.label ?? entry.job.run_id ?? "排队任务"}</strong>
                   <small>
-                    <span>{workloadClassLabel(entry.job.workload_class)}</span>
+                    <span>{entry.state.placement_update ? "准备服务器" : workloadClassLabel(entry.job.workload_class)}</span>
                     <span aria-hidden="true">·</span>
                     <span className="rr-mono" translate="no">{entry.job.eligible_servers?.join(", ") || "没有可用服务器"}</span>
                   </small>
@@ -343,8 +361,32 @@ export function QueueTable({
               </td>
               <td>{queuePriority(entry.job.queue_priority)}</td>
               <td className="rr-waiting rr-mono">{ageFrom(entry.job.created_at, now)}</td>
+              <td>
+                <div className="rr-queue-order-actions">
+                  <button
+                    type="button"
+                    aria-label="上移任务"
+                    title="上移任务"
+                    disabled={!allowed.up || busy}
+                    onClick={() => onMove(entry, "up")}
+                  >
+                    {mutatingRunId === runId
+                      ? <LoaderCircle className="rr-spin" aria-hidden="true" />
+                      : <ArrowUp aria-hidden="true" />}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="下移任务"
+                    title="下移任务"
+                    disabled={!allowed.down || busy}
+                    onClick={() => onMove(entry, "down")}
+                  >
+                    <ArrowDown aria-hidden="true" />
+                  </button>
+                </div>
+              </td>
             </tr>
-          ))}
+          )})}
         </tbody>
       </table>
     </div>
@@ -437,10 +479,18 @@ export function DetailPanel({
   selection,
   onClose,
   onStop,
+  onQueueUpdate,
+  availableServers,
 }: {
   selection: Selection;
   onClose: () => void;
   onStop: (runId: string) => Promise<void>;
+  onQueueUpdate: (
+    runId: string,
+    expectedRevision: number,
+    changes: QueueUpdateChanges,
+  ) => Promise<void>;
+  availableServers: ServerSnapshot[];
 }) {
   let title: string;
   let kind: string;
@@ -455,12 +505,56 @@ export function DetailPanel({
   const [confirmingStop, setConfirmingStop] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
+  const queueEntry = selection.kind === "queue" ? selection.value : null;
+  const queueRunId = queueEntry?.job.run_id;
+  const [draftPriority, setDraftPriority] = useState<"urgent" | "normal">("normal");
+  const [draftServers, setDraftServers] = useState<string[]>([]);
+  const [savingQueue, setSavingQueue] = useState(false);
+  const [queueError, setQueueError] = useState<string | null>(null);
+  const preparedServers = queueEntry?.job.supported_servers
+    ?? queueEntry?.job.eligible_servers
+    ?? [];
+  const preparedServerSet = new Set(preparedServers);
+  const minimumCores = queueEntry?.job.minimum_cores ?? 1;
+  const canPrepareAdditionalServers = queueEntry?.job.portable_output !== false;
+  const preparableServers = queueEntry && canPrepareAdditionalServers
+    ? availableServers.filter((server) => (
+        !preparedServerSet.has(server.name)
+        && server.enabled !== false
+        && !server.configuration_error
+        && typeof server.configured_cores === "number"
+        && server.configured_cores >= minimumCores
+        && (
+          queueEntry.job.workload_class !== "test"
+          || (server.testing_enabled === true && (server.test_slots ?? 0) > 0)
+        )
+        && (
+          queueEntry.job.requires_output_root !== true
+          || server.output_root_configured === true
+        )
+      ))
+    : [];
+  const serverOptions = [
+    ...preparedServers,
+    ...preparableServers.map((server) => server.name),
+  ];
+  const requiresPreparation = draftServers.some(
+    (server) => !preparedServerSet.has(server),
+  );
+  const placementUpdating = Boolean(queueEntry?.state.placement_update);
 
   useEffect(() => {
     setConfirmingStop(false);
     setStopping(false);
     setStopError(null);
   }, [stopRunId]);
+
+  useEffect(() => {
+    setDraftPriority(queueEntry?.job.queue_priority === "urgent" ? "urgent" : "normal");
+    setDraftServers(queueEntry?.job.eligible_servers ?? []);
+    setSavingQueue(false);
+    setQueueError(null);
+  }, [queueRunId]);
 
   async function stopSelectedRun() {
     if (!stopRunId || stopping) return;
@@ -477,6 +571,34 @@ export function DetailPanel({
       setStopError(error instanceof Error ? error.message : "停止任务失败");
       setConfirmingStop(false);
       setStopping(false);
+    }
+  }
+
+  async function saveQueueSettings() {
+    const revision = queueEntry?.state.revision;
+    if (!queueRunId || typeof revision !== "number" || savingQueue) return;
+    if (!draftServers.length) {
+      setQueueError("请至少选择一台服务器。");
+      return;
+    }
+    setSavingQueue(true);
+    setQueueError(null);
+    try {
+      await onQueueUpdate(queueRunId, revision, {
+        queue_priority: draftPriority,
+        eligible_servers: draftServers,
+      });
+      onClose();
+    } catch (error: unknown) {
+      if (
+        error instanceof QueueUpdateError
+        && ["queue_not_found", "queue_not_editable"].includes(error.code)
+      ) {
+        onClose();
+        return;
+      }
+      setQueueError(error instanceof Error ? error.message : "保存队列设置失败");
+      setSavingQueue(false);
     }
   }
 
@@ -531,17 +653,74 @@ export function DetailPanel({
     title = entry.job.label ?? entry.job.run_id ?? "排队任务";
     kind = "排队任务";
     body = (
-      <DescriptionList isHorizontal>
-        <DetailGroup term="运行 ID" mono>{entry.job.run_id ?? "--"}</DetailGroup>
-        <DetailGroup term="任务 ID" mono>{entry.job.task_id ?? "--"}</DetailGroup>
-        <DetailGroup term="优先级">{priorityLabel(entry.job.queue_priority)}</DetailGroup>
-        <DetailGroup term="任务类型">{workloadClassLabel(entry.job.workload_class)}</DetailGroup>
-        <DetailGroup term="结果处理方式">{resultIntentLabel(entry.job.result_intent)}</DetailGroup>
-        <DetailGroup term="可用服务器">{entry.job.eligible_servers?.join(", ") || "无"}</DetailGroup>
-        <DetailGroup term="状态">{runStatusLabel(entry.state.status ?? "queued")}</DetailGroup>
-        <DetailGroup term="创建时间"><DetailTime value={entry.job.created_at} /></DetailGroup>
-        {entry.state.error && <DetailGroup term="错误">{entry.state.error}</DetailGroup>}
-      </DescriptionList>
+      <>
+        <section className="rr-queue-editor" aria-labelledby="rr-queue-editor-title">
+          <h3 id="rr-queue-editor-title">调度设置</h3>
+          <div className="rr-queue-editor-field">
+            <span>优先级</span>
+            <ToggleGroup aria-label="任务优先级">
+              <ToggleGroupItem
+                text="紧急"
+                buttonId="queue-priority-urgent"
+                isSelected={draftPriority === "urgent"}
+                onChange={() => setDraftPriority("urgent")}
+              />
+              <ToggleGroupItem
+                text="普通"
+                buttonId="queue-priority-normal"
+                isSelected={draftPriority === "normal"}
+                onChange={() => setDraftPriority("normal")}
+              />
+            </ToggleGroup>
+          </div>
+          <fieldset className="rr-server-options">
+            <legend>支持的服务器</legend>
+            {serverOptions.map((server) => (
+              <Checkbox
+                key={server}
+                id={`queue-server-${server}`}
+                label={(
+                  <span className="rr-server-option-label">
+                    <span>{server}</span>
+                    {!preparedServerSet.has(server) && <small>需准备</small>}
+                  </span>
+                )}
+                isChecked={draftServers.includes(server)}
+                onChange={(_event, checked) => {
+                  setDraftServers((current) => checked
+                    ? [...current, server]
+                    : current.filter((name) => name !== server));
+                }}
+              />
+            ))}
+          </fieldset>
+          {queueError && <div className="rr-stop-error" role="alert">{queueError}</div>}
+          <Button
+            variant="primary"
+            icon={savingQueue ? <LoaderCircle className="rr-spin" /> : <Save />}
+            isDisabled={savingQueue || placementUpdating || !draftServers.length}
+            onClick={saveQueueSettings}
+          >
+            {savingQueue
+              ? requiresPreparation ? "正在准备…" : "正在保存…"
+              : requiresPreparation ? "准备并保存" : "保存设置"}
+          </Button>
+        </section>
+        <DescriptionList isHorizontal>
+          <DetailGroup term="运行 ID" mono>{entry.job.run_id ?? "--"}</DetailGroup>
+          <DetailGroup term="任务 ID" mono>{entry.job.task_id ?? "--"}</DetailGroup>
+          <DetailGroup term="当前优先级">{priorityLabel(entry.job.queue_priority)}</DetailGroup>
+          <DetailGroup term="任务类型">{workloadClassLabel(entry.job.workload_class)}</DetailGroup>
+          <DetailGroup term="结果处理方式">{resultIntentLabel(entry.job.result_intent)}</DetailGroup>
+          <DetailGroup term="当前服务器">{entry.job.eligible_servers?.join(", ") || "无"}</DetailGroup>
+          <DetailGroup term="状态">{runStatusLabel(entry.state.status ?? "queued")}</DetailGroup>
+          {entry.state.placement_update && (
+            <DetailGroup term="队列更新">正在准备 {entry.state.placement_update.requested_servers?.join(", ")}</DetailGroup>
+          )}
+          <DetailGroup term="创建时间"><DetailTime value={entry.job.created_at} /></DetailGroup>
+          {entry.state.error && <DetailGroup term="错误">{entry.state.error}</DetailGroup>}
+        </DescriptionList>
+      </>
     );
   }
 

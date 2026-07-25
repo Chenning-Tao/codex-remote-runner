@@ -30,6 +30,8 @@ export interface ServerSnapshot {
   configured_cores?: number | null;
   remote_cores?: number | null;
   test_slots?: number;
+  testing_enabled?: boolean;
+  output_root_configured?: boolean;
   load1?: number;
   load5?: number;
   load15?: number;
@@ -47,9 +49,14 @@ export interface QueueJob {
   result_intent?: string;
   workload_class?: string;
   queue_priority?: string;
+  queue_position?: number;
+  minimum_cores?: number;
   server_scope?: string;
   created_at?: string;
   eligible_servers?: string[];
+  supported_servers?: string[];
+  portable_output?: boolean;
+  requires_output_root?: boolean;
 }
 
 export interface QueueState {
@@ -57,11 +64,22 @@ export interface QueueState {
   revision?: number;
   updated_at?: string;
   error?: string | null;
+  placement_update?: {
+    status?: string;
+    expires_at?: number;
+    requested_servers?: string[];
+  };
 }
 
 export interface QueueEntry {
   job: QueueJob;
   state: QueueState;
+}
+
+export interface QueueUpdateChanges {
+  queue_priority?: "urgent" | "normal";
+  eligible_servers?: string[];
+  move?: "up" | "down";
 }
 
 export interface StatusSummary {

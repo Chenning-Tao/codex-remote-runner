@@ -19,8 +19,9 @@ these external standards and design-system references:
 - The default interface language is Simplified Chinese. Product names, project
   IDs, run IDs, task IDs, server names, and user-authored workload labels remain
   untranslated.
-- The first release is single-project and loopback-only. Stopping one exact run
-  is its only controller write action.
+- The first release is single-project and loopback-only. Controller write
+  actions are limited to stopping one exact run and modifying one exact run
+  while its queue state is `queued`.
 - The first viewport shows the product identity, controller health, capacity,
   active work, and queued work without marketing content.
 - Research and scheduling identifiers remain visible but visually subordinate to
@@ -59,6 +60,9 @@ these external standards and design-system references:
 - Details open in a side drawer on desktop and a full-width panel on narrow
   screens. The drawer is fixed to the viewport, scrolls internally, and overlays
   the workspace without changing the table layout.
+- The queue-control increment is desktop-first. Mobile and narrow-screen layout
+  for manual ordering, priority editing, and server selection has no acceptance
+  criteria in this increment and must not block desktop delivery.
 
 ## Interaction Rules
 
@@ -72,3 +76,47 @@ these external standards and design-system references:
 - Live updates use server-sent events. Reconnection is automatic and announced
   without blocking use of the last snapshot.
 - Motion respects `prefers-reduced-motion`.
+
+## Queue Control Rules
+
+- Only records whose authoritative queue state is `queued` are editable. A task
+  in `dispatching` or any terminal state rejects ordering, priority, and server
+  changes.
+- Every mutation identifies one exact run and includes its last observed queue
+  revision. A revision conflict rejects the edit and refreshes the controller
+  snapshot; the browser never merges a stale edit speculatively.
+- Manual ordering uses explicit up/down controls in the queue table. One action
+  moves the task by one position within its real scheduling lane, defined by the
+  pair `(workload_class, queue_priority)`. Controls are disabled at lane
+  boundaries and while a request is pending.
+- Priority is either `urgent` or `normal`. Urgent work remains ahead of normal
+  work. Changing priority places the task at the tail of the destination
+  priority segment within its workload lane; users may then refine that order
+  with the manual controls.
+- The detail drawer edits priority and eligible servers as one save operation.
+  At least one server must remain eligible.
+- Server selection lists the task's prepared servers plus compatible configured
+  project servers. Compatibility respects project enablement, minimum cores,
+  testing-pool membership, testing slots, and portable-output requirements.
+- Saving an unprepared server acquires a bounded controller reservation, pauses
+  dispatch of that exact queued run, prepares its exact submitted revision by
+  reusing the `add-server` pipeline, and enables it only after every requested
+  preparation succeeds. The UI identifies unprepared choices and reports the
+  preparation state while the request is pending.
+- A preparation failure releases the reservation and preserves the prior
+  priority and eligible-server selection. Successfully prepared descriptors may
+  remain available for a later retry, but are not silently enabled by the failed
+  edit. An abandoned reservation expires so dispatch cannot remain blocked
+  indefinitely.
+- Server preparation cannot bypass workload/core/output constraints or change
+  the submitted revision.
+- A `server_scope: all` task continues to gain newly prepared servers through
+  pool synchronization until a user explicitly saves a server selection. After
+  that first manual selection, later pool extensions preserve the user's chosen
+  eligible set while retaining all prepared servers as available choices.
+- A successful mutation refreshes the controller snapshot before the UI reports
+  completion. Failure states distinguish stale revision, no-longer-editable
+  work, missing work, and invalid server/priority input.
+- Search, priority filters, pagination, and mobile/desktop view selection remain
+  browser-only presentation state. They never change the target or meaning of a
+  queue mutation.

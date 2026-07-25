@@ -41,8 +41,9 @@ lifecycle operations across a project-owned server pool.
 ## Capabilities and Constraints
 
 - The current web dashboard is single-project and bound to the local machine. It
-  streams the same controller snapshot used by the TUI and can stop one exact
-  queued or running workload after explicit confirmation.
+  streams the same controller snapshot used by the TUI, can stop one exact
+  queued or running workload after explicit confirmation, and can modify an
+  exact workload while it remains queued.
 - Progress is optional. When a program does not report progress, the interface
   shows authoritative lifecycle state without an empty or fabricated progress
   field.
@@ -52,9 +53,16 @@ lifecycle operations across a project-owned server pool.
   placement, and durable lifecycle state.
 - The current release targets macOS and Linux and trusted project
   infrastructure, not hostile multi-tenant scheduling.
-- Priority changes, manual ordering, server selection, and broader
-  research-management workflows are future decisions. Stop is the only current
-  web write action and always delegates authority to the controller.
+- Queued workloads support controller-owned manual ordering, `urgent`/`normal`
+  priority changes, and selection among compatible project servers. Selecting a
+  server that is not yet prepared starts preparation for the workload's exact
+  revision and enables that server only after preparation succeeds. These
+  controls never mutate work that has entered dispatch.
+- Stop and queue-control web writes always delegate authority to the controller
+  and use the queue state's revision to reject stale edits.
+- Desktop web behavior is the acceptance target for the first queue-control
+  increment. Queue-control layout and ergonomics on narrow/mobile viewports are
+  explicitly outside this increment's acceptance scope.
 
 ## Brand Commitments
 

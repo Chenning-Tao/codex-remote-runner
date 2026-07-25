@@ -77,6 +77,8 @@ def test_build_server_inventory_includes_idle_disabled_and_misconfigured_servers
         "python": "/opt/python3",
         "configured_cores": 256,
         "test_slots": 2,
+        "testing_enabled": False,
+        "output_root_configured": False,
         "endpoints": [
             {"ssh": "compute-a-ts", "ssh_profile": "tailscale"},
             {"ssh": "compute-a", "ssh_profile": "ssh"},
@@ -94,6 +96,8 @@ def dashboard_server(**changes: object) -> dict[str, object]:
         "python": "/opt/python3",
         "configured_cores": 256,
         "test_slots": 2,
+        "testing_enabled": False,
+        "output_root_configured": False,
         "endpoints": [{"ssh": "compute-a", "ssh_profile": "tailscale"}],
         "configuration_error": None,
     }
@@ -137,6 +141,8 @@ def test_server_snapshot_preserves_capacity_and_enriches_known_runs(
 
     assert enriched[0]["state"] == "busy"
     assert enriched[0]["configured_cores"] == 256
+    assert enriched[0]["testing_enabled"] is False
+    assert enriched[0]["output_root_configured"] is False
     assert enriched[0]["standard_runs"] == 1
     assert enriched[0]["test_runs"] == 0
     assert enriched[0]["active_runs"][0]["label"] == "decoder sweep"

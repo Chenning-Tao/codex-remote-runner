@@ -5,6 +5,32 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-25
+
+### Added
+
+- Added controller-owned up/down ordering for queued workloads within their
+  workload-class and priority scheduling lane.
+- Added revision-guarded web controls for switching queued workloads between
+  `urgent` and `normal` priority and selecting their eligible servers.
+- Added preparation of an exact submitted revision when a compatible selected
+  server is not ready, with a bounded reservation that prevents dispatch while
+  preparation is in progress.
+
+### Changed
+
+- Exposed server compatibility metadata to the loopback dashboard without
+  exposing SSH configuration or remote paths.
+- Preserved explicitly selected eligible-server sets when the prepared server
+  pool later changes.
+
+### Fixed
+
+- Made queue ordering operate on authoritative scheduling lanes and reject stale
+  or no-longer-queued edits instead of accepting ineffective moves.
+- Kept the previous priority and eligible-server selection when preparation or
+  queue mutation fails.
+
 ## 0.2.0 - 2026-07-25
 
 ### Added
