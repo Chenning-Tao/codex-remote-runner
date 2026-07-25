@@ -503,11 +503,10 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
             if _task_key(job.get("task_id")) == task_selector
         ]
     else:
+        dispatching = [row for row in all_jobs if row[1]["status"] == "dispatching"]
         queue = [
             {"job": job, "state": state}
-            for job, state in (
-                list_jobs(paths, statuses={"dispatching"}) + list_queued(paths)
-            )
+            for job, state in (dispatching + list_queued(paths, jobs=all_jobs))
         ]
     if result_intent is not None:
         queue = [

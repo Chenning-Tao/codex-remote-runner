@@ -3,10 +3,30 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from remote_runner._internal.config import load_managed_project_config
 from remote_runner._internal.controller.layout import controller_release_layout
 from remote_runner._internal.execution_registry import load_yaml, write_yaml
+
+
+def test_load_yaml_prefers_the_safe_c_loader_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "document.yaml"
+    path.write_text("value: 1\n", encoding="utf-8")
+    original_load = yaml.load
+    loaders: list[type[object]] = []
+
+    def capture_loader(stream, *, Loader):
+        loaders.append(Loader)
+        return original_load(stream, Loader=Loader)
+
+    monkeypatch.setattr(yaml, "load", capture_loader)
+
+    assert load_yaml(path) == {"value": 1}
+    assert loaders == [getattr(yaml, "CSafeLoader", yaml.SafeLoader)]
 
 
 def managed_config(tmp_path: Path) -> Path:

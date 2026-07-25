@@ -152,7 +152,8 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
     try:
         with path.open("r", encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
+            loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+            data = yaml.load(handle, Loader=loader) or {}
     except yaml.YAMLError as exc:
         raise ValueError(f"invalid YAML document {path}: {exc}") from exc
     if not isinstance(data, dict):

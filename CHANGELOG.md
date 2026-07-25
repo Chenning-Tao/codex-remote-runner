@@ -5,6 +5,13 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.3.1 - 2026-07-25
+
+### Changed
+
+- Reduced controller overview latency by loading queue records once per request and
+  using PyYAML's safe C loader when available for registry and configuration reads.
+
 ## 0.3.0 - 2026-07-25
 
 ### Added
