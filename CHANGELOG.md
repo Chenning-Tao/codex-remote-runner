@@ -9,6 +9,8 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 - Added an optional loopback-only, read-only web dashboard with live controller
   snapshots, responsive server and queue tables, filtering, and detail panels.
+- Added a confirmation-gated TUI action for stopping selected queued or running
+  workloads through the controller-owned lifecycle.
 
 ## 0.1.1 - 2026-07-25
 

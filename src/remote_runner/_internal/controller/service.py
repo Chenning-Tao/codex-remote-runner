@@ -436,8 +436,13 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
     except (OSError, RuntimeError, ValueError) as exc:
         output_sync_worker_started = False
         output_sync_worker_error = str(exc)
-    returned_queue = queue[:OVERVIEW_RECORD_LIMIT] if overview else queue
-    returned_runs = runs[:OVERVIEW_RECORD_LIMIT] if overview else runs
+    full_overview = bool(getattr(args, "_full_overview", False))
+    returned_queue = (
+        queue[:OVERVIEW_RECORD_LIMIT] if overview and not full_overview else queue
+    )
+    returned_runs = (
+        runs[:OVERVIEW_RECORD_LIMIT] if overview and not full_overview else runs
+    )
     result: dict[str, Any] = {
         "queue": (
             [_compact_queue_item(item["job"], item["state"]) for item in returned_queue]
@@ -677,8 +682,10 @@ def update_server_drain(args: argparse.Namespace, *, drained: bool) -> dict[str,
 def dashboard(args: argparse.Namespace) -> dict[str, Any]:
     payload = _read_object("dashboard request")
     servers = validate_payload(payload)
+    overview_args = argparse.Namespace(**vars(args))
+    overview_args._full_overview = True
     with ThreadPoolExecutor(max_workers=2) as executor:
-        overview_future = executor.submit(status, args)
+        overview_future = executor.submit(status, overview_args)
         snapshot_future = executor.submit(
             collect_server_snapshot,
             servers,

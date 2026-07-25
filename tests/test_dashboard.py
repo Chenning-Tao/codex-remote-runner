@@ -141,6 +141,7 @@ def test_server_snapshot_preserves_capacity_and_enriches_known_runs(
     assert enriched[0]["test_runs"] == 0
     assert enriched[0]["active_runs"][0]["label"] == "decoder sweep"
     assert enriched[0]["active_runs"][0]["progress"] == {"percent": 42.0}
+    assert enriched[0]["active_runs"][0]["controller_managed"] is True
 
 
 def test_server_snapshot_keeps_remote_label_for_unregistered_active_run(
@@ -173,6 +174,7 @@ def test_server_snapshot_keeps_remote_label_for_unregistered_active_run(
     enriched = controller_dashboard.enrich_active_runs(snapshot, [])
 
     assert enriched[0]["active_runs"][0]["label"] == "hardware test"
+    assert enriched[0]["active_runs"][0]["controller_managed"] is False
 
 
 def test_server_snapshot_isolates_one_unreachable_server(monkeypatch) -> None:
@@ -279,7 +281,8 @@ def test_controller_dashboard_collects_status_and_snapshot_concurrently(
         lambda _noun: {"schema_version": 1, "servers": [dashboard_server()]},
     )
 
-    def status(_args):
+    def status(status_args):
+        assert status_args._full_overview is True
         started.wait(timeout=1)
         return {"queue": [], "runs": [], "summary": {}}
 

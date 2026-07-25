@@ -262,7 +262,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     tui_parser = subparsers.add_parser(
         "tui",
-        help="open the optional read-only human dashboard",
+        help="open the optional interactive human dashboard",
     )
     _add_project_config(tui_parser)
     tui_parser.add_argument(
@@ -271,6 +271,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SERVER_REGISTRY,
     )
     tui_parser.add_argument("--timeout", type=int, default=8)
+    tui_parser.add_argument(
+        "--stop-timeout",
+        type=_positive_int,
+        default=10,
+        help="wait this many seconds before escalating a selected workload stop",
+    )
 
     web_parser = subparsers.add_parser(
         "web",
@@ -283,6 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SERVER_REGISTRY,
     )
     web_parser.add_argument("--timeout", type=int, default=8)
+    web_parser.add_argument(
+        "--stop-timeout",
+        type=_positive_int,
+        default=10,
+        help="wait this many seconds before escalating a web workload stop",
+    )
     web_parser.add_argument("--port", type=_port, default=8765)
     web_parser.add_argument(
         "--no-open",

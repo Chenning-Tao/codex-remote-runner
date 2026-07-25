@@ -108,7 +108,9 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
     add_server_help = help_text("add-server")
     assert "--run-id" in add_server_help
     assert "--server" in add_server_help
-    assert "--server-registry" in help_text("tui")
+    tui_help = help_text("tui")
+    assert "--server-registry" in tui_help
+    assert "--stop-timeout" in tui_help
     web_help = help_text("web")
     assert "--server-registry" in web_help
     assert "--port" in web_help
@@ -189,7 +191,9 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
         == metadata["interface"]["short_description"]
     )
     assert "event-driven wakeup" in metadata["interface"]["default_prompt"]
-    assert "authoritative terminal or attention" in metadata["interface"]["default_prompt"]
+    assert (
+        "authoritative terminal or attention" in metadata["interface"]["default_prompt"]
+    )
 
 
 def test_user_facing_skill_and_help_hide_internal_schemas() -> None:

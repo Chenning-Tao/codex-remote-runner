@@ -14,6 +14,7 @@ def arguments() -> argparse.Namespace:
         project_config=None,
         server_registry=Path("servers.yaml"),
         timeout=8,
+        stop_timeout=12,
     )
 
 
@@ -58,9 +59,7 @@ def test_dashboard_probe_preserves_last_snapshot_after_failure() -> None:
         assert isinstance(outcome, dict)
         return outcome
 
-    probe = DashboardProbe(
-        arguments(), project_id="example", interval=30, query=query
-    )
+    probe = DashboardProbe(arguments(), project_id="example", interval=30, query=query)
 
     async def exercise() -> None:
         await probe.probe_once()
@@ -99,9 +98,7 @@ def test_web_app_serves_snapshot_static_assets_and_security_headers(
         assert page.status_code == 200
         assert "Remote Runner" in page.text
 
-        rejected = client.get(
-            "/api/snapshot", headers={"host": "attacker.example"}
-        )
+        rejected = client.get("/api/snapshot", headers={"host": "attacker.example"})
         assert rejected.status_code == 400
 
 
@@ -114,3 +111,152 @@ def test_web_app_requires_built_assets(tmp_path: Path) -> None:
         assert "web assets are unavailable" in str(exc)
     else:
         raise AssertionError("missing web assets should prevent startup")
+
+
+def test_web_stop_requires_explicit_confirmation_and_refreshes_snapshot(
+    tmp_path: Path,
+) -> None:
+    snapshots = iter(
+        (
+            {"servers": [], "queue": [{"job": {"run_id": "rr-0123456789abcdef"}}]},
+            {"servers": [], "queue": []},
+        )
+    )
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: next(snapshots),
+    )
+    asyncio.run(probe.probe_once())
+    stop_calls: list[argparse.Namespace] = []
+
+    def stop_query(args: argparse.Namespace) -> dict[str, object]:
+        stop_calls.append(args)
+        return {"kind": "queue", "state": {"status": "stopped"}}
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        stop_query=stop_query,
+    )
+
+    with TestClient(app) as client:
+        missing_header = client.post(
+            "/api/runs/rr-0123456789abcdef/stop",
+            json={"run_id": "rr-0123456789abcdef", "confirm": True},
+        )
+        assert missing_header.status_code == 403
+
+        invalid_content_type = client.post(
+            "/api/runs/rr-0123456789abcdef/stop",
+            headers={"x-remote-runner-action": "stop"},
+            content="run_id=rr-0123456789abcdef",
+        )
+        assert invalid_content_type.status_code == 415
+
+        invalid_run_id = client.post(
+            "/api/runs/not-a-run/stop",
+            headers={"x-remote-runner-action": "stop"},
+            json={"run_id": "not-a-run", "confirm": True},
+        )
+        assert invalid_run_id.status_code == 400
+
+        invalid_confirmation = client.post(
+            "/api/runs/rr-0123456789abcdef/stop",
+            headers={"x-remote-runner-action": "stop"},
+            json={"run_id": "rr-0123456789abcdef", "confirm": False},
+        )
+        assert invalid_confirmation.status_code == 400
+
+        stopped = client.post(
+            "/api/runs/rr-0123456789abcdef/stop",
+            headers={"x-remote-runner-action": "stop"},
+            json={"run_id": "rr-0123456789abcdef", "confirm": True},
+        )
+
+        assert stopped.status_code == 200
+        assert stopped.json()["status"] == "stopped"
+        assert probe.document()["snapshot"] == {"servers": [], "queue": []}
+        assert len(stop_calls) == 1
+        assert stop_calls[0].run_id == "rr-0123456789abcdef"
+        assert stop_calls[0].timeout == 12
+
+
+def test_web_stop_reports_controller_failure_without_refreshing(
+    tmp_path: Path,
+) -> None:
+    query_calls = 0
+
+    def query(_args: argparse.Namespace) -> dict[str, object]:
+        nonlocal query_calls
+        query_calls += 1
+        return {"servers": [], "queue": []}
+
+    probe = DashboardProbe(arguments(), project_id="example", interval=30, query=query)
+    asyncio.run(probe.probe_once())
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        stop_query=lambda _args: (_ for _ in ()).throw(
+            RuntimeError("stop outcome unknown")
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/runs/rr-0123456789abcdef/stop",
+            headers={"x-remote-runner-action": "stop"},
+            json={"run_id": "rr-0123456789abcdef", "confirm": True},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "stop_failed",
+        "detail": "stop outcome unknown",
+    }
+    assert query_calls == 1
+
+
+def test_web_stop_refreshes_stale_snapshot_when_run_no_longer_exists(
+    tmp_path: Path,
+) -> None:
+    snapshots = iter(
+        (
+            {"servers": [], "queue": [{"job": {"run_id": "rr-0123456789abcdef"}}]},
+            {"servers": [], "queue": []},
+        )
+    )
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: next(snapshots),
+    )
+    asyncio.run(probe.probe_once())
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        stop_query=lambda _args: (_ for _ in ()).throw(
+            RuntimeError(
+                "usage: __main__.py [-h] ...\n"
+                "__main__.py: error: controller run does not exist: "
+                "rr-0123456789abcdef"
+            )
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/runs/rr-0123456789abcdef/stop",
+            headers={"x-remote-runner-action": "stop"},
+            json={"run_id": "rr-0123456789abcdef", "confirm": True},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "run_not_found"}
+    assert response.headers["cache-control"] == "no-store"
+    assert probe.document()["snapshot"] == {"servers": [], "queue": []}

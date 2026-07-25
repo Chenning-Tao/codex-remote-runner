@@ -16,6 +16,7 @@ export interface ActiveRun {
   task_id?: string;
   workload_class?: string;
   authoritative_status?: string;
+  controller_managed?: boolean;
   progress?: RunProgress;
   error?: string;
   started_at?: string;

@@ -168,6 +168,7 @@ def enrich_active_runs(
             active_runs.append(
                 {
                     **active,
+                    "controller_managed": bool(known),
                     **{
                         field: known[field]
                         for field in (

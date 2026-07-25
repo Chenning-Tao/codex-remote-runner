@@ -16,7 +16,7 @@ tested, but operators should review upgrades before applying them to active pool
 - Automatic placement using configured capacity, availability, and priority.
 - Exact Git revision preparation in detached remote worktrees.
 - Foreground waits and event-driven Codex task wakeups.
-- Read-only Textual and local browser dashboards.
+- Interactive Textual and local browser dashboards with confirmed run stopping.
 - Explicit stop, cleanup, purge, server drain, and output archival workflows.
 
 ```text
@@ -92,7 +92,7 @@ contract and provisioning requirements.
 
 ## Web Dashboard
 
-Open the read-only dashboard for one configured project:
+Open the dashboard for one configured project:
 
 ```bash
 remote-runner web --project-config /absolute/path/to/.remote-runner.yaml
@@ -101,7 +101,8 @@ remote-runner web --project-config /absolute/path/to/.remote-runner.yaml
 The command binds only to `127.0.0.1`, opens the system browser, and streams the
 same controller snapshot used by the TUI. Use `--no-open` to leave the browser
 closed or `--port PORT` to select another local port. The browser never receives
-SSH configuration and the first release exposes no controller write actions.
+SSH configuration. Its only controller write action is stopping one exact queued
+or running workload after an explicit confirmation in the details drawer.
 
 ## Run
 
@@ -132,6 +133,11 @@ remote-runner tui --project-config /path/to/.remote-runner.yaml
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
 ```
+
+In the TUI, select a running or queued workload and press `x` to review and confirm
+a stop request. The controller remains authoritative: an ambiguous transport result
+is reported as unconfirmed and the dashboard refreshes instead of assuming the run
+stopped.
 
 Read [references/submission.md](references/submission.md) before changing placement,
 priority, privacy, or output identity. Read

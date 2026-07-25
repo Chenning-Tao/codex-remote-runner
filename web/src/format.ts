@@ -1,15 +1,20 @@
 import type { ActiveRun, RunProgress, ServerSnapshot } from "./types";
 
+const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "medium",
+});
+
 export function duration(seconds: number): string {
   const safe = Math.max(0, Math.floor(seconds));
-  if (safe < 60) return `${safe}s`;
+  if (safe < 60) return `${safe}秒`;
   const minutes = Math.floor(safe / 60);
   const remainder = safe % 60;
-  if (minutes < 60) return `${minutes}m ${remainder.toString().padStart(2, "0")}s`;
+  if (minutes < 60) return `${minutes}分 ${remainder.toString().padStart(2, "0")}秒`;
   const hours = Math.floor(minutes / 60);
   const minuteRemainder = minutes % 60;
-  if (hours < 24) return `${hours}h ${minuteRemainder.toString().padStart(2, "0")}m`;
-  return `${Math.floor(hours / 24)}d ${String(hours % 24).padStart(2, "0")}h`;
+  if (hours < 24) return `${hours}小时 ${minuteRemainder.toString().padStart(2, "0")}分`;
+  return `${Math.floor(hours / 24)}天 ${String(hours % 24).padStart(2, "0")}小时`;
 }
 
 export function ageFrom(value: string | null | undefined, now: number): string {
@@ -17,6 +22,13 @@ export function ageFrom(value: string | null | undefined, now: number): string {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return "--";
   return duration((now - timestamp) / 1000);
+}
+
+export function dateTime(value: string | null | undefined): string {
+  if (!value) return "--";
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "--";
+  return dateTimeFormatter.format(timestamp);
 }
 
 export function progressValue(progress: RunProgress | undefined): number | null {
@@ -43,7 +55,7 @@ export function progressLabel(run: ActiveRun): string {
     ? `${progress.scope}:${progress.stage}`
     : progress?.stage;
   if (stage) return stage;
-  if (value === null) return "Awaiting progress";
+  if (value === null) return "等待进度";
   return value > 0 && value < 0.1 ? `${value.toFixed(2)}%` : `${value.toFixed(1)}%`;
 }
 
