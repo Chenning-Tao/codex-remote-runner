@@ -42,7 +42,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[tui] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.1.1'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.2.0'
 remote-runner --help
 ```
 
@@ -51,11 +51,9 @@ remote-runner --help
 ```bash
 git clone https://github.com/Chenning-Tao/codex-remote-runner.git
 cd codex-remote-runner
-uv tool install '.[tui]'
+uv tool install '.[tui,web]'
 remote-runner --help
 ```
-
-从源码安装尚未发布的网页控制台时，改用 `uv tool install '.[tui,web]'`。
 
 开发环境：
 

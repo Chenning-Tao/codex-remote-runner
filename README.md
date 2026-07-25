@@ -48,7 +48,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[tui] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.1.1'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.2.0'
 remote-runner --help
 ```
 
@@ -57,12 +57,9 @@ To install from a checkout instead:
 ```bash
 git clone https://github.com/Chenning-Tao/codex-remote-runner.git
 cd codex-remote-runner
-uv tool install '.[tui]'
+uv tool install '.[tui,web]'
 remote-runner --help
 ```
-
-To include the unreleased web dashboard when installing from a checkout, use
-`uv tool install '.[tui,web]'` instead.
 
 For development:
 
