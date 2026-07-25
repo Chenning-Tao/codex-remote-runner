@@ -1,0 +1,612 @@
+import {
+  Button,
+  DescriptionList,
+  DescriptionListDescription,
+  DescriptionListGroup,
+  DescriptionListTerm,
+  DrawerActions,
+  DrawerCloseButton,
+  DrawerHead,
+  DrawerPanelBody,
+  DrawerPanelContent,
+  Label,
+} from "@patternfly/react-core";
+import {
+  Activity,
+  AlertCircle,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  CircleOff,
+  Gauge,
+  LoaderCircle,
+  ShieldAlert,
+  CircleStop,
+  WifiOff,
+} from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import {
+  ageFrom,
+  dateTime,
+  progressLabel,
+  progressValue,
+  serverLoad,
+  serverState,
+} from "./format";
+import type {
+  ActiveRun,
+  ConnectionState,
+  DashboardDocument,
+  QueueEntry,
+  Selection,
+  ServerSnapshot,
+} from "./types";
+import { StopRunError } from "./useDashboard";
+
+interface StatusVisual {
+  text: string;
+  color: "green" | "blue" | "orange" | "red" | "grey" | "teal";
+  icon: ReactNode;
+}
+
+const serverStatus: Record<string, StatusVisual> = {
+  idle: { text: "空闲", color: "green", icon: <CheckCircle2 /> },
+  busy: { text: "运行中", color: "teal", icon: <Activity /> },
+  disabled: { text: "已禁用", color: "grey", icon: <CircleOff /> },
+  unreachable: { text: "无法连接", color: "red", icon: <WifiOff /> },
+  misconfigured: { text: "配置错误", color: "red", icon: <ShieldAlert /> },
+  unknown: { text: "未知", color: "grey", icon: <AlertCircle /> },
+};
+
+const runStatusLabels: Record<string, string> = {
+  registered: "已登记",
+  queued: "排队中",
+  blocked: "已阻塞",
+  preparing: "准备中",
+  starting: "正在启动",
+  running: "运行中",
+  stopping: "正在停止",
+  succeeded: "已成功",
+  completed: "已完成",
+  failed: "失败",
+  stopped: "已停止",
+  canceled: "已取消",
+  cancelled: "已取消",
+};
+
+function runStatusLabel(status: string | undefined): string {
+  if (!status) return "运行中";
+  return runStatusLabels[status] ?? status;
+}
+
+function workloadClassLabel(workloadClass: string | undefined): string {
+  if (!workloadClass || workloadClass === "standard") return "标准";
+  if (workloadClass === "test") return "测试";
+  return workloadClass;
+}
+
+function priorityLabel(priority: string | undefined): string {
+  return priority === "urgent" ? "紧急" : "普通";
+}
+
+function resultIntentLabel(intent: string | undefined): string {
+  if (!intent) return "--";
+  return {
+    candidate: "候选结果",
+    supporting: "辅助结果",
+    excluded: "排除",
+    unclassified: "未分类",
+  }[intent] ?? intent;
+}
+
+export function ServerStatus({ server, drained = false }: { server: ServerSnapshot; drained?: boolean }) {
+  const visual = serverStatus[serverState(server)] ?? serverStatus.unknown;
+  return (
+    <span className="rr-status-stack">
+      <Label isCompact variant="outline" color={visual.color} icon={visual.icon}>
+        {visual.text}
+      </Label>
+      {drained && <Label isCompact color="orange" icon={<CircleOff />}>暂停调度</Label>}
+    </span>
+  );
+}
+
+export function ConnectionStatus({
+  connection,
+  probeStatus,
+}: {
+  connection: ConnectionState;
+  probeStatus?: string;
+}) {
+  if (connection === "reconnecting") {
+    return <Label isCompact color="orange" icon={<LoaderCircle className="rr-spin" />}>正在重连</Label>;
+  }
+  if (connection === "connecting") {
+    return <Label isCompact color="grey" icon={<LoaderCircle className="rr-spin" />}>正在连接</Label>;
+  }
+  if (probeStatus === "error") {
+    return <Label isCompact color="red" icon={<AlertCircle />}>探测失败</Label>;
+  }
+  if (probeStatus === "probing") {
+    return <Label isCompact color="blue" icon={<LoaderCircle className="rr-spin" />}>正在探测</Label>;
+  }
+  if (probeStatus !== "online") {
+    return <Label isCompact color="grey" icon={<LoaderCircle className="rr-spin" />}>等待探测</Label>;
+  }
+  return <Label isCompact color="green" icon={<CheckCircle2 />}>控制器在线</Label>;
+}
+
+interface SummaryItemProps {
+  label: string;
+  value: string | number;
+}
+
+function SummaryItem({ label, value }: SummaryItemProps) {
+  return (
+    <div className="rr-summary-item">
+      <span className="rr-summary-label">{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+export function SummaryStrip({ document }: { document: DashboardDocument | null }) {
+  const snapshot = document?.snapshot;
+  const servers = snapshot?.servers ?? [];
+  const rawDrains = snapshot?.server_drains?.servers;
+  const drains = new Set(Array.isArray(rawDrains) ? rawDrains : Object.keys(rawDrains ?? {}));
+  const available = servers.filter((server) => ["idle", "busy"].includes(serverState(server)) && !drains.has(server.name)).length;
+  const active = servers.reduce((total, server) => total + (server.active_runs?.length ?? 0), 0);
+  const queued = snapshot?.summary?.queue?.active ?? snapshot?.queue?.length ?? 0;
+  const sync = snapshot?.output_sync;
+  const pending = typeof sync?.pending === "number" ? sync.pending : 0;
+
+  return (
+    <section className="rr-summary" aria-label="资源池摘要">
+      <SummaryItem label="可用服务器" value={`${available} / ${servers.length}`} />
+      <SummaryItem label="运行中" value={active} />
+      <SummaryItem label="排队中" value={queued} />
+      <SummaryItem label="结果同步" value={pending ? pending : "空闲"} />
+    </section>
+  );
+}
+
+function RunProgress({ run }: { run: ActiveRun }) {
+  const value = progressValue(run.progress);
+  if (value === null) return null;
+  const progress = run.progress;
+  const count = typeof progress?.current === "number" && typeof progress.total === "number"
+    ? `${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
+    : progressLabel(run);
+  return (
+    <div className="rr-task-progress" aria-label={`${run.label ?? run.run_id ?? "任务"}进度`}>
+      <span>{count} · 已报告 {value > 0 && value < 0.1 ? value.toFixed(2) : value.toFixed(0)}%</span>
+      <span className="rr-task-progress-track" aria-hidden="true">
+        <span style={{ width: `${value}%` }} />
+      </span>
+    </div>
+  );
+}
+
+function RunEntry({
+  run,
+  server,
+  drained,
+  now,
+  onSelect,
+}: {
+  run: ActiveRun;
+  server: ServerSnapshot;
+  drained: boolean;
+  now: number;
+  onSelect: (selection: Selection) => void;
+}) {
+  const elapsed = ageFrom(run.started_at, now);
+  const status = run.authoritative_status ?? "running";
+  return (
+    <button
+      type="button"
+      className="rr-task-entry"
+      onClick={() => onSelect({ kind: "run", value: run, server, drained })}
+    >
+      <span className={`rr-state-dot rr-state-${status}`} aria-hidden="true" />
+      <span className="rr-task-copy">
+        <span className="rr-task-title">{run.label ?? run.run_id ?? "未知任务"}</span>
+        <span className="rr-task-meta">
+          <span>{runStatusLabel(status)}</span>
+          {elapsed !== "--" && <><span aria-hidden="true">·</span><span className="rr-mono">已运行 {elapsed}</span></>}
+          <span aria-hidden="true">·</span>
+          <span>{workloadClassLabel(run.workload_class)}</span>
+        </span>
+        <RunProgress run={run} />
+      </span>
+    </button>
+  );
+}
+
+function loadPercent(server: ServerSnapshot): number | null {
+  const cores = server.remote_cores ?? server.configured_cores;
+  if (typeof server.load5 !== "number" || typeof cores !== "number" || cores <= 0) return null;
+  return Math.min(100, Math.max(0, (server.load5 / cores) * 100));
+}
+
+export function ServerTable({
+  servers,
+  drainedServers,
+  now,
+  onSelect,
+}: {
+  servers: ServerSnapshot[];
+  drainedServers: Set<string>;
+  now: number;
+  onSelect: (selection: Selection) => void;
+}) {
+  if (!servers.length) return <div className="rr-empty">没有符合当前条件的服务器。</div>;
+  return (
+    <div className="rr-table-scroll">
+      <table className="rr-server-table">
+        <caption className="rr-visually-hidden">服务器与运行中的任务</caption>
+        <thead>
+          <tr>
+            <th scope="col">服务器</th>
+            <th scope="col">容量</th>
+            <th scope="col">运行中的任务</th>
+          </tr>
+        </thead>
+        <tbody>
+          {servers.map((server) => {
+            const runs = server.active_runs ?? [];
+            const drained = drainedServers.has(server.name);
+            const utilization = loadPercent(server);
+            return (
+              <tr key={server.name}>
+                <td>
+                  <button type="button" className="rr-server-cell" onClick={() => onSelect({ kind: "server", value: server, drained })}>
+                    <span className={`rr-state-dot rr-server-state-${serverState(server)}`} aria-hidden="true" />
+                    <span>
+                      <strong translate="no">{server.name}</strong>
+                      <small>{serverStatus[serverState(server)]?.text ?? "未知"}{drained ? " · 暂停调度" : ""}</small>
+                    </span>
+                  </button>
+                </td>
+                <td>
+                  <div className="rr-resource-cell">
+                    <div className="rr-resource-line">
+                      <span>5 分钟负载</span>
+                      <span className="rr-mono">{serverLoad(server)}</span>
+                    </div>
+                    {utilization !== null && (
+                      <span className="rr-resource-track" aria-label={`检测到的核心使用率为 ${utilization.toFixed(0)}%`}>
+                        <span style={{ width: `${utilization}%` }} />
+                      </span>
+                    )}
+                    <small>{server.test_slots ? `${server.test_slots} 个测试槽位` : "标准任务"}</small>
+                  </div>
+                </td>
+                <td>
+                  {runs.length ? (
+                    <div className="rr-task-list">
+                      {runs.map((run) => (
+                        <RunEntry key={run.run_id ?? run.label} run={run} server={server} drained={drained} now={now} onSelect={onSelect} />
+                      ))}
+                    </div>
+                  ) : <span className="rr-no-tasks">没有运行中的任务</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      </div>
+  );
+}
+
+function queuePriority(priority: string | undefined): ReactNode {
+  return priority === "urgent"
+    ? <span className="rr-priority rr-priority-urgent"><span aria-hidden="true" />紧急</span>
+    : <span className="rr-priority rr-priority-normal"><span aria-hidden="true" />普通</span>;
+}
+
+export function QueueTable({
+  entries,
+  now,
+  onSelect,
+}: {
+  entries: QueueEntry[];
+  now: number;
+  onSelect: (selection: Selection) => void;
+}) {
+  if (!entries.length) return <div className="rr-empty">没有符合当前条件的排队任务。</div>;
+  return (
+    <div className="rr-table-scroll">
+      <table className="rr-queue-table">
+        <caption className="rr-visually-hidden">尚未分配的任务队列</caption>
+        <thead>
+          <tr>
+            <th scope="col">任务</th>
+            <th scope="col">优先级</th>
+            <th scope="col">等待时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((entry) => (
+            <tr key={entry.job.run_id ?? entry.job.label}>
+              <td>
+                <button type="button" className="rr-queue-task" onClick={() => onSelect({ kind: "queue", value: entry })}>
+                  <strong>{entry.job.label ?? entry.job.run_id ?? "排队任务"}</strong>
+                  <small>
+                    <span>{workloadClassLabel(entry.job.workload_class)}</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="rr-mono" translate="no">{entry.job.eligible_servers?.join(", ") || "没有可用服务器"}</span>
+                  </small>
+                </button>
+              </td>
+              <td>{queuePriority(entry.job.queue_priority)}</td>
+              <td className="rr-waiting rr-mono">{ageFrom(entry.job.created_at, now)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+type PageItem = number | "start-ellipsis" | "end-ellipsis";
+
+function pageItems(currentPage: number, pageCount: number): PageItem[] {
+  if (pageCount <= 7) {
+    return Array.from({ length: pageCount }, (_value, index) => index + 1);
+  }
+  if (currentPage <= 4) return [1, 2, 3, 4, 5, "end-ellipsis", pageCount];
+  if (currentPage >= pageCount - 3) {
+    return [1, "start-ellipsis", pageCount - 4, pageCount - 3, pageCount - 2, pageCount - 1, pageCount];
+  }
+  return [1, "start-ellipsis", currentPage - 1, currentPage, currentPage + 1, "end-ellipsis", pageCount];
+}
+
+export function QueuePagination({
+  page,
+  pageCount,
+  total,
+  onPageChange,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (pageCount <= 1) return null;
+  return (
+    <nav className="rr-pagination" aria-label="队列分页">
+      <span className="rr-pagination-total">共 {total} 项</span>
+      <div className="rr-pagination-pages">
+        <button
+          type="button"
+          className="rr-pagination-button rr-pagination-arrow"
+          aria-label="上一页"
+          title="上一页"
+          disabled={page === 1}
+          onClick={() => onPageChange(page - 1)}
+        >
+          <ChevronLeft aria-hidden="true" />
+        </button>
+        {pageItems(page, pageCount).map((item) => typeof item === "number" ? (
+          <button
+            type="button"
+            className={`rr-pagination-button ${item === page ? "rr-pagination-current" : ""}`}
+            aria-label={`第 ${item} 页`}
+            aria-current={item === page ? "page" : undefined}
+            key={item}
+            onClick={() => onPageChange(item)}
+          >
+            {item}
+          </button>
+        ) : (
+          <span className="rr-pagination-ellipsis" aria-hidden="true" key={item}>…</span>
+        ))}
+        <button
+          type="button"
+          className="rr-pagination-button rr-pagination-arrow"
+          aria-label="下一页"
+          title="下一页"
+          disabled={page === pageCount}
+          onClick={() => onPageChange(page + 1)}
+        >
+          <ChevronRight aria-hidden="true" />
+        </button>
+      </div>
+    </nav>
+  );
+}
+
+function DetailGroup({ term, children, mono = false }: { term: string; children: ReactNode; mono?: boolean }) {
+  return (
+    <DescriptionListGroup>
+      <DescriptionListTerm>{term}</DescriptionListTerm>
+      <DescriptionListDescription className={mono ? "rr-mono" : undefined}>{children}</DescriptionListDescription>
+    </DescriptionListGroup>
+  );
+}
+
+function DetailTime({ value }: { value: string | null | undefined }) {
+  if (!value || !Number.isFinite(Date.parse(value))) return <>--</>;
+  return <time dateTime={value} title={value}>{dateTime(value)}</time>;
+}
+
+export function DetailPanel({
+  selection,
+  onClose,
+  onStop,
+}: {
+  selection: Selection;
+  onClose: () => void;
+  onStop: (runId: string) => Promise<void>;
+}) {
+  let title: string;
+  let kind: string;
+  let body: ReactNode;
+  const controllerManagedRun = selection.kind !== "run"
+    || (selection.value.controller_managed ?? Boolean(selection.value.authoritative_status));
+  const stopRunId = selection.kind === "run"
+    ? controllerManagedRun ? selection.value.run_id : undefined
+    : selection.kind === "queue"
+      ? selection.value.job.run_id
+      : undefined;
+  const [confirmingStop, setConfirmingStop] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setConfirmingStop(false);
+    setStopping(false);
+    setStopError(null);
+  }, [stopRunId]);
+
+  async function stopSelectedRun() {
+    if (!stopRunId || stopping) return;
+    setStopping(true);
+    setStopError(null);
+    try {
+      await onStop(stopRunId);
+      onClose();
+    } catch (error: unknown) {
+      if (error instanceof StopRunError && error.code === "run_not_found") {
+        onClose();
+        return;
+      }
+      setStopError(error instanceof Error ? error.message : "停止任务失败");
+      setConfirmingStop(false);
+      setStopping(false);
+    }
+  }
+
+  if (selection.kind === "server") {
+    const server = selection.value;
+    title = server.name;
+    kind = "服务器";
+    body = (
+      <>
+        <div className="rr-detail-status"><ServerStatus server={server} drained={selection.drained} /></div>
+        <DescriptionList isHorizontal>
+          <DetailGroup term="负载（1 / 5 / 15 分钟）" mono>{[server.load1, server.load5, server.load15].map((value) => typeof value === "number" ? value.toFixed(1) : "--").join(" / ")}</DetailGroup>
+          <DetailGroup term="配置核心数" mono>{server.configured_cores ?? "--"}</DetailGroup>
+          <DetailGroup term="远程核心数" mono>{server.remote_cores ?? "--"}</DetailGroup>
+          <DetailGroup term="测试槽位" mono>{server.test_slots ?? 0}</DetailGroup>
+          <DetailGroup term="自动分配">{server.auto_select === false ? "已排除" : "可分配"}</DetailGroup>
+          <DetailGroup term="调度状态">{selection.drained ? "暂停调度" : "正常调度"}</DetailGroup>
+          {(server.configuration_error || server.error) && <DetailGroup term="错误">{server.configuration_error ?? server.error}</DetailGroup>}
+        </DescriptionList>
+      </>
+    );
+  } else if (selection.kind === "run") {
+    const run = selection.value;
+    title = run.label ?? run.run_id ?? "运行中的任务";
+    kind = "运行中的任务";
+    body = (
+      <>
+        {!controllerManagedRun && (
+          <div className="rr-unmanaged-notice" role="status">
+            <AlertCircle aria-hidden="true" />
+            <div>
+              <strong>控制器未登记这个任务</strong>
+              <span>服务器仍检测到任务进程，因此继续显示；当前无法从网页停止。</span>
+            </div>
+          </div>
+        )}
+        <DescriptionList isHorizontal>
+          <DetailGroup term="运行 ID" mono>{run.run_id ?? "--"}</DetailGroup>
+          <DetailGroup term="任务 ID" mono>{run.task_id ?? "--"}</DetailGroup>
+          <DetailGroup term="服务器" mono>{selection.server.name}</DetailGroup>
+          <DetailGroup term="管理状态">{controllerManagedRun ? "由控制器管理" : "未在控制器中登记"}</DetailGroup>
+          <DetailGroup term="调度状态">{selection.drained ? "暂停调度" : "正常调度"}</DetailGroup>
+          <DetailGroup term="任务类型">{workloadClassLabel(run.workload_class)}</DetailGroup>
+          <DetailGroup term="状态">{runStatusLabel(run.authoritative_status)}</DetailGroup>
+          <DetailGroup term="开始时间"><DetailTime value={run.started_at} /></DetailGroup>
+          {run.error && <DetailGroup term="错误">{run.error}</DetailGroup>}
+        </DescriptionList>
+      </>
+    );
+  } else {
+    const entry = selection.value;
+    title = entry.job.label ?? entry.job.run_id ?? "排队任务";
+    kind = "排队任务";
+    body = (
+      <DescriptionList isHorizontal>
+        <DetailGroup term="运行 ID" mono>{entry.job.run_id ?? "--"}</DetailGroup>
+        <DetailGroup term="任务 ID" mono>{entry.job.task_id ?? "--"}</DetailGroup>
+        <DetailGroup term="优先级">{priorityLabel(entry.job.queue_priority)}</DetailGroup>
+        <DetailGroup term="任务类型">{workloadClassLabel(entry.job.workload_class)}</DetailGroup>
+        <DetailGroup term="结果处理方式">{resultIntentLabel(entry.job.result_intent)}</DetailGroup>
+        <DetailGroup term="可用服务器">{entry.job.eligible_servers?.join(", ") || "无"}</DetailGroup>
+        <DetailGroup term="状态">{runStatusLabel(entry.state.status ?? "queued")}</DetailGroup>
+        <DetailGroup term="创建时间"><DetailTime value={entry.job.created_at} /></DetailGroup>
+        {entry.state.error && <DetailGroup term="错误">{entry.state.error}</DetailGroup>}
+      </DescriptionList>
+    );
+  }
+
+  return (
+    <DrawerPanelContent className="rr-detail-panel" focusTrap={{ enabled: true, "aria-labelledby": "rr-detail-title" }}>
+      <DrawerHead>
+        <div>
+          <p className="rr-eyebrow">{kind}</p>
+          <h2 id="rr-detail-title">{title}</h2>
+        </div>
+        <DrawerActions><DrawerCloseButton onClose={onClose} aria-label="关闭详情" /></DrawerActions>
+      </DrawerHead>
+      <DrawerPanelBody>{body}</DrawerPanelBody>
+      {stopRunId && (
+        <div className="rr-detail-actions">
+          {stopError && <div className="rr-stop-error" role="alert">{stopError}</div>}
+          {confirmingStop ? (
+            <div className="rr-stop-confirmation">
+              <div>
+                <strong>确认停止这个任务？</strong>
+                <span>停止后不会自动恢复。</span>
+              </div>
+              <div className="rr-stop-buttons">
+                <Button
+                  variant="danger"
+                  icon={stopping ? <LoaderCircle className="rr-spin" /> : <CircleStop />}
+                  isDisabled={stopping}
+                  onClick={stopSelectedRun}
+                >
+                  {stopping ? "正在停止…" : "确认停止"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  isDisabled={stopping}
+                  onClick={() => setConfirmingStop(false)}
+                >
+                  取消
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button
+              variant="danger"
+              icon={<CircleStop />}
+              onClick={() => setConfirmingStop(true)}
+            >
+              停止任务
+            </Button>
+          )}
+        </div>
+      )}
+    </DrawerPanelContent>
+  );
+}
+
+export function SnapshotHealth({ document, now }: { document: DashboardDocument | null; now: number }) {
+  const age = ageFrom(document?.refreshed_at, now);
+  const stale = document?.refreshed_at
+    ? now - Date.parse(document.refreshed_at) > document.probe_interval_seconds * 2 * 1000
+    : false;
+  return (
+    <div className="rr-snapshot-health">
+      <span><Gauge aria-hidden="true" />快照{document?.snapshot ? (stale ? "已过期" : "正常") : "等待中"}</span>
+      <span className="rr-mono">快照年龄 {age}</span>
+      <span className="rr-mono">探测间隔 {document?.probe_interval_seconds ?? "--"}秒</span>
+    </div>
+  );
+}

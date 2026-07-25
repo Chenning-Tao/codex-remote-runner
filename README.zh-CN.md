@@ -12,7 +12,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 - 根据已配置的容量、可用性和优先级自动选择执行服务器。
 - 在远程 detached worktree 中准备并运行精确的 Git revision。
 - 支持前台等待和事件驱动的 Codex 任务唤醒。
-- 提供只读的 Textual 控制面板。
+- 提供可交互的 Textual 和本地网页控制面板，并支持确认后停止任务。
 - 提供明确的停止、清理、彻底删除、服务器排空和输出归档流程。
 
 ```text
@@ -42,7 +42,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[tui] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.1.1'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.2.0'
 remote-runner --help
 ```
 
@@ -51,7 +51,7 @@ remote-runner --help
 ```bash
 git clone https://github.com/Chenning-Tao/codex-remote-runner.git
 cd codex-remote-runner
-uv tool install '.[tui]'
+uv tool install '.[tui,web]'
 remote-runner --help
 ```
 
@@ -59,10 +59,12 @@ remote-runner --help
 
 ```bash
 uv sync --frozen --group dev
+npm ci --prefix web
+npm run build --prefix web
 uv run pytest -q
 ```
 
-`tui` extra 是可选的。核心生命周期命令只依赖 PyYAML。
+`tui` 和 `web` extra 都是可选的。核心生命周期命令只依赖 PyYAML。
 
 ## 配置
 
@@ -72,6 +74,16 @@ Remote Runner 使用两个 YAML 文件：
 2. 项目自有的 `.remote-runner.yaml` 描述控制器、源码仓库、项目远程服务器、调度策略以及可选的输出归档。
 
 可以从 [examples/remote-servers.yaml](examples/remote-servers.yaml) 和 [examples/project.remote-runner.yaml](examples/project.remote-runner.yaml) 开始。完整配置契约和环境准备要求见 [references/configuration.md](references/configuration.md)。
+
+## 网页控制台
+
+为一个已经配置的项目打开网页控制台：
+
+```bash
+remote-runner web --project-config /absolute/path/to/.remote-runner.yaml
+```
+
+该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示与 TUI 相同的 controller snapshot。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置；目前唯一会修改 controller 状态的网页操作，是在详情栏明确确认后停止一个精确的排队中或运行中任务。
 
 ## 运行
 
@@ -96,8 +108,11 @@ remote-runner run \
 remote-runner monitor --project-config /path/to/.remote-runner.yaml
 remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-...
 remote-runner tui --project-config /path/to/.remote-runner.yaml
+remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
 ```
+
+在 TUI 中选中运行中或排队中的任务后按 `x`，即可检查并确认停止请求。控制器始终是状态权威；如果传输结果不明确，TUI 会报告停止尚未得到确认并重新刷新，而不会假定任务已经停止。
 
 修改放置策略、优先级、隐私设置或输出标识前，请阅读 [references/submission.md](references/submission.md)。执行破坏性的生命周期操作前，请阅读 [references/lifecycle.md](references/lifecycle.md)。
 

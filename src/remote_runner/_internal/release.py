@@ -141,6 +141,8 @@ def build_release(repo: Path, output_dir: Path) -> ReleaseArtifact:
                 "--no-dev",
                 "--extra",
                 "tui",
+                "--extra",
+                "web",
                 "--no-emit-project",
                 "--no-annotate",
                 "--no-header",
@@ -212,7 +214,7 @@ def install_local_tool(artifact: ReleaseArtifact) -> None:
             "3.12",
             "--constraints",
             str(artifact.constraints),
-            f"{artifact.wheel}[tui]",
+            f"{artifact.wheel}[tui,web]",
         ]
     )
     tool_dir = _run(["uv", "tool", "dir"]).stdout.strip()
@@ -231,7 +233,11 @@ def install_local_tool(artifact: ReleaseArtifact) -> None:
         [
             str(interpreter),
             "-c",
-            "import rich; import textual; import remote_runner.tui",
+            (
+                "import rich; import textual; import remote_runner.tui; "
+                "from remote_runner.web_app import STATIC_ROOT; "
+                "assert (STATIC_ROOT / 'index.html').is_file()"
+            ),
         ],
         env=clean_environment,
     )

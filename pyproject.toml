@@ -1,6 +1,6 @@
 [project]
 name = "codex-remote-runner"
-version = "0.1.1"
+version = "0.2.0"
 description = "Durable remote workload scheduling and lifecycle management for Codex"
 readme = "README.md"
 license = "Apache-2.0"
@@ -24,6 +24,10 @@ dependencies = [
 tui = [
     "textual>=1,<2",
 ]
+web = [
+    "starlette>=0.47,<1",
+    "uvicorn>=0.35,<1",
+]
 
 [project.scripts]
 remote-runner = "remote_runner.cli:main"
@@ -39,11 +43,14 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28,<1",
     "pyright>=1.1,<2",
     "pytest>=9.0.3,<10",
     "ruff>=0.12,<1",
     "setproctitle>=1.3,<2",
+    "starlette>=0.47,<1",
     "textual>=1,<2",
+    "uvicorn>=0.35,<1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -58,6 +65,7 @@ include = [
     "/scripts",
     "/src",
     "/tests",
+    "/web",
     "/.gitignore",
     "/.python-version",
     "/CHANGELOG.md",
@@ -74,4 +82,5 @@ include = [
 exclude = [
     "/.trellis",
     "/dist",
+    "/web/node_modules",
 ]

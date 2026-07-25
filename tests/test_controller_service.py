@@ -830,6 +830,16 @@ def test_status_defaults_to_active_records_with_complete_summary(
         },
     }
 
+    args._full_overview = True
+    full_result = controller_service.status(args)
+
+    assert len(full_result["queue"]) == 2
+    assert len(full_result["runs"]) == 2
+    assert full_result["summary"]["queue"]["returned"] == 2
+    assert full_result["summary"]["queue"]["omitted"] == 0
+    assert full_result["summary"]["runs"]["returned"] == 2
+    assert full_result["summary"]["runs"]["omitted"] == 0
+
 
 def test_status_is_not_blocked_by_output_sync_worker_start_failure(
     tmp_path: Path,

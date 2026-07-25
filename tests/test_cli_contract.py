@@ -46,6 +46,7 @@ def test_public_cli_has_exact_lifecycle_subcommands() -> None:
         "drain-server",
         "resume-server",
         "tui",
+        "web",
     ):
         assert subcommand in top_level
 
@@ -107,7 +108,13 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
     add_server_help = help_text("add-server")
     assert "--run-id" in add_server_help
     assert "--server" in add_server_help
-    assert "--server-registry" in help_text("tui")
+    tui_help = help_text("tui")
+    assert "--server-registry" in tui_help
+    assert "--stop-timeout" in tui_help
+    web_help = help_text("web")
+    assert "--server-registry" in web_help
+    assert "--port" in web_help
+    assert "--no-open" in web_help
     assert "--server" in help_text("drain-server")
     assert "--server" in help_text("resume-server")
 
@@ -132,6 +139,29 @@ def test_tui_reports_missing_optional_dependencies_without_traceback(
     assert raised.value.code == 2
     stderr = capsys.readouterr().err
     assert "the TUI optional dependency is not installed" in stderr
+    assert "Traceback" not in stderr
+
+
+def test_web_reports_missing_optional_dependencies_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = "starlette"
+    original_import = builtins.__import__
+
+    def fail_web_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "web_app" and level == 1:
+            raise ModuleNotFoundError(f"No module named '{missing}'", name=missing)
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fail_web_import)
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["web", "--project-config", "/tmp/project.yaml"])
+
+    assert raised.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "the web dashboard optional dependency is not installed" in stderr
     assert "Traceback" not in stderr
 
 
@@ -161,7 +191,9 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
         == metadata["interface"]["short_description"]
     )
     assert "event-driven wakeup" in metadata["interface"]["default_prompt"]
-    assert "authoritative terminal or attention" in metadata["interface"]["default_prompt"]
+    assert (
+        "authoritative terminal or attention" in metadata["interface"]["default_prompt"]
+    )
 
 
 def test_user_facing_skill_and_help_hide_internal_schemas() -> None:

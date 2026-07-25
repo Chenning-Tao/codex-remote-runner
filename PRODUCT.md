@@ -1,0 +1,90 @@
+# Product
+
+<!-- impeccable:product-schema 1 -->
+
+## Platform
+
+web
+
+## Users
+
+Remote Runner is primarily for individual researchers and small research teams
+running scientific code on a trusted, project-owned pool of remote machines.
+They need to understand what is running, where it is running, and what is still
+waiting without staying attached to the shell that submitted the work.
+
+## Product Purpose
+
+Remote Runner submits durable research workloads to remote compute servers and
+keeps authoritative queue and execution state on a controller host. Success
+means a researcher can leave the original client, return later, and quickly
+recover the real state and outputs of an exact submitted run.
+
+## Positioning
+
+Every managed run executes an exact clean Git revision through a
+controller-owned lifecycle. Remote Runner combines that reproducibility with a
+durable queue, automatic placement, reconnectable monitoring, and explicit
+lifecycle operations across a project-owned server pool.
+
+## Operating Context
+
+- Researchers submit experiments, sweeps, benchmarks, reruns, and development
+  tests from the CLI or the Codex skill.
+- A controller coordinates placement and durable state over trusted SSH
+  infrastructure.
+- Users inspect the pool through the CLI, Textual TUI, or local web dashboard.
+- Scientific programs may use the existing progress-reporting interface, but
+  they are never required to integrate with it.
+- Results may be synchronized to a configured archive target.
+
+## Capabilities and Constraints
+
+- The current web dashboard is single-project and bound to the local machine. It
+  streams the same controller snapshot used by the TUI and can stop one exact
+  queued or running workload after explicit confirmation.
+- Progress is optional. When a program does not report progress, the interface
+  shows authoritative lifecycle state without an empty or fabricated progress
+  field.
+- The product does not currently provide a reliable runtime, remaining-time, or
+  queue-start prediction. The web interface must not imply those predictions.
+- The controller, not the browser, owns queue order, capacity ranking,
+  placement, and durable lifecycle state.
+- The current release targets macOS and Linux and trusted project
+  infrastructure, not hostile multi-tenant scheduling.
+- Priority changes, manual ordering, server selection, and broader
+  research-management workflows are future decisions. Stop is the only current
+  web write action and always delegates authority to the controller.
+
+## Brand Commitments
+
+- Product name: Remote Runner.
+- The interface is an operational research tool rather than a marketing
+  surface.
+- The first web version uses a light theme only.
+- The web application follows familiar desktop product-UI conventions and
+  established UX guidance. Usability, scanability, and predictable controls
+  take priority over metaphor-driven visual themes.
+
+## Evidence on Hand
+
+- The controller exposes real server, active-run, queue, progress, output-sync,
+  and server-drain snapshots.
+- Existing product and lifecycle contracts are documented in `README.md`,
+  `README.zh-CN.md`, `SKILL.md`, and `references/`.
+- The repository contains no benchmark evidence supporting runtime or queue ETA
+  claims, so future interfaces must not fabricate them.
+
+## Product Principles
+
+1. Preserve authoritative controller state over inferred convenience.
+2. Keep research code integration optional and non-invasive.
+3. Make exact runs and their server placement easy to recover and inspect.
+4. Keep lifecycle behavior reproducible, durable, and explicit.
+5. Add control and research-management features without weakening the existing
+   controller ownership model.
+
+## Accessibility & Inclusion
+
+The web interface targets WCAG 2.2 AA. Status must never rely on color alone,
+and all inspection and stop-confirmation workflows must remain keyboard accessible.
