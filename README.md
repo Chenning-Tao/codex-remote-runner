@@ -16,7 +16,7 @@ tested, but operators should review upgrades before applying them to active pool
 - Automatic placement using configured capacity, availability, and priority.
 - Exact Git revision preparation in detached remote worktrees.
 - Foreground waits and event-driven Codex task wakeups.
-- A read-only Textual dashboard.
+- Read-only Textual and local browser dashboards.
 - Explicit stop, cleanup, purge, server drain, and output archival workflows.
 
 ```text
@@ -61,14 +61,20 @@ uv tool install '.[tui]'
 remote-runner --help
 ```
 
+To include the unreleased web dashboard when installing from a checkout, use
+`uv tool install '.[tui,web]'` instead.
+
 For development:
 
 ```bash
 uv sync --frozen --group dev
+npm ci --prefix web
+npm run build --prefix web
 uv run pytest -q
 ```
 
-The `tui` extra is optional. Core lifecycle commands only require PyYAML.
+The `tui` and `web` extras are optional. Core lifecycle commands only require
+PyYAML.
 
 ## Configure
 
@@ -83,6 +89,19 @@ Start with [examples/remote-servers.yaml](examples/remote-servers.yaml) and
 [examples/project.remote-runner.yaml](examples/project.remote-runner.yaml). See
 [references/configuration.md](references/configuration.md) for the complete
 contract and provisioning requirements.
+
+## Web Dashboard
+
+Open the read-only dashboard for one configured project:
+
+```bash
+remote-runner web --project-config /absolute/path/to/.remote-runner.yaml
+```
+
+The command binds only to `127.0.0.1`, opens the system browser, and streams the
+same controller snapshot used by the TUI. Use `--no-open` to leave the browser
+closed or `--port PORT` to select another local port. The browser never receives
+SSH configuration and the first release exposes no controller write actions.
 
 ## Run
 
@@ -110,6 +129,7 @@ Common follow-up commands:
 remote-runner monitor --project-config /path/to/.remote-runner.yaml
 remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-...
 remote-runner tui --project-config /path/to/.remote-runner.yaml
+remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
 ```
 

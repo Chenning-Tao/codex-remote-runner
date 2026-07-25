@@ -1,0 +1,29 @@
+{
+  "name": "codex-remote-runner-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "check": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@patternfly/react-core": "6.6.0",
+    "@patternfly/react-table": "6.6.0",
+    "lucide-react": "1.26.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.4",
+    "typescript": "5.9.3",
+    "vite": "8.1.5"
+  }
+}

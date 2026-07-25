@@ -13,6 +13,7 @@ FORBIDDEN_PARTS = {
     "__pycache__",
     ".pytest_cache",
     ".ruff_cache",
+    "node_modules",
 }
 FORBIDDEN_SUFFIXES = {".key", ".pem", ".pyc", ".pyo"}
 
@@ -48,6 +49,8 @@ def check_archive(archive: Path) -> None:
         required = {
             PurePosixPath("remote_runner/__init__.py"),
             PurePosixPath("remote_runner/cli.py"),
+            PurePosixPath("remote_runner/web_app.py"),
+            PurePosixPath("remote_runner/web_static/index.html"),
         }
     else:
         required = {
@@ -56,11 +59,26 @@ def check_archive(archive: Path) -> None:
             PurePosixPath("README.zh-CN.md"),
             PurePosixPath("pyproject.toml"),
             PurePosixPath("src/remote_runner/cli.py"),
+            PurePosixPath("src/remote_runner/web_app.py"),
+            PurePosixPath("src/remote_runner/web_static/index.html"),
             PurePosixPath("tests/test_cli_contract.py"),
+            PurePosixPath("web/DESIGN.md"),
+            PurePosixPath("web/package-lock.json"),
+            PurePosixPath("web/package.json"),
         }
     missing = sorted(str(path) for path in required - members)
     if missing:
         raise ValueError(f"{archive.name}: missing required members: {', '.join(missing)}")
+    web_assets = {
+        path.suffix
+        for path in members
+        if "web_static" in path.parts and "assets" in path.parts
+    }
+    missing_asset_types = sorted({".css", ".js"} - web_assets)
+    if missing_asset_types:
+        raise ValueError(
+            f"{archive.name}: missing web asset types: {', '.join(missing_asset_types)}"
+        )
 
 
 def main() -> int:

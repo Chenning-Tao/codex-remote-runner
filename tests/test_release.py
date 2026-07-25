@@ -46,7 +46,7 @@ def test_release_source_requires_one_clean_full_revision(tmp_path: Path) -> None
         release.resolve_clean_revision(repo)
 
 
-def test_release_constraints_include_tui_extra(
+def test_release_constraints_include_human_interface_extras(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -79,7 +79,12 @@ def test_release_constraints_include_tui_extra(
     release.build_release(repo, output)
 
     export = next(call for call in calls if call[:2] == ["uv", "export"])
-    assert export[export.index("--extra") + 1] == "tui"
+    extras = [
+        export[index + 1]
+        for index, value in enumerate(export)
+        if value == "--extra"
+    ]
+    assert extras == ["tui", "web"]
 
 
 def test_local_tool_install_is_non_editable_and_constrained(
@@ -131,14 +136,18 @@ def test_local_tool_install_is_non_editable_and_constrained(
             "3.12",
             "--constraints",
             str(constraints),
-            f"{wheel}[tui]",
+            f"{wheel}[tui,web]",
         ],
         ["uv", "tool", "dir"],
         ["uv", "tool", "dir", "--bin"],
         [
             str(tool_dir / "codex-remote-runner" / "bin" / "python"),
             "-c",
-            "import rich; import textual; import remote_runner.tui",
+            (
+                "import rich; import textual; import remote_runner.tui; "
+                "from remote_runner.web_app import STATIC_ROOT; "
+                "assert (STATIC_ROOT / 'index.html').is_file()"
+            ),
         ],
         [str(bin_dir / "remote-runner"), "--version"],
     ]

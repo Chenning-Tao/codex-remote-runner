@@ -38,6 +38,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _port(value: str) -> int:
+    parsed = int(value)
+    if not 1 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError("must be between 1 and 65535")
+    return parsed
+
+
 def _add_project_config(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--project-config", type=Path)
 
@@ -264,6 +271,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SERVER_REGISTRY,
     )
     tui_parser.add_argument("--timeout", type=int, default=8)
+
+    web_parser = subparsers.add_parser(
+        "web",
+        help="open the optional read-only dashboard in a local browser",
+    )
+    _add_project_config(web_parser)
+    web_parser.add_argument(
+        "--server-registry",
+        type=Path,
+        default=DEFAULT_SERVER_REGISTRY,
+    )
+    web_parser.add_argument("--timeout", type=int, default=8)
+    web_parser.add_argument("--port", type=_port, default=8765)
+    web_parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="start the local dashboard without opening a browser",
+    )
 
     stop_parser = subparsers.add_parser(
         "stop",
@@ -494,6 +519,25 @@ def main(argv: list[str] | None = None) -> int:
             raise
         try:
             run_tui(args)
+        except (OSError, RuntimeError, ValueError) as exc:
+            parser.error(str(exc))
+        return 0
+    if args.subcommand == "web":
+        try:
+            from .web_app import run_web
+        except ModuleNotFoundError as exc:
+            missing = exc.name or ""
+            if any(
+                missing == dependency or missing.startswith(f"{dependency}.")
+                for dependency in ("starlette", "uvicorn")
+            ):
+                parser.error(
+                    "the web dashboard optional dependency is not installed; "
+                    "install codex-remote-runner with the 'web' extra"
+                )
+            raise
+        try:
+            run_web(args)
         except (OSError, RuntimeError, ValueError) as exc:
             parser.error(str(exc))
         return 0

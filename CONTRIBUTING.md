@@ -7,12 +7,19 @@ that inspect process ownership also require procps.
 
 ```bash
 uv sync --frozen --group dev
+npm ci --prefix web
+npm run build --prefix web
 uv run pytest -q
 uv run ruff check src/remote_runner tests scripts
 uv run pyright --project pyrightconfig.json
 uv build
 uv run python scripts/check_dist.py dist
 ```
+
+The committed files under `src/remote_runner/web_static` are generated from the
+versioned sources in `web`. Rebuild them in the same change and confirm that a
+second build leaves the worktree clean. Web UI changes follow
+[`web/DESIGN.md`](web/DESIGN.md).
 
 Run the full suite before opening a pull request. Tests that exercise actual SSH
 infrastructure must use disposable hosts and must never add private endpoints,
