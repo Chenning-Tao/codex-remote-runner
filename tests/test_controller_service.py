@@ -775,6 +775,42 @@ def test_status_lists_urgent_queued_work_before_normal_work(
     ]
 
 
+def test_status_overview_loads_the_queue_registry_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, job())
+    original_list_jobs = controller_service.list_jobs
+    calls = 0
+
+    def counted_list_jobs(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_list_jobs(*args, **kwargs)
+
+    monkeypatch.setattr(controller_service, "list_jobs", counted_list_jobs)
+    monkeypatch.setattr(
+        controller_service, "ensure_dispatcher", lambda **_kwargs: False
+    )
+
+    result = controller_service.status(
+        argparse.Namespace(
+            controller_root=paths.root,
+            project_id="example",
+            run_id=None,
+            task_id=None,
+            timeout=8,
+            interval=60,
+        )
+    )
+
+    assert calls == 1
+    assert [item["job"]["run_id"] for item in result["queue"]] == [
+        "rr-0123456789abcdef"
+    ]
+
+
 def test_status_filters_queue_by_result_intent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

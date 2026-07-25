@@ -821,11 +821,17 @@ def list_jobs(
     )
 
 
-def list_queued(paths: ControllerPaths) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+def list_queued(
+    paths: ControllerPaths,
+    *,
+    jobs: list[tuple[dict[str, Any], dict[str, Any]]] | None = None,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    source = list_jobs(paths, statuses={"queued"}) if jobs is None else jobs
     rows = [
         row
-        for row in list_jobs(paths, statuses={"queued"})
-        if not is_task_tombstoned(paths, row[0]["task_id"])
+        for row in source
+        if row[1]["status"] == "queued"
+        and not is_task_tombstoned(paths, row[0]["task_id"])
     ]
     return sorted(
         rows,
