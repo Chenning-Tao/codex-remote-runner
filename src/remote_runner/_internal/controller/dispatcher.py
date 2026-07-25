@@ -28,10 +28,12 @@ from .registry import (
     ControllerPaths,
     acquire_dispatch_lease,
     controller_paths,
+    eligible_prepared_servers,
     has_unexpired_dispatch_lease,
     list_drained_servers,
     list_jobs,
     list_queued,
+    placement_update_active,
     recover_dispatching_state,
     release_dispatch_lease,
     transition_queued_state,
@@ -39,7 +41,7 @@ from .registry import (
 from .output_sync_worker import ensure_output_sync_worker
 
 
-SERVER_STATE_PROBE_PROGRAM = r'''import json
+SERVER_STATE_PROBE_PROGRAM = r"""import json
 import os
 import subprocess
 from pathlib import Path
@@ -97,7 +99,7 @@ print(json.dumps({
     "load15": load15,
     "remote_cores": os.cpu_count(),
 }))
-'''
+"""
 MAX_CAPACITY_PROBE_WORKERS = 8
 
 
@@ -291,7 +293,7 @@ def _select_server_for_job(
     workload_class = str(job["workload_class"])
     drained_servers = set(list_drained_servers(paths))
     eligible_servers = []
-    for server in job["prepared_servers"]:
+    for server in eligible_prepared_servers(job):
         if str(server["name"]) in drained_servers:
             continue
         if (
@@ -302,8 +304,10 @@ def _select_server_for_job(
         eligible_servers.append(server)
     reachable, failures = _probe_prepared_servers(eligible_servers, timeout)
     if not reachable:
-        prepared_names = {str(server["name"]) for server in job["prepared_servers"]}
-        if prepared_names and prepared_names <= drained_servers:
+        eligible_names = {
+            str(server["name"]) for server in eligible_prepared_servers(job)
+        }
+        if eligible_names and eligible_names <= drained_servers:
             return None, "all prepared servers are drained"
         return None, "; ".join(failures) or "no reachable prepared server"
 
@@ -360,14 +364,14 @@ def _select_backfill_from_lane(
     # Blocked jobs reserve every server they could use; backfill only elsewhere.
     protected_servers = {
         str(server["name"])
-        for server in head_job["prepared_servers"]
+        for server in eligible_prepared_servers(head_job)
         if str(server["name"]) not in drained_servers
     }
 
     for candidate_job, candidate_state in lane[1:]:
         eligible_servers = {
             str(server["name"])
-            for server in candidate_job["prepared_servers"]
+            for server in eligible_prepared_servers(candidate_job)
             if str(server["name"]) not in drained_servers
         }
         safe_servers = eligible_servers - protected_servers
@@ -426,7 +430,7 @@ def _register_execution(
         remote_workdir=workdir,
         project_python=server["python"],
         source_revision=job["revision"],
-        prepared_servers=[item["name"] for item in job["prepared_servers"]],
+        prepared_servers=[item["name"] for item in eligible_prepared_servers(job)],
         submitted_command=job["submitted_command"],
         worker_defaulted=worker_defaulted,
         expected_revision=job["revision"],
@@ -500,7 +504,9 @@ def dispatch_once(paths: ControllerPaths, *, timeout: int = 8) -> DispatchOutcom
             expected_revision=int(state["revision"]),
         )
 
-    queued = list_queued(paths)
+    queued = [
+        row for row in list_queued(paths) if not placement_update_active(row[1])
+    ]
     if not queued:
         return DispatchOutcome(action="idle", run_id=None)
     lanes: list[list[tuple[dict[str, Any], dict[str, Any]]]] = []
@@ -556,12 +562,22 @@ def dispatch_once(paths: ControllerPaths, *, timeout: int = 8) -> DispatchOutcom
     selected_server = selected.server
     selected_capacity = selected.capacity
 
-    transition_queued_state(
-        paths,
-        run_id,
-        expected_revision=int(state["revision"]),
-        status="dispatching",
-    )
+    try:
+        transition_queued_state(
+            paths,
+            run_id,
+            expected_revision=int(state["revision"]),
+            status="dispatching",
+        )
+    except RuntimeError as exc:
+        release_dispatch_lease(
+            paths,
+            server=selected_capacity.name,
+            run_id=run_id,
+        )
+        if str(exc) == "queued state revision conflict":
+            return dispatch_once(paths, timeout=timeout)
+        raise
     execution_registered = False
     release_lease = True
     try:
@@ -608,7 +624,9 @@ def dispatch_once(paths: ControllerPaths, *, timeout: int = 8) -> DispatchOutcom
             expected_revision=int(state["revision"]) + 1,
             status="dispatched",
         )
-        return DispatchOutcome(action="started", run_id=run_id, server=selected_capacity.name)
+        return DispatchOutcome(
+            action="started", run_id=run_id, server=selected_capacity.name
+        )
     except Exception as exc:
         unknown_launch = execution_registered and isinstance(
             exc.__cause__,
@@ -686,7 +704,9 @@ def dispatch_loop(
                 interval=interval_seconds,
             )
         except (OSError, RuntimeError, ValueError) as exc:
-            print(f"output-sync worker start failed: {exc}", file=sys.stderr, flush=True)
+            print(
+                f"output-sync worker start failed: {exc}", file=sys.stderr, flush=True
+            )
         if outcome.action == "idle" and not active:
             return 0
         time.sleep(interval_seconds)
@@ -702,7 +722,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     paths = controller_paths(args.controller_root, args.project_id)
     if args.once:
-        print(json.dumps(dispatch_once(paths, timeout=args.timeout).__dict__, sort_keys=True))
+        print(
+            json.dumps(
+                dispatch_once(paths, timeout=args.timeout).__dict__, sort_keys=True
+            )
+        )
         return 0
     return dispatch_loop(
         paths,

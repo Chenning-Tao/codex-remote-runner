@@ -128,7 +128,9 @@ def test_add_prepares_queued_revision_and_extends_one_run(
     monkeypatch.setattr(server_addition, "probe_project_pool", probe)
     monkeypatch.setattr(server_addition, "prepare_revision", prepare)
 
-    result = server_addition.add(args(tmp_path))
+    addition_args = args(tmp_path)
+    addition_args.placement_token = "placement-token"
+    result = server_addition.add(addition_args)
 
     assert probed["explicit_server"] == "compute-d"
     assert probed["minimum_cores"] == 1
@@ -141,6 +143,7 @@ def test_add_prepares_queued_revision_and_extends_one_run(
     prepared_servers = payload["prepared_servers"]
     assert isinstance(prepared_servers, list)
     assert prepared_servers[0]["name"] == "compute-d"
+    assert payload["placement_token"] == "placement-token"
     assert result["prepared_servers"] == ["compute-c", "compute-d"]
     assert result["outcome"] == {"action": "extended", "added_servers": 1}
 

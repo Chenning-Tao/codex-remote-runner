@@ -17,12 +17,16 @@ from remote_runner._internal.controller.registry import (
     list_queued_all,
     load_job,
     recover_dispatching_state,
+    release_queued_job_update,
     release_dispatch_lease,
     extend_queued_all,
     extend_queued_job,
     submit_job,
+    placement_update_active,
+    reserve_queued_job_update,
     set_server_drained,
     transition_queued_state,
+    update_queued_job,
 )
 from remote_runner._internal.execution_registry import (
     load_yaml,
@@ -116,12 +120,12 @@ def test_all_server_job_can_be_extended_while_queued(tmp_path: Path) -> None:
 
     assert results == [{"run_id": RUN_ID, "status": "extended", "added_servers": 1}]
     assert list_queued_all(paths)[0]["prepared_servers"] == ["compute-a", "archive"]
-    assert [
-        server["name"] for server in load_job(paths, RUN_ID)[0]["prepared_servers"]
-    ] == [
+    loaded = load_job(paths, RUN_ID)[0]
+    assert [server["name"] for server in loaded["prepared_servers"]] == [
         "compute-a",
         "archive",
     ]
+    assert loaded["eligible_servers"] == ["compute-a", "archive"]
 
 
 def test_pool_extension_skips_snapshot_and_nonqueued_jobs(tmp_path: Path) -> None:
@@ -226,6 +230,155 @@ def test_urgent_jobs_precede_normal_jobs_and_remain_fifo(tmp_path: Path) -> None
         "rr-2222222222222222",
         RUN_ID,
     ]
+
+
+def test_queued_jobs_can_be_reordered_within_their_scheduling_lane(
+    tmp_path: Path,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    run_ids = [RUN_ID, "rr-1111111111111111", "rr-2222222222222222"]
+    for index, run_id in enumerate(run_ids):
+        item = queued_job()
+        item["run_id"] = run_id
+        submit_job(paths, item, now=f"2026-01-01T00:00:0{index}+00:00")
+
+    result = update_queued_job(
+        paths,
+        "rr-2222222222222222",
+        expected_revision=0,
+        move="up",
+    )
+
+    assert result["changed"] is True
+    assert [job["run_id"] for job, _state in list_queued(paths)] == [
+        RUN_ID,
+        "rr-2222222222222222",
+        "rr-1111111111111111",
+    ]
+    assert [load_job(paths, run_id)[1]["revision"] for run_id in run_ids] == [
+        1,
+        1,
+        1,
+    ]
+
+
+def test_queued_job_priority_and_eligible_servers_can_be_changed(
+    tmp_path: Path,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    item = queued_job()
+    item["output_path"] = None
+    item["prepared_servers"].append(
+        {
+            **item["prepared_servers"][0],
+            "name": "compute-b",
+            "ssh": "compute-b",
+        }
+    )
+    submit_job(paths, item)
+
+    result = update_queued_job(
+        paths,
+        RUN_ID,
+        expected_revision=0,
+        queue_priority="urgent",
+        eligible_servers=["compute-b"],
+    )
+
+    assert result["job"]["queue_priority"] == "urgent"
+    assert result["job"]["eligible_servers"] == ["compute-b"]
+    assert result["state"]["revision"] == 1
+    with pytest.raises(RuntimeError, match="revision conflict"):
+        update_queued_job(
+            paths,
+            RUN_ID,
+            expected_revision=0,
+            queue_priority="normal",
+        )
+    with pytest.raises(ValueError, match="unprepared server"):
+        update_queued_job(
+            paths,
+            RUN_ID,
+            expected_revision=1,
+            eligible_servers=["unknown"],
+        )
+
+
+def test_queue_update_reservation_guards_preparation_and_commit(
+    tmp_path: Path,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    item = queued_job()
+    item["output_path"] = None
+    submit_job(paths, item)
+
+    reservation = reserve_queued_job_update(
+        paths,
+        RUN_ID,
+        expected_revision=0,
+        requested_servers=["compute-a", "compute-b"],
+        ttl_seconds=60,
+    )
+
+    token = reservation["token"]
+    expires_at = reservation["state"]["placement_update"]["expires_at"]
+    assert placement_update_active(reservation["state"], now=expires_at - 1) is True
+    assert placement_update_active(reservation["state"], now=expires_at + 1) is False
+    with pytest.raises(RuntimeError, match="placement update in progress"):
+        update_queued_job(
+            paths,
+            RUN_ID,
+            expected_revision=1,
+            queue_priority="urgent",
+        )
+
+    prepared = {
+        **item["prepared_servers"][0],
+        "name": "compute-b",
+        "ssh": "compute-b",
+    }
+    extended = extend_queued_job(
+        paths,
+        RUN_ID,
+        revision="a" * 40,
+        prepared_servers=[prepared],
+        placement_token=token,
+    )
+    assert extended["prepared_servers"] == ["compute-a", "compute-b"]
+
+    committed = update_queued_job(
+        paths,
+        RUN_ID,
+        expected_revision=1,
+        queue_priority="urgent",
+        eligible_servers=["compute-b"],
+        placement_token=token,
+    )
+    assert committed["job"]["eligible_servers"] == ["compute-b"]
+    assert committed["state"]["revision"] == 2
+    assert "placement_update" not in committed["state"]
+
+
+def test_queue_update_reservation_can_be_released(tmp_path: Path) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, queued_job())
+    reservation = reserve_queued_job_update(
+        paths,
+        RUN_ID,
+        expected_revision=0,
+        requested_servers=["compute-a"],
+        ttl_seconds=60,
+    )
+
+    released = release_queued_job_update(
+        paths,
+        RUN_ID,
+        token=reservation["token"],
+    )
+
+    assert released["changed"] is True
+    assert released["state"]["revision"] == 2
+    assert "placement_update" not in released["state"]
 
 
 def test_invalid_queue_priority_is_rejected(tmp_path: Path) -> None:
@@ -449,7 +602,9 @@ def test_dispatch_lease_is_controller_global_across_projects(tmp_path: Path) -> 
     )
 
 
-def test_server_drain_is_controller_global_and_blocks_new_leases(tmp_path: Path) -> None:
+def test_server_drain_is_controller_global_and_blocks_new_leases(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "controller"
     first = controller_paths(root, "project-a")
     second = controller_paths(root, "project-b")
@@ -471,12 +626,15 @@ def test_server_drain_is_controller_global_and_blocks_new_leases(tmp_path: Path)
         run_id=RUN_ID,
         ttl_seconds=120,
     )
-    assert acquire_maintenance_lease(
-        second,
-        server="burst",
-        run_id=RUN_ID,
-        ttl_seconds=120,
-    ) is False
+    assert (
+        acquire_maintenance_lease(
+            second,
+            server="burst",
+            run_id=RUN_ID,
+            ttl_seconds=120,
+        )
+        is False
+    )
     assert set_server_drained(second, "burst", drained=True)["changed"] is False
     assert release_dispatch_lease(
         first,

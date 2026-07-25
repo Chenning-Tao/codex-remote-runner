@@ -118,6 +118,76 @@ def test_submit_persists_job_and_starts_dispatcher_when_queued(
     assert started == ["example"]
 
 
+def test_edit_queued_job_updates_priority_and_starts_dispatcher(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, job())
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"expected_revision": 0, "queue_priority": "urgent"})),
+    )
+    started: list[str] = []
+    monkeypatch.setattr(
+        controller_service,
+        "ensure_dispatcher",
+        lambda **kwargs: started.append(str(kwargs["project_id"])) or True,
+    )
+
+    result = controller_service.edit_queued_job(
+        argparse.Namespace(
+            controller_root=paths.root,
+            project_id="example",
+            run_id="rr-0123456789abcdef",
+            timeout=8,
+            interval=30,
+        )
+    )
+
+    assert result["changed"] is True
+    assert result["job"]["queue_priority"] == "urgent"
+    assert result["state"]["revision"] == 1
+    assert result["dispatcher_started"] is True
+    assert started == ["example"]
+
+
+def test_queue_update_reservation_exposes_no_token_digest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, job())
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "expected_revision": 0,
+                    "requested_servers": ["compute-a", "compute-b"],
+                    "ttl_seconds": 120,
+                }
+            )
+        ),
+    )
+    args = argparse.Namespace(
+        controller_root=paths.root,
+        project_id="example",
+        run_id="rr-0123456789abcdef",
+        timeout=8,
+        interval=30,
+    )
+
+    result = controller_service.reserve_queue_update(args)
+
+    assert isinstance(result["token"], str)
+    assert result["state"]["revision"] == 1
+    assert result["state"]["placement_update"]["status"] == "preparing"
+    assert "token_sha256" not in result["state"]["placement_update"]
+
+
 def test_submit_persists_output_sync_configuration(
     tmp_path: Path,
     monkeypatch,
@@ -384,7 +454,9 @@ def test_wait_run_returns_stable_attention_state_without_timing_out(
         status="dispatched",
     )
     initial = controller_service.load_run_view(paths, "rr-0123456789abcdef")
-    monkeypatch.setattr(controller_service, "ensure_dispatcher", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        controller_service, "ensure_dispatcher", lambda **_kwargs: False
+    )
 
     result = controller_service.wait_run(
         argparse.Namespace(
@@ -443,7 +515,9 @@ def test_wait_runs_returns_one_ordered_snapshot_for_a_changed_cohort(
     second["run_id"] = "rr-fedcba9876543210"
     submit_job(paths, first)
     submit_job(paths, second)
-    monkeypatch.setattr(controller_service, "ensure_dispatcher", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        controller_service, "ensure_dispatcher", lambda **_kwargs: False
+    )
 
     result = _wait_runs(
         monkeypatch,
@@ -484,7 +558,9 @@ def test_wait_runs_does_not_spin_on_one_stable_terminal_member(
         run_id: controller_service.load_run_view(paths, run_id)["etag"]
         for run_id in (first["run_id"], second["run_id"])
     }
-    monkeypatch.setattr(controller_service, "ensure_dispatcher", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        controller_service, "ensure_dispatcher", lambda **_kwargs: False
+    )
 
     result = _wait_runs(
         monkeypatch,
@@ -518,9 +594,7 @@ def test_wait_runs_wakes_once_every_member_is_terminal(
             status="stopped",
         )
     etags = {
-        item["run_id"]: controller_service.load_run_view(paths, item["run_id"])[
-            "etag"
-        ]
+        item["run_id"]: controller_service.load_run_view(paths, item["run_id"])["etag"]
         for item in (first, second)
     }
 

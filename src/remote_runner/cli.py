@@ -280,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     web_parser = subparsers.add_parser(
         "web",
-        help="open the optional read-only dashboard in a local browser",
+        help="open the optional local dashboard and queue controls",
     )
     _add_project_config(web_parser)
     web_parser.add_argument(
@@ -289,6 +289,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SERVER_REGISTRY,
     )
     web_parser.add_argument("--timeout", type=int, default=8)
+    web_parser.add_argument("--source-repo", type=Path)
+    web_parser.add_argument("--ssh-profile", default="auto")
+    web_parser.add_argument("--prepare-timeout", type=_positive_int, default=60)
     web_parser.add_argument(
         "--stop-timeout",
         type=_positive_int,

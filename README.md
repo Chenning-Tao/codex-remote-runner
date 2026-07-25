@@ -48,7 +48,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.2.0'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.3.0'
 remote-runner --help
 ```
 
@@ -98,8 +98,11 @@ remote-runner web --project-config /absolute/path/to/.remote-runner.yaml
 The command binds only to `127.0.0.1`, opens the system browser, and streams the
 same controller snapshot used by the TUI. Use `--no-open` to leave the browser
 closed or `--port PORT` to select another local port. The browser never receives
-SSH configuration. Its only controller write action is stopping one exact queued
-or running workload after an explicit confirmation in the details drawer.
+SSH configuration. The details drawer can stop one exact queued or running
+workload, change a queued workload's priority and eligible servers, and prepare
+its exact revision on a newly selected compatible server before enabling it.
+Queue writes use controller revisions and a bounded preparation reservation so
+stale edits or work that has entered dispatch are rejected.
 
 ## Run
 

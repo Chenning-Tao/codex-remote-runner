@@ -122,6 +122,11 @@ def add(args: argparse.Namespace) -> dict[str, Any]:
         payload={
             "revision": revision,
             "prepared_servers": [descriptor],
+            **(
+                {"placement_token": args.placement_token}
+                if getattr(args, "placement_token", None) is not None
+                else {}
+            ),
         },
     )
     status = controller.get("status")
