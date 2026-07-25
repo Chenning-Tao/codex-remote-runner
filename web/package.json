@@ -16,7 +16,7 @@
     "@patternfly/react-table": "6.6.0",
     "lucide-react": "1.26.0",
     "react": "19.2.0",
-    "react-dom": "19.2.0"
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@types/node": "24.10.1",
