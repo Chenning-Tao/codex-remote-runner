@@ -300,6 +300,11 @@ class AppServerClient:
                     "threadId": validate_thread_id(thread_id),
                     "clientUserMessageId": wake_id,
                     "input": [{"type": "text", "text": prompt}],
+                    "approvalPolicy": "never",
+                    "sandboxPolicy": {
+                        "type": "readOnly",
+                        "networkAccess": True,
+                    },
                 },
             )
         )
