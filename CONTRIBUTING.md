@@ -38,6 +38,10 @@ request. Public APIs and state formats follow semantic versioning from the first
 stable release; during 0.x development, breaking changes must still be documented
 in `CHANGELOG.md`.
 
+## Releases
+
+Use the version tag alone, such as `v0.3.2`, as the GitHub Release title.
+
 ## Reporting Bugs
 
 Include the local and controller operating systems, Remote Runner version, command
