@@ -336,6 +336,7 @@ def test_web_queue_update_requires_revision_and_refreshes_snapshot(
                 "run_id": "rr-0123456789abcdef",
                 "expected_revision": 3,
                 "queue_priority": "urgent",
+                "workload_class": "test",
                 "eligible_servers": ["compute-b"],
             },
         )
@@ -347,11 +348,92 @@ def test_web_queue_update_requires_revision_and_refreshes_snapshot(
             {
                 "expected_revision": 3,
                 "queue_priority": "urgent",
+                "workload_class": "test",
                 "eligible_servers": ["compute-b"],
             },
         )
     ]
     assert probe.document()["snapshot"]["queue"][0]["job"]["queue_priority"] == "urgent"
+
+
+def test_web_capacity_update_requires_revision_and_refreshes_snapshot(
+    tmp_path: Path,
+) -> None:
+    snapshots = iter(
+        (
+            {
+                "servers": [
+                    {
+                        "name": "compute-a",
+                        "standard_slots": 1,
+                        "test_slots": 1,
+                        "capacity_revision": 2,
+                    }
+                ],
+                "queue": [],
+            },
+            {
+                "servers": [
+                    {
+                        "name": "compute-a",
+                        "standard_slots": 3,
+                        "test_slots": 4,
+                        "capacity_revision": 3,
+                    }
+                ],
+                "queue": [],
+            },
+        )
+    )
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: next(snapshots),
+    )
+    asyncio.run(probe.probe_once())
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def update_query(
+        _args: argparse.Namespace,
+        server: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        calls.append((server, payload))
+        return {"changed": True}
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        capacity_update_query=update_query,
+    )
+    request = {
+        "server": "compute-a",
+        "expected_revision": 2,
+        "standard_slots": 3,
+        "test_slots": 4,
+    }
+
+    with TestClient(app) as client:
+        rejected = client.patch("/api/servers/compute-a/capacity", json=request)
+        assert rejected.status_code == 403
+        response = client.patch(
+            "/api/servers/compute-a/capacity",
+            headers={"x-remote-runner-action": "update-capacity"},
+            json=request,
+        )
+
+    assert response.status_code == 200
+    assert calls == [
+        (
+            "compute-a",
+            {"expected_revision": 2, "standard_slots": 3, "test_slots": 4},
+        )
+    ]
+    server = probe.document()["snapshot"]["servers"][0]
+    assert server["standard_slots"] == 3
+    assert server["capacity_revision"] == 3
 
 
 def test_web_queue_update_reports_conflict_and_refreshes_snapshot(

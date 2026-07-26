@@ -33,6 +33,7 @@ from .registry import (
     list_drained_servers,
     list_jobs,
     list_queued,
+    list_server_capacities,
     placement_update_active,
     recover_dispatching_state,
     release_dispatch_lease,
@@ -117,6 +118,21 @@ class ProbedServer:
     capacity: CapacityCandidate
     active_standard_count: int
     active_test_count: int
+
+
+@dataclass(frozen=True)
+class PlannedDispatch:
+    job: dict[str, Any]
+    state: dict[str, Any]
+    selected: ProbedServer
+    alternatives: tuple[ProbedServer, ...] = ()
+
+
+@dataclass(frozen=True)
+class CapacitySnapshot:
+    reachable: dict[tuple[object, ...], ProbedServer]
+    failures: tuple[str, ...]
+    drained_servers: frozenset[str]
 
 
 def probe_server_state(ssh: str, python: str, timeout: int) -> dict[str, Any]:
@@ -248,15 +264,72 @@ def _probe_prepared_servers(
     return reachable, failures
 
 
+def _server_snapshot_key(server: dict[str, Any]) -> tuple[object, ...]:
+    return (
+        str(server["name"]),
+        str(server["ssh"]),
+        str(server["python"]),
+        int(server["configured_cores"]),
+        int(server["priority"]),
+    )
+
+
+def _with_current_capacity(
+    server: dict[str, Any],
+    capacities: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    current = capacities.get(str(server["name"]))
+    if current is None:
+        return {**server, "standard_slots": int(server.get("standard_slots", 1))}
+    return {
+        **server,
+        "standard_slots": int(current["standard_slots"]),
+        "test_slots": int(current["test_slots"]),
+    }
+
+
+def _probe_capacity_snapshot(
+    paths: ControllerPaths,
+    queued: list[tuple[dict[str, Any], dict[str, Any]]],
+    timeout: int,
+) -> CapacitySnapshot:
+    drained_servers = frozenset(list_drained_servers(paths))
+    capacities = list_server_capacities(paths)
+    unique_servers: dict[tuple[object, ...], dict[str, Any]] = {}
+    for job, _state in queued:
+        for prepared_server in eligible_prepared_servers(job):
+            server = _with_current_capacity(prepared_server, capacities)
+            if str(server["name"]) in drained_servers:
+                continue
+            unique_servers.setdefault(_server_snapshot_key(server), server)
+    reachable, failures = _probe_prepared_servers(
+        list(unique_servers.values()), timeout
+    )
+    return CapacitySnapshot(
+        reachable={_server_snapshot_key(item.server): item for item in reachable},
+        failures=tuple(failures),
+        drained_servers=drained_servers,
+    )
+
+
 def _has_workload_capacity(workload_class: str, candidate: ProbedServer) -> bool:
     if workload_class == "standard":
-        return candidate.active_standard_count == 0
+        return candidate.active_standard_count < int(
+            candidate.server.get("standard_slots", 1)
+        )
     return candidate.active_test_count < int(candidate.server.get("test_slots", 0))
 
 
 def _capacity_message(workload_class: str, candidates: list[ProbedServer]) -> str:
     if workload_class == "standard":
-        return "runner capacity saturated"
+        used = max(
+            (candidate.active_standard_count for candidate in candidates), default=0
+        )
+        total = max(
+            (int(candidate.server.get("standard_slots", 1)) for candidate in candidates),
+            default=0,
+        )
+        return f"standard slots full ({used}/{total})"
     used = max((candidate.active_test_count for candidate in candidates), default=0)
     total = max(
         (int(candidate.server.get("test_slots", 0)) for candidate in candidates),
@@ -292,8 +365,10 @@ def _select_server_for_job(
 ) -> tuple[ProbedServer | None, str]:
     workload_class = str(job["workload_class"])
     drained_servers = set(list_drained_servers(paths))
+    capacities = list_server_capacities(paths)
     eligible_servers = []
-    for server in eligible_prepared_servers(job):
+    for prepared_server in eligible_prepared_servers(job):
+        server = _with_current_capacity(prepared_server, capacities)
         if str(server["name"]) in drained_servers:
             continue
         if (
@@ -328,7 +403,10 @@ def _select_server_for_job(
             continue
         acquired = True
         try:
-            current = _probe_prepared_server(candidate.server, timeout)
+            current_server = _with_current_capacity(
+                candidate.server, list_server_capacities(paths)
+            )
+            current = _probe_prepared_server(current_server, timeout)
         except RuntimeError:
             release_dispatch_lease(
                 paths,
@@ -389,6 +467,164 @@ def _select_backfill_from_lane(
         protected_servers.update(eligible_servers)
 
     return None, None, None
+
+
+def _select_from_snapshot(
+    job: dict[str, Any],
+    snapshot: CapacitySnapshot,
+    *,
+    reserved_servers: set[str],
+    allowed_server_names: set[str] | None = None,
+) -> tuple[list[ProbedServer], str]:
+    workload_class = str(job["workload_class"])
+    prepared = eligible_prepared_servers(job)
+    eligible = [
+        server
+        for server in prepared
+        if str(server["name"]) not in snapshot.drained_servers
+        and str(server["name"]) not in reserved_servers
+        and (
+            allowed_server_names is None or str(server["name"]) in allowed_server_names
+        )
+    ]
+    reachable = []
+    for server in eligible:
+        probed = snapshot.reachable.get(_server_snapshot_key(server))
+        if probed is None:
+            continue
+        # Capacity is shareable, but launch paths remain frozen per queued job.
+        reachable.append(
+            ProbedServer(
+                server={
+                    **server,
+                    "standard_slots": int(
+                        probed.server.get("standard_slots", 1)
+                    ),
+                    "test_slots": int(probed.server.get("test_slots", 0)),
+                },
+                capacity=probed.capacity,
+                active_standard_count=probed.active_standard_count,
+                active_test_count=probed.active_test_count,
+            )
+        )
+    if not reachable:
+        prepared_names = {str(server["name"]) for server in prepared}
+        if prepared_names and prepared_names <= snapshot.drained_servers:
+            return [], "all prepared servers are drained"
+        failures = [
+            failure
+            for failure in snapshot.failures
+            if failure.partition(":")[0] in prepared_names
+        ]
+        return [], "; ".join(failures) or "no available server in dispatch batch"
+    ranked = _rank_for_workload(workload_class, reachable)
+    if not ranked:
+        return [], _capacity_message(workload_class, reachable)
+    return ranked, ""
+
+
+def _plan_backfill_from_lane(
+    lane: list[tuple[dict[str, Any], dict[str, Any]]],
+    snapshot: CapacitySnapshot,
+    *,
+    reserved_servers: set[str],
+) -> PlannedDispatch | None:
+    head_job, _head_state = lane[0]
+    protected_servers = {
+        str(server["name"])
+        for server in eligible_prepared_servers(head_job)
+        if str(server["name"]) not in snapshot.drained_servers
+    }
+    for candidate_job, candidate_state in lane[1:]:
+        eligible_servers = {
+            str(server["name"])
+            for server in eligible_prepared_servers(candidate_job)
+            if str(server["name"]) not in snapshot.drained_servers
+        }
+        safe_servers = eligible_servers - protected_servers
+        if safe_servers:
+            candidates, _message = _select_from_snapshot(
+                candidate_job,
+                snapshot,
+                reserved_servers=reserved_servers,
+                allowed_server_names=safe_servers,
+            )
+            if candidates:
+                return PlannedDispatch(
+                    candidate_job,
+                    candidate_state,
+                    candidates[0],
+                    tuple(candidates[1:]),
+                )
+        protected_servers.update(eligible_servers)
+    return None
+
+
+def _plan_dispatch_batch(
+    queued: list[tuple[dict[str, Any], dict[str, Any]]],
+    snapshot: CapacitySnapshot,
+) -> tuple[list[PlannedDispatch], DispatchOutcome]:
+    lanes = [
+        [row for row in queued if row[0]["workload_class"] == workload_class]
+        for workload_class in ("standard", "test")
+    ]
+    lanes = [lane for lane in lanes if lane]
+    planned: list[PlannedDispatch] = []
+    reserved_servers: set[str] = set()
+    terminal = DispatchOutcome(action="idle", run_id=None)
+
+    while lanes:
+        blocked: list[tuple[str, str, str]] = []
+        choice: PlannedDispatch | None = None
+        choice_lane: list[tuple[dict[str, Any], dict[str, Any]]] | None = None
+        for lane in lanes:
+            candidate_job, candidate_state = lane[0]
+            candidates, message = _select_from_snapshot(
+                candidate_job,
+                snapshot,
+                reserved_servers=reserved_servers,
+            )
+            if candidates:
+                choice = PlannedDispatch(
+                    candidate_job,
+                    candidate_state,
+                    candidates[0],
+                    tuple(candidates[1:]),
+                )
+                choice_lane = lane
+                break
+            blocked.append(
+                (
+                    str(candidate_job["workload_class"]),
+                    str(candidate_job["run_id"]),
+                    message,
+                )
+            )
+        if choice is None:
+            for lane in lanes:
+                choice = _plan_backfill_from_lane(
+                    lane,
+                    snapshot,
+                    reserved_servers=reserved_servers,
+                )
+                if choice is not None:
+                    choice_lane = lane
+                    break
+        if choice is None or choice_lane is None:
+            _workload_class, run_id, message = blocked[0]
+            if len(blocked) > 1:
+                message = "; ".join(
+                    f"{kind}: {detail}" for kind, _run_id, detail in blocked
+                )
+            terminal = DispatchOutcome(action="queued", run_id=run_id, message=message)
+            break
+
+        planned.append(choice)
+        reserved_servers.add(choice.selected.capacity.name)
+        choice_lane.remove((choice.job, choice.state))
+        lanes = [lane for lane in lanes if lane]
+
+    return planned, terminal
 
 
 def _ensure_controller_anchor(paths: ControllerPaths) -> None:
@@ -479,105 +715,17 @@ def _fail_registered_execution(paths: ControllerPaths, run_id: str, error: str) 
     )
 
 
-def dispatch_once(paths: ControllerPaths, *, timeout: int = 8) -> DispatchOutcome:
-    while True:
-        dispatching = list_jobs(paths, statuses={"dispatching"})
-        if not dispatching:
-            break
-        job, state = dispatching[0]
-        run_id = str(job["run_id"])
-        if paths.config_path.is_file():
-            execution_paths = project_paths(paths.config_path)
-            if registry_kind(execution_paths, run_id) == "current":
-                transition_queued_state(
-                    paths,
-                    run_id,
-                    expected_revision=int(state["revision"]),
-                    status="dispatched",
-                )
-                continue
-        if has_unexpired_dispatch_lease(paths, run_id=run_id):
-            return DispatchOutcome(action="busy", run_id=run_id)
-        recover_dispatching_state(
-            paths,
-            run_id,
-            expected_revision=int(state["revision"]),
-        )
-
-    queued = [
-        row for row in list_queued(paths) if not placement_update_active(row[1])
-    ]
-    if not queued:
-        return DispatchOutcome(action="idle", run_id=None)
-    lanes: list[list[tuple[dict[str, Any], dict[str, Any]]]] = []
-    for workload_class in ("standard", "test"):
-        lane = [row for row in queued if row[0]["workload_class"] == workload_class]
-        if lane:
-            lanes.append(lane)
-
-    blocked: list[tuple[str, str, str]] = []
-    selected: ProbedServer | None = None
-    job: dict[str, Any] | None = None
-    state: dict[str, Any] | None = None
-    for lane in lanes:
-        candidate_job, candidate_state = lane[0]
-        selected, message = _select_server_for_job(
-            paths,
-            candidate_job,
-            timeout=timeout,
-        )
-        if selected is not None:
-            job = candidate_job
-            state = candidate_state
-            break
-        blocked.append(
-            (
-                str(candidate_job["workload_class"]),
-                str(candidate_job["run_id"]),
-                message,
-            )
-        )
-    if selected is None:
-        for lane in lanes:
-            selected, candidate_job, candidate_state = _select_backfill_from_lane(
-                paths,
-                lane,
-                timeout=timeout,
-            )
-            if (
-                selected is not None
-                and candidate_job is not None
-                and candidate_state is not None
-            ):
-                job = candidate_job
-                state = candidate_state
-                break
-    if selected is None or job is None or state is None:
-        workload_class, run_id, message = blocked[0]
-        if len(blocked) > 1:
-            message = "; ".join(f"{kind}: {detail}" for kind, _run, detail in blocked)
-        return DispatchOutcome(action="queued", run_id=run_id, message=message)
-
+def _launch_dispatching_job(
+    paths: ControllerPaths,
+    planned: PlannedDispatch,
+    *,
+    timeout: int,
+) -> DispatchOutcome:
+    job = planned.job
+    state = planned.state
+    selected_server = planned.selected.server
+    selected_capacity = planned.selected.capacity
     run_id = str(job["run_id"])
-    selected_server = selected.server
-    selected_capacity = selected.capacity
-
-    try:
-        transition_queued_state(
-            paths,
-            run_id,
-            expected_revision=int(state["revision"]),
-            status="dispatching",
-        )
-    except RuntimeError as exc:
-        release_dispatch_lease(
-            paths,
-            server=selected_capacity.name,
-            run_id=run_id,
-        )
-        if str(exc) == "queued state revision conflict":
-            return dispatch_once(paths, timeout=timeout)
-        raise
     execution_registered = False
     release_lease = True
     try:
@@ -667,6 +815,244 @@ def dispatch_once(paths: ControllerPaths, *, timeout: int = 8) -> DispatchOutcom
             release_dispatch_lease(paths, server=selected_capacity.name, run_id=run_id)
 
 
+def _reconcile_dispatching_jobs(paths: ControllerPaths) -> DispatchOutcome | None:
+    while True:
+        dispatching = list_jobs(paths, statuses={"dispatching"})
+        if not dispatching:
+            return None
+        job, state = dispatching[0]
+        run_id = str(job["run_id"])
+        if paths.config_path.is_file():
+            execution_paths = project_paths(paths.config_path)
+            if registry_kind(execution_paths, run_id) == "current":
+                transition_queued_state(
+                    paths,
+                    run_id,
+                    expected_revision=int(state["revision"]),
+                    status="dispatched",
+                )
+                continue
+        if has_unexpired_dispatch_lease(paths, run_id=run_id):
+            return DispatchOutcome(action="busy", run_id=run_id)
+        recover_dispatching_state(
+            paths,
+            run_id,
+            expected_revision=int(state["revision"]),
+        )
+
+
+def dispatch_once(paths: ControllerPaths, *, timeout: int = 8) -> DispatchOutcome:
+    reconciliation = _reconcile_dispatching_jobs(paths)
+    if reconciliation is not None:
+        return reconciliation
+
+    queued = [row for row in list_queued(paths) if not placement_update_active(row[1])]
+    if not queued:
+        return DispatchOutcome(action="idle", run_id=None)
+    lanes: list[list[tuple[dict[str, Any], dict[str, Any]]]] = []
+    for workload_class in ("standard", "test"):
+        lane = [row for row in queued if row[0]["workload_class"] == workload_class]
+        if lane:
+            lanes.append(lane)
+
+    blocked: list[tuple[str, str, str]] = []
+    selected: ProbedServer | None = None
+    job: dict[str, Any] | None = None
+    state: dict[str, Any] | None = None
+    for lane in lanes:
+        candidate_job, candidate_state = lane[0]
+        selected, message = _select_server_for_job(
+            paths,
+            candidate_job,
+            timeout=timeout,
+        )
+        if selected is not None:
+            job = candidate_job
+            state = candidate_state
+            break
+        blocked.append(
+            (
+                str(candidate_job["workload_class"]),
+                str(candidate_job["run_id"]),
+                message,
+            )
+        )
+    if selected is None:
+        for lane in lanes:
+            selected, candidate_job, candidate_state = _select_backfill_from_lane(
+                paths,
+                lane,
+                timeout=timeout,
+            )
+            if (
+                selected is not None
+                and candidate_job is not None
+                and candidate_state is not None
+            ):
+                job = candidate_job
+                state = candidate_state
+                break
+    if selected is None or job is None or state is None:
+        workload_class, run_id, message = blocked[0]
+        if len(blocked) > 1:
+            message = "; ".join(f"{kind}: {detail}" for kind, _run, detail in blocked)
+        return DispatchOutcome(action="queued", run_id=run_id, message=message)
+
+    run_id = str(job["run_id"])
+    selected_capacity = selected.capacity
+
+    try:
+        transition_queued_state(
+            paths,
+            run_id,
+            expected_revision=int(state["revision"]),
+            status="dispatching",
+        )
+    except RuntimeError as exc:
+        release_dispatch_lease(
+            paths,
+            server=selected_capacity.name,
+            run_id=run_id,
+        )
+        if str(exc) == "queued state revision conflict":
+            return dispatch_once(paths, timeout=timeout)
+        raise
+    return _launch_dispatching_job(
+        paths,
+        PlannedDispatch(job, state, selected),
+        timeout=timeout,
+    )
+
+
+def _reserve_planned_dispatch(
+    paths: ControllerPaths,
+    planned: PlannedDispatch,
+    *,
+    timeout: int,
+    other_planned_servers: frozenset[str],
+) -> PlannedDispatch | DispatchOutcome:
+    run_id = str(planned.job["run_id"])
+    workload_class = str(planned.job["workload_class"])
+    ttl = int(planned.job.get("lease_seconds", 120))
+    last_message = "dispatch leases busy"
+    for candidate in (planned.selected, *planned.alternatives):
+        server_name = candidate.capacity.name
+        if server_name in other_planned_servers:
+            continue
+        if not acquire_dispatch_lease(
+            paths,
+            server=server_name,
+            run_id=run_id,
+            ttl_seconds=ttl,
+        ):
+            continue
+        try:
+            current_server = _with_current_capacity(
+                candidate.server, list_server_capacities(paths)
+            )
+            current = _probe_prepared_server(current_server, timeout)
+        except RuntimeError as exc:
+            last_message = str(exc)
+            release_dispatch_lease(paths, server=server_name, run_id=run_id)
+            continue
+        if _has_workload_capacity(workload_class, current):
+            return PlannedDispatch(planned.job, planned.state, current)
+        last_message = _capacity_message(workload_class, [current])
+        release_dispatch_lease(paths, server=server_name, run_id=run_id)
+    return DispatchOutcome(
+        action="queued",
+        run_id=run_id,
+        server=planned.selected.capacity.name,
+        message=last_message,
+    )
+
+
+def dispatch_batch(
+    paths: ControllerPaths,
+    *,
+    timeout: int = 8,
+) -> list[DispatchOutcome]:
+    reconciliation = _reconcile_dispatching_jobs(paths)
+    if reconciliation is not None:
+        return [reconciliation]
+    queued = [row for row in list_queued(paths) if not placement_update_active(row[1])]
+    if not queued:
+        return [DispatchOutcome(action="idle", run_id=None)]
+
+    snapshot = _probe_capacity_snapshot(paths, queued, timeout)
+    planned, terminal = _plan_dispatch_batch(queued, snapshot)
+    if not planned:
+        return [terminal]
+
+    workers = min(MAX_CAPACITY_PROBE_WORKERS, len(planned))
+    planned_servers = frozenset(item.selected.capacity.name for item in planned)
+
+    def reserve(item: PlannedDispatch) -> PlannedDispatch | DispatchOutcome:
+        return _reserve_planned_dispatch(
+            paths,
+            item,
+            timeout=timeout,
+            other_planned_servers=planned_servers - {item.selected.capacity.name},
+        )
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        reserved = list(executor.map(reserve, planned))
+
+    outcomes = [item for item in reserved if isinstance(item, DispatchOutcome)]
+    dispatching: list[PlannedDispatch] = []
+    try:
+        for item in reserved:
+            if isinstance(item, DispatchOutcome):
+                continue
+            run_id = str(item.job["run_id"])
+            try:
+                transition_queued_state(
+                    paths,
+                    run_id,
+                    expected_revision=int(item.state["revision"]),
+                    status="dispatching",
+                )
+            except RuntimeError as exc:
+                release_dispatch_lease(
+                    paths,
+                    server=item.selected.capacity.name,
+                    run_id=run_id,
+                )
+                if str(exc) == "queued state revision conflict":
+                    outcomes.append(
+                        DispatchOutcome(
+                            action="queued",
+                            run_id=run_id,
+                            server=item.selected.capacity.name,
+                            message=str(exc),
+                        )
+                    )
+                    continue
+                raise
+            dispatching.append(item)
+    except Exception:
+        for item in reserved:
+            if not isinstance(item, DispatchOutcome) and item not in dispatching:
+                release_dispatch_lease(
+                    paths,
+                    server=item.selected.capacity.name,
+                    run_id=str(item.job["run_id"]),
+                )
+        raise
+
+    if not dispatching:
+        return outcomes or [terminal]
+    _ensure_controller_anchor(paths)
+    with ThreadPoolExecutor(max_workers=len(dispatching)) as executor:
+        outcomes.extend(
+            executor.map(
+                lambda item: _launch_dispatching_job(paths, item, timeout=timeout),
+                dispatching,
+            )
+        )
+    return outcomes
+
+
 def dispatch_loop(
     paths: ControllerPaths,
     *,
@@ -693,8 +1079,9 @@ def dispatch_loop(
                 if monitored.get("authoritative_status") not in TERMINAL_STATUSES:
                     active = True
         while True:
-            outcome = dispatch_once(paths, timeout=timeout)
-            if outcome.action != "started":
+            outcomes = dispatch_batch(paths, timeout=timeout)
+            started = any(outcome.action == "started" for outcome in outcomes)
+            if not started:
                 break
             active = True
         try:
@@ -707,7 +1094,7 @@ def dispatch_loop(
             print(
                 f"output-sync worker start failed: {exc}", file=sys.stderr, flush=True
             )
-        if outcome.action == "idle" and not active:
+        if any(outcome.action == "idle" for outcome in outcomes) and not active:
             return 0
         time.sleep(interval_seconds)
 

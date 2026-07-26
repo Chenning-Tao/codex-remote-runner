@@ -76,6 +76,7 @@ def test_build_server_inventory_includes_idle_disabled_and_misconfigured_servers
         "auto_select": True,
         "python": "/opt/python3",
         "configured_cores": 256,
+        "standard_slots": 1,
         "test_slots": 2,
         "testing_enabled": False,
         "output_root_configured": False,
@@ -239,6 +240,7 @@ def test_probe_timeout_is_normalized_as_runtime_error(monkeypatch) -> None:
 
 def test_controller_dashboard_combines_overview_and_server_snapshot(
     monkeypatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
         controller_service,
@@ -266,7 +268,12 @@ def test_controller_dashboard_combines_overview_and_server_snapshot(
             }
         ],
     )
-    args = argparse.Namespace(timeout=7, interval=60)
+    args = argparse.Namespace(
+        controller_root=tmp_path / "controller",
+        project_id="example",
+        timeout=7,
+        interval=60,
+    )
 
     result = controller_service.dashboard(args)
 
@@ -279,6 +286,7 @@ def test_controller_dashboard_combines_overview_and_server_snapshot(
 
 def test_controller_dashboard_collects_status_and_snapshot_concurrently(
     monkeypatch,
+    tmp_path: Path,
 ) -> None:
     started = Barrier(2)
     monkeypatch.setattr(
@@ -300,7 +308,14 @@ def test_controller_dashboard_collects_status_and_snapshot_concurrently(
     monkeypatch.setattr(controller_service, "status", status)
     monkeypatch.setattr(controller_service, "collect_server_snapshot", snapshot)
 
-    result = controller_service.dashboard(argparse.Namespace(timeout=7, interval=60))
+    result = controller_service.dashboard(
+        argparse.Namespace(
+            controller_root=tmp_path / "controller",
+            project_id="example",
+            timeout=7,
+            interval=60,
+        )
+    )
 
     assert result["queue"] == []
     assert result["servers"] == []

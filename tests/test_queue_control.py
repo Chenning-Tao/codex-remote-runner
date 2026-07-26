@@ -28,6 +28,7 @@ def project_config(tmp_path: Path) -> Path:
                 }
                 for name in ("compute-a", "compute-b")
             },
+            "scheduling": {"testing": {"servers": ["compute-b"]}},
         },
     )
     (tmp_path / "code").mkdir()
@@ -98,6 +99,41 @@ def test_queue_update_prepares_missing_servers_before_commit(
         "expected_revision": 4,
         "placement_token": "reservation-token",
     }
+
+
+def test_queue_workload_switch_prepares_server_for_target_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def controller(_config, action, *, payload=None, **_kwargs):
+        if action == "queued-job":
+            return {"job": {"run_id": RUN_ID, "prepared_servers": ["compute-a"]}}
+        if action == "reserve-queue-update":
+            return {"token": "reservation-token", "state": {"revision": 2}}
+        if action == "update-queued-job":
+            return {"changed": True}
+        raise AssertionError(f"unexpected controller action: {action}")
+
+    additions: list[argparse.Namespace] = []
+    monkeypatch.setattr(queue_control, "call_controller", controller)
+    monkeypatch.setattr(
+        queue_control.server_addition,
+        "add",
+        lambda args: additions.append(args) or {"outcome": {"action": "extended"}},
+    )
+
+    queue_control.request_queue_update(
+        arguments(tmp_path),
+        RUN_ID,
+        {
+            "expected_revision": 1,
+            "workload_class": "test",
+            "eligible_servers": ["compute-b"],
+        },
+    )
+
+    assert additions[0].server == "compute-b"
+    assert additions[0].target_workload_class == "test"
 
 
 def test_queue_update_releases_reservation_after_preparation_failure(

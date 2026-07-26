@@ -100,7 +100,10 @@ same controller snapshot used by the TUI. Use `--no-open` to leave the browser
 closed or `--port PORT` to select another local port. The browser never receives
 SSH configuration. The details drawer can stop one exact queued or running
 workload, change a queued workload's priority and eligible servers, and prepare
-its exact revision on a newly selected compatible server before enabling it.
+its exact revision on a newly selected compatible server before enabling it. It
+can also switch queued work between the standard and test lanes and edit each
+server's controller-wide standard/test concurrency limits. Slot limits control
+admission only and do not rewrite worker counts or stop running work.
 Queue writes use controller revisions and a bounded preparation reservation so
 stale edits or work that has entered dispatch are rejected.
 

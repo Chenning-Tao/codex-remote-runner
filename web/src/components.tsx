@@ -11,6 +11,7 @@ import {
   DrawerPanelBody,
   DrawerPanelContent,
   Label,
+  NumberInput,
   ToggleGroup,
   ToggleGroupItem,
 } from "@patternfly/react-core";
@@ -41,6 +42,7 @@ import {
 } from "./format";
 import type {
   ActiveRun,
+  CapacityUpdateChanges,
   ConnectionState,
   DashboardDocument,
   QueueEntry,
@@ -287,7 +289,11 @@ export function ServerTable({
                         <span style={{ width: `${utilization}%` }} />
                       </span>
                     )}
-                    <small>{server.test_slots ? `${server.test_slots} 个测试槽位` : "标准任务"}</small>
+                    <small>
+                      {server.standard_runs ?? 0}/{server.standard_slots ?? 1} 标准
+                      {" · "}
+                      {server.test_runs ?? 0}/{server.test_slots ?? 0} 测试
+                    </small>
                   </div>
                 </td>
                 <td>
@@ -480,6 +486,7 @@ export function DetailPanel({
   onClose,
   onStop,
   onQueueUpdate,
+  onCapacityUpdate,
   availableServers,
 }: {
   selection: Selection;
@@ -489,6 +496,11 @@ export function DetailPanel({
     runId: string,
     expectedRevision: number,
     changes: QueueUpdateChanges,
+  ) => Promise<void>;
+  onCapacityUpdate: (
+    server: string,
+    expectedRevision: number,
+    changes: CapacityUpdateChanges,
   ) => Promise<void>;
   availableServers: ServerSnapshot[];
 }) {
@@ -508,9 +520,15 @@ export function DetailPanel({
   const queueEntry = selection.kind === "queue" ? selection.value : null;
   const queueRunId = queueEntry?.job.run_id;
   const [draftPriority, setDraftPriority] = useState<"urgent" | "normal">("normal");
+  const [draftWorkload, setDraftWorkload] = useState<"standard" | "test">("standard");
   const [draftServers, setDraftServers] = useState<string[]>([]);
   const [savingQueue, setSavingQueue] = useState(false);
   const [queueError, setQueueError] = useState<string | null>(null);
+  const selectedServer = selection.kind === "server" ? selection.value : null;
+  const [draftStandardSlots, setDraftStandardSlots] = useState(1);
+  const [draftTestSlots, setDraftTestSlots] = useState(0);
+  const [savingCapacity, setSavingCapacity] = useState(false);
+  const [capacityError, setCapacityError] = useState<string | null>(null);
   const preparedServers = queueEntry?.job.supported_servers
     ?? queueEntry?.job.eligible_servers
     ?? [];
@@ -525,7 +543,7 @@ export function DetailPanel({
         && typeof server.configured_cores === "number"
         && server.configured_cores >= minimumCores
         && (
-          queueEntry.job.workload_class !== "test"
+          draftWorkload !== "test"
           || (server.testing_enabled === true && (server.test_slots ?? 0) > 0)
         )
         && (
@@ -542,6 +560,13 @@ export function DetailPanel({
     (server) => !preparedServerSet.has(server),
   );
   const placementUpdating = Boolean(queueEntry?.state.placement_update);
+  const supportsWorkload = (serverName: string, workload: "standard" | "test") => {
+    const server = availableServers.find((item) => item.name === serverName);
+    if (!server) return false;
+    return workload === "standard"
+      ? (server.standard_slots ?? 1) > 0
+      : server.testing_enabled === true && (server.test_slots ?? 0) > 0;
+  };
 
   useEffect(() => {
     setConfirmingStop(false);
@@ -551,10 +576,18 @@ export function DetailPanel({
 
   useEffect(() => {
     setDraftPriority(queueEntry?.job.queue_priority === "urgent" ? "urgent" : "normal");
+    setDraftWorkload(queueEntry?.job.workload_class === "test" ? "test" : "standard");
     setDraftServers(queueEntry?.job.eligible_servers ?? []);
     setSavingQueue(false);
     setQueueError(null);
   }, [queueRunId]);
+
+  useEffect(() => {
+    setDraftStandardSlots(selectedServer?.standard_slots ?? 1);
+    setDraftTestSlots(selectedServer?.test_slots ?? 0);
+    setSavingCapacity(false);
+    setCapacityError(null);
+  }, [selectedServer?.name, selectedServer?.capacity_revision]);
 
   async function stopSelectedRun() {
     if (!stopRunId || stopping) return;
@@ -586,6 +619,7 @@ export function DetailPanel({
     try {
       await onQueueUpdate(queueRunId, revision, {
         queue_priority: draftPriority,
+        workload_class: draftWorkload,
         eligible_servers: draftServers,
       });
       onClose();
@@ -602,6 +636,23 @@ export function DetailPanel({
     }
   }
 
+  async function saveCapacitySettings() {
+    const revision = selectedServer?.capacity_revision;
+    if (!selectedServer || typeof revision !== "number" || savingCapacity) return;
+    setSavingCapacity(true);
+    setCapacityError(null);
+    try {
+      await onCapacityUpdate(selectedServer.name, revision, {
+        standard_slots: draftStandardSlots,
+        test_slots: draftTestSlots,
+      });
+      setSavingCapacity(false);
+    } catch (error: unknown) {
+      setCapacityError(error instanceof Error ? error.message : "保存服务器容量失败");
+      setSavingCapacity(false);
+    }
+  }
+
   if (selection.kind === "server") {
     const server = selection.value;
     title = server.name;
@@ -609,11 +660,60 @@ export function DetailPanel({
     body = (
       <>
         <div className="rr-detail-status"><ServerStatus server={server} drained={selection.drained} /></div>
+        <section className="rr-capacity-editor" aria-labelledby="rr-capacity-editor-title">
+          <h3 id="rr-capacity-editor-title">并发任务容量</h3>
+          <div className="rr-capacity-fields">
+            <label htmlFor="rr-standard-slots">Standard</label>
+            <NumberInput
+              value={draftStandardSlots}
+              min={0}
+              max={1024}
+              inputName="rr-standard-slots"
+              inputProps={{ id: "rr-standard-slots", inputMode: "numeric" }}
+              inputAriaLabel="Standard 并发任务数"
+              minusBtnAriaLabel="减少 Standard 并发任务数"
+              plusBtnAriaLabel="增加 Standard 并发任务数"
+              onMinus={() => setDraftStandardSlots((value) => Math.max(0, value - 1))}
+              onPlus={() => setDraftStandardSlots((value) => Math.min(1024, value + 1))}
+              onChange={(event) => {
+                const value = Number.parseInt(event.currentTarget.value, 10);
+                if (Number.isFinite(value)) setDraftStandardSlots(Math.min(1024, Math.max(0, value)));
+              }}
+            />
+            <label htmlFor="rr-test-slots">Test</label>
+            <NumberInput
+              value={draftTestSlots}
+              min={0}
+              max={1024}
+              inputName="rr-test-slots"
+              inputProps={{ id: "rr-test-slots", inputMode: "numeric" }}
+              inputAriaLabel="Test 并发任务数"
+              minusBtnAriaLabel="减少 Test 并发任务数"
+              plusBtnAriaLabel="增加 Test 并发任务数"
+              onMinus={() => setDraftTestSlots((value) => Math.max(0, value - 1))}
+              onPlus={() => setDraftTestSlots((value) => Math.min(1024, value + 1))}
+              onChange={(event) => {
+                const value = Number.parseInt(event.currentTarget.value, 10);
+                if (Number.isFinite(value)) setDraftTestSlots(Math.min(1024, Math.max(0, value)));
+              }}
+            />
+          </div>
+          {capacityError && <div className="rr-stop-error" role="alert">{capacityError}</div>}
+          <Button
+            variant="primary"
+            icon={savingCapacity ? <LoaderCircle className="rr-spin" /> : <Save />}
+            isDisabled={savingCapacity || typeof server.capacity_revision !== "number"}
+            onClick={saveCapacitySettings}
+          >
+            {savingCapacity ? "正在保存…" : "保存容量"}
+          </Button>
+        </section>
         <DescriptionList isHorizontal>
           <DetailGroup term="负载（1 / 5 / 15 分钟）" mono>{[server.load1, server.load5, server.load15].map((value) => typeof value === "number" ? value.toFixed(1) : "--").join(" / ")}</DetailGroup>
           <DetailGroup term="配置核心数" mono>{server.configured_cores ?? "--"}</DetailGroup>
           <DetailGroup term="远程核心数" mono>{server.remote_cores ?? "--"}</DetailGroup>
-          <DetailGroup term="测试槽位" mono>{server.test_slots ?? 0}</DetailGroup>
+          <DetailGroup term="Standard 槽位" mono>{server.standard_slots ?? 1}</DetailGroup>
+          <DetailGroup term="Test 槽位" mono>{server.test_slots ?? 0}</DetailGroup>
           <DetailGroup term="自动分配">{server.auto_select === false ? "已排除" : "可分配"}</DetailGroup>
           <DetailGroup term="调度状态">{selection.drained ? "暂停调度" : "正常调度"}</DetailGroup>
           {(server.configuration_error || server.error) && <DetailGroup term="错误">{server.configuration_error ?? server.error}</DetailGroup>}
@@ -657,6 +757,29 @@ export function DetailPanel({
         <section className="rr-queue-editor" aria-labelledby="rr-queue-editor-title">
           <h3 id="rr-queue-editor-title">调度设置</h3>
           <div className="rr-queue-editor-field">
+            <span>任务类型</span>
+            <ToggleGroup aria-label="任务类型">
+              <ToggleGroupItem
+                text="Standard"
+                buttonId="queue-workload-standard"
+                isSelected={draftWorkload === "standard"}
+                onChange={() => {
+                  setDraftWorkload("standard");
+                  setDraftServers((current) => current.filter((name) => supportsWorkload(name, "standard")));
+                }}
+              />
+              <ToggleGroupItem
+                text="Test"
+                buttonId="queue-workload-test"
+                isSelected={draftWorkload === "test"}
+                onChange={() => {
+                  setDraftWorkload("test");
+                  setDraftServers((current) => current.filter((name) => supportsWorkload(name, "test")));
+                }}
+              />
+            </ToggleGroup>
+          </div>
+          <div className="rr-queue-editor-field">
             <span>优先级</span>
             <ToggleGroup aria-label="任务优先级">
               <ToggleGroupItem
@@ -683,9 +806,11 @@ export function DetailPanel({
                   <span className="rr-server-option-label">
                     <span>{server}</span>
                     {!preparedServerSet.has(server) && <small>需准备</small>}
+                    {!supportsWorkload(server, draftWorkload) && <small>通道关闭</small>}
                   </span>
                 )}
                 isChecked={draftServers.includes(server)}
+                isDisabled={!supportsWorkload(server, draftWorkload)}
                 onChange={(_event, checked) => {
                   setDraftServers((current) => checked
                     ? [...current, server]

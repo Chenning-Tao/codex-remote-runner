@@ -14,6 +14,7 @@ from remote_runner._internal.output_sync import load_config
 from remote_runner._internal.controller import service as controller_service
 from remote_runner._internal.controller.registry import (
     controller_paths,
+    ensure_server_capacities,
     load_job,
     submit_job,
 )
@@ -151,6 +152,77 @@ def test_edit_queued_job_updates_priority_and_starts_dispatcher(
     assert result["state"]["revision"] == 1
     assert result["dispatcher_started"] is True
     assert started == ["example"]
+
+
+def test_edit_queued_job_switches_workload_class(tmp_path: Path, monkeypatch) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    queued = job()
+    queued["prepared_servers"][0]["test_slots"] = 1
+    submit_job(paths, queued)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "expected_revision": 0,
+                    "workload_class": "test",
+                    "eligible_servers": ["compute-a"],
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        controller_service, "ensure_dispatcher", lambda **_kwargs: False
+    )
+
+    result = controller_service.edit_queued_job(
+        argparse.Namespace(
+            controller_root=paths.root,
+            project_id="example",
+            run_id="rr-0123456789abcdef",
+            timeout=8,
+            interval=30,
+        )
+    )
+
+    assert result["job"]["workload_class"] == "test"
+    assert result["state"]["revision"] == 1
+
+
+def test_edit_server_capacity_persists_both_lanes(tmp_path: Path, monkeypatch) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    ensure_server_capacities(
+        paths,
+        [{"name": "compute-a", "standard_slots": 1, "test_slots": 1}],
+    )
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {"expected_revision": 0, "standard_slots": 3, "test_slots": 5}
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        controller_service, "ensure_dispatcher", lambda **_kwargs: False
+    )
+
+    result = controller_service.edit_server_capacity(
+        argparse.Namespace(
+            controller_root=paths.root,
+            project_id="example",
+            server="compute-a",
+            timeout=8,
+            interval=30,
+        )
+    )
+
+    assert result["changed"] is True
+    assert result["capacity"]["standard_slots"] == 3
+    assert result["capacity"]["test_slots"] == 5
+    assert result["capacity"]["revision"] == 1
 
 
 def test_queue_update_reservation_exposes_no_token_digest(

@@ -28,6 +28,7 @@ from ..output_sync import (
 )
 from ..result_metadata import MONITOR_RESULT_INTENTS
 from ..run_readiness import cohort_report_readiness
+from ..scheduling import normalize_workload_class
 from ..stopping import stop as stop_execution
 from ..tmux import dispatcher_tmux_session, exact_tmux_target, resolve_tmux_executable
 from .dashboard import collect_server_snapshot, enrich_active_runs, validate_payload
@@ -38,6 +39,7 @@ from .registry import (
     ControllerPaths,
     QUEUE_TERMINAL,
     controller_paths,
+    ensure_server_capacities,
     list_drained_servers,
     list_jobs,
     list_queued,
@@ -51,6 +53,7 @@ from .registry import (
     submit_job,
     transition_queued_state,
     update_queued_job,
+    update_server_capacity,
     extend_queued_all,
     extend_queued_job,
 )
@@ -141,6 +144,8 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         else:
             store_config(paths.registry_root, output_sync)
     entry = submit_job(paths, job)
+    stored_job, _state = load_job(paths, entry.name)
+    ensure_server_capacities(paths, stored_job["prepared_servers"])
     dispatcher_started = ensure_dispatcher(
         controller_root=args.controller_root,
         project_id=args.project_id,
@@ -218,6 +223,7 @@ def extend_job(args: argparse.Namespace) -> dict[str, Any]:
         prepared_servers=prepared_servers,
         placement_token=placement_token,
     )
+    ensure_server_capacities(paths, prepared_servers)
     dispatcher_started = ensure_dispatcher(
         controller_root=args.controller_root,
         project_id=args.project_id,
@@ -233,6 +239,7 @@ def edit_queued_job(args: argparse.Namespace) -> dict[str, Any]:
     allowed = {
         "expected_revision",
         "queue_priority",
+        "workload_class",
         "eligible_servers",
         "move",
         "placement_token",
@@ -249,6 +256,9 @@ def edit_queued_job(args: argparse.Namespace) -> dict[str, Any]:
     queue_priority = payload.get("queue_priority")
     if queue_priority is not None and not isinstance(queue_priority, str):
         raise ValueError("queued job queue_priority must be a string")
+    workload_class = payload.get("workload_class")
+    if workload_class is not None and not isinstance(workload_class, str):
+        raise ValueError("queued job workload_class must be a string")
     eligible_servers = payload.get("eligible_servers")
     if eligible_servers is not None and not isinstance(eligible_servers, list):
         raise ValueError("queued job eligible_servers must be a list")
@@ -258,11 +268,28 @@ def edit_queued_job(args: argparse.Namespace) -> dict[str, Any]:
     placement_token = payload.get("placement_token")
     if placement_token is not None and not isinstance(placement_token, str):
         raise ValueError("queued job placement_token must be a string")
+    if workload_class is not None or eligible_servers is not None:
+        current_job, _current_state = load_job(paths, args.run_id)
+        capacities = ensure_server_capacities(paths, current_job["prepared_servers"])
+        target_class = normalize_workload_class(
+            workload_class or current_job["workload_class"]
+        )
+        selected_servers = eligible_servers or list(current_job["eligible_servers"])
+        slot_field = f"{target_class}_slots"
+        if not any(
+            isinstance(name, str)
+            and int(capacities.get(name, {}).get(slot_field, 0)) > 0
+            for name in selected_servers
+        ):
+            raise ValueError(
+                f"queued job requires an eligible server with positive {slot_field}"
+            )
     result = update_queued_job(
         paths,
         args.run_id,
         expected_revision=expected_revision,
         queue_priority=queue_priority,
+        workload_class=workload_class,
         eligible_servers=eligible_servers,
         move=move,
         placement_token=placement_token,
@@ -795,6 +822,18 @@ def update_server_drain(args: argparse.Namespace, *, drained: bool) -> dict[str,
 def dashboard(args: argparse.Namespace) -> dict[str, Any]:
     payload = _read_object("dashboard request")
     servers = validate_payload(payload)
+    paths = controller_paths(args.controller_root, args.project_id)
+    capacities = ensure_server_capacities(paths, servers)
+    servers = [
+        {
+            **server,
+            "standard_slots": capacities[server["name"]]["standard_slots"],
+            "test_slots": capacities[server["name"]]["test_slots"],
+            "capacity_revision": capacities[server["name"]]["revision"],
+            "capacity_customized": capacities[server["name"]]["customized"],
+        }
+        for server in servers
+    ]
     overview_args = argparse.Namespace(**vars(args))
     overview_args._full_overview = True
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -815,6 +854,27 @@ def dashboard(args: argparse.Namespace) -> dict[str, Any]:
         "probe_interval_seconds": args.interval,
         "collected_at": utc_now(),
     }
+
+
+def edit_server_capacity(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    payload = _read_object("server capacity update")
+    if set(payload) != {"expected_revision", "standard_slots", "test_slots"}:
+        raise ValueError("server capacity update payload is invalid")
+    result = update_server_capacity(
+        paths,
+        args.server,
+        expected_revision=payload["expected_revision"],
+        standard_slots=payload["standard_slots"],
+        test_slots=payload["test_slots"],
+    )
+    dispatcher_started = ensure_dispatcher(
+        controller_root=args.controller_root,
+        project_id=args.project_id,
+        timeout=args.timeout,
+        interval=args.interval,
+    )
+    return {**result, "dispatcher_started": dispatcher_started}
 
 
 def stop(args: argparse.Namespace) -> dict[str, Any]:
@@ -1002,6 +1062,8 @@ def build_parser() -> argparse.ArgumentParser:
     extend_job_parser.add_argument("--run-id", required=True)
     edit_job_parser = subparsers.add_parser("update-queued-job")
     edit_job_parser.add_argument("--run-id", required=True)
+    capacity_parser = subparsers.add_parser("update-server-capacity")
+    capacity_parser.add_argument("--server", required=True)
     reserve_job_parser = subparsers.add_parser("reserve-queue-update")
     reserve_job_parser.add_argument("--run-id", required=True)
     release_job_parser = subparsers.add_parser("release-queue-update")
@@ -1061,6 +1123,8 @@ def main(argv: list[str] | None = None) -> int:
             result = extend_job(args)
         elif args.action == "update-queued-job":
             result = edit_queued_job(args)
+        elif args.action == "update-server-capacity":
+            result = edit_server_capacity(args)
         elif args.action == "reserve-queue-update":
             result = reserve_queue_update(args)
         elif args.action == "release-queue-update":

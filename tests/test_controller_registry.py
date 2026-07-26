@@ -10,11 +10,13 @@ from remote_runner._internal.controller.registry import (
     acquire_maintenance_lease,
     controller_paths,
     controller_scheduler_paths,
+    ensure_server_capacities,
     has_unexpired_dispatch_lease,
     list_drained_servers,
     list_jobs,
     list_queued,
     list_queued_all,
+    list_server_capacities,
     load_job,
     recover_dispatching_state,
     release_queued_job_update,
@@ -27,6 +29,7 @@ from remote_runner._internal.controller.registry import (
     set_server_drained,
     transition_queued_state,
     update_queued_job,
+    update_server_capacity,
 )
 from remote_runner._internal.execution_registry import (
     load_yaml,
@@ -390,20 +393,78 @@ def test_invalid_queue_priority_is_rejected(tmp_path: Path) -> None:
         submit_job(paths, invalid)
 
 
-def test_test_workload_requires_one_server_with_positive_slots(tmp_path: Path) -> None:
+def test_test_workload_capacity_is_not_frozen_into_queue_validation(tmp_path: Path) -> None:
     paths = controller_paths(tmp_path / "controller", "example")
-    invalid = queued_job()
-    invalid["workload_class"] = "test"
-
-    with pytest.raises(ValueError, match="positive test_slots"):
-        submit_job(paths, invalid)
-
-    valid = queued_job()
-    valid["workload_class"] = "test"
-    valid["prepared_servers"][0]["test_slots"] = 1
-    submit_job(paths, valid)
+    item = queued_job()
+    item["workload_class"] = "test"
+    submit_job(paths, item)
 
     assert load_job(paths, RUN_ID)[0]["workload_class"] == "test"
+
+
+def test_server_capacity_defaults_refresh_until_customized_and_share_root(
+    tmp_path: Path,
+) -> None:
+    first = controller_paths(tmp_path / "controller", "project-a")
+    second = controller_paths(tmp_path / "controller", "project-b")
+    initial = ensure_server_capacities(
+        first,
+        [{"name": "compute-a", "standard_slots": 1, "test_slots": 1}],
+    )
+    assert initial["compute-a"]["revision"] == 0
+    refreshed = ensure_server_capacities(
+        second,
+        [{"name": "compute-a", "standard_slots": 1, "test_slots": 2}],
+    )
+    assert refreshed["compute-a"]["test_slots"] == 2
+    assert refreshed["compute-a"]["revision"] == 1
+
+    updated = update_server_capacity(
+        first,
+        "compute-a",
+        expected_revision=1,
+        standard_slots=3,
+        test_slots=4,
+    )
+    ensure_server_capacities(
+        second,
+        [{"name": "compute-a", "standard_slots": 1, "test_slots": 1}],
+    )
+    assert list_server_capacities(second)["compute-a"] == updated["capacity"]
+    with pytest.raises(RuntimeError, match="revision conflict"):
+        update_server_capacity(
+            second,
+            "compute-a",
+            expected_revision=1,
+            standard_slots=1,
+            test_slots=1,
+        )
+
+
+def test_queued_job_can_switch_workload_class_and_moves_to_destination_tail(
+    tmp_path: Path,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, queued_job(), now="2026-01-01T00:00:00+00:00")
+    existing_test = queued_job()
+    existing_test["run_id"] = "rr-fedcba9876543210"
+    existing_test["workload_class"] = "test"
+    submit_job(paths, existing_test, now="2026-01-01T00:00:01+00:00")
+
+    result = update_queued_job(
+        paths,
+        RUN_ID,
+        expected_revision=0,
+        workload_class="test",
+    )
+
+    assert result["job"]["workload_class"] == "test"
+    test_lane = [
+        job["run_id"]
+        for job, _state in list_queued(paths)
+        if job["workload_class"] == "test"
+    ]
+    assert test_lane == ["rr-fedcba9876543210", RUN_ID]
 
 
 def test_historical_job_without_queue_priority_defaults_to_normal(

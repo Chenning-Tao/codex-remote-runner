@@ -60,6 +60,9 @@ lifecycle operations across a project-owned server pool.
   controls never mutate work that has entered dispatch.
 - Stop and queue-control web writes always delegate authority to the controller
   and use the queue state's revision to reject stale edits.
+- Server details expose controller-wide standard and test slot limits. Queue
+  details can switch queued work between those lanes. Capacity changes are
+  revision-guarded, admission-only, and never preempt running work.
 - Desktop web behavior is the acceptance target for the first queue-control
   increment. Queue-control layout and ergonomics on narrow/mobile viewports are
   explicitly outside this increment's acceptance scope.

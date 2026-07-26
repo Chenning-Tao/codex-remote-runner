@@ -80,7 +80,15 @@ function queueMatches(entry: QueueEntry, query: string): boolean {
 }
 
 export default function App() {
-  const { document, connection, initialError, reconnect, stopRun, updateQueue } = useDashboard();
+  const {
+    document,
+    connection,
+    initialError,
+    reconnect,
+    stopRun,
+    updateQueue,
+    updateCapacity,
+  } = useDashboard();
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") ?? "");
   const [priority, setPriority] = useState<PriorityFilter>(initialPriority);
   const [mobileView, setMobileView] = useState<MobileView>(initialMobileView);
@@ -166,6 +174,14 @@ export default function App() {
 
   useEffect(() => {
     setSelection((current) => {
+      if (current?.kind === "server") {
+        const refreshed = document?.snapshot?.servers?.find(
+          (server) => server.name === current.value.name,
+        );
+        return refreshed
+          ? { kind: "server", value: refreshed, drained: current.drained }
+          : null;
+      }
       if (current?.kind !== "queue") return current;
       const runId = current.value.job.run_id;
       const refreshed = document?.snapshot?.queue?.find(
@@ -206,6 +222,7 @@ export default function App() {
       onClose={() => setSelection(null)}
       onStop={stopRun}
       onQueueUpdate={updateQueue}
+      onCapacityUpdate={updateCapacity}
       availableServers={document?.snapshot?.servers ?? []}
     />
   ) : null;

@@ -7,6 +7,10 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ### Added
 
+- Added controller-wide, revision-guarded standard and test slot limits that can
+  be edited directly from each server's web details panel.
+- Added web queue controls for switching an exact queued workload between the
+  standard and test scheduling lanes.
 - Added `--until reportable` so foreground waits keep successful output-backed
   runs attached until checksum-verified output synchronization completes.
 

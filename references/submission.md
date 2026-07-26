@@ -146,6 +146,20 @@ servers that no earlier blocked job is eligible to use, including across a
 priority boundary. This preserves urgent candidate capacity without letting a
 blocked urgent job leave unrelated normal-job capacity idle.
 
+During one dispatcher pass, the controller shares one concurrent capacity probe
+across the queued candidates and may launch placements on distinct servers in
+parallel. Each placement still acquires the controller-global server lease and
+rechecks that server before the queue entry moves to `dispatching`. A single batch
+places at most one job on each server; additional test-slot work is considered by
+the next immediate pass after a successful launch. The same rule applies when a
+server has several standard slots.
+
+The local web dashboard may switch an exact queued workload between `standard`
+and `test`. The update is revision-guarded, must retain at least one server with
+positive capacity in the target lane, and moves the workload to the tail of its
+destination class and priority lane. Work that has entered dispatch or started
+cannot change class.
+
 ## Output Identity
 
 Prefer a normalized relative POSIX `--output-relpath`. Every eligible candidate

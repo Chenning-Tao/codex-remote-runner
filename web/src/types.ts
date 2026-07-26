@@ -29,7 +29,10 @@ export interface ServerSnapshot {
   auto_select?: boolean;
   configured_cores?: number | null;
   remote_cores?: number | null;
+  standard_slots?: number;
   test_slots?: number;
+  capacity_revision?: number;
+  capacity_customized?: boolean;
   testing_enabled?: boolean;
   output_root_configured?: boolean;
   load1?: number;
@@ -78,8 +81,14 @@ export interface QueueEntry {
 
 export interface QueueUpdateChanges {
   queue_priority?: "urgent" | "normal";
+  workload_class?: "standard" | "test";
   eligible_servers?: string[];
   move?: "up" | "down";
+}
+
+export interface CapacityUpdateChanges {
+  standard_slots: number;
+  test_slots: number;
 }
 
 export interface StatusSummary {
