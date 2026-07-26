@@ -435,6 +435,42 @@ def test_wait_run_returns_changed_terminal_state_without_dispatcher(
     assert result["run_view"]["outcome"] == "stopped"
 
 
+def test_wait_run_long_polls_a_stable_terminal_etag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, job())
+    controller_service.transition_queued_state(
+        paths,
+        "rr-0123456789abcdef",
+        expected_revision=0,
+        status="stopped",
+    )
+    initial = controller_service.load_run_view(paths, "rr-0123456789abcdef")
+    monkeypatch.setattr(
+        controller_service,
+        "ensure_dispatcher",
+        lambda **_kwargs: pytest.fail("terminal state must not start the dispatcher"),
+    )
+
+    result = controller_service.wait_run(
+        argparse.Namespace(
+            controller_root=paths.root,
+            project_id="example",
+            run_id="rr-0123456789abcdef",
+            after_etag=initial["etag"],
+            wait_seconds=0,
+            timeout=8,
+            interval=60,
+        )
+    )
+
+    assert result["changed"] is False
+    assert result["timed_out"] is True
+    assert result["run_view"]["phase"] == "terminal"
+
+
 def test_wait_run_returns_stable_attention_state_without_timing_out(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -610,6 +646,42 @@ def test_wait_runs_wakes_once_every_member_is_terminal(
     assert result["changed"] is False
     assert result["ready"] is True
     assert result["timed_out"] is False
+
+
+@pytest.mark.parametrize(
+    ("output_sync_status", "ready", "timed_out"),
+    [("pending", False, True), ("completed", True, False)],
+)
+def test_wait_runs_uses_reportable_output_sync_readiness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_sync_status: str,
+    ready: bool,
+    timed_out: bool,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    run_id = "rr-0123456789abcdef"
+    run_view = {
+        "run_id": run_id,
+        "etag": "sha256:" + "a" * 64,
+        "phase": "terminal",
+        "outcome": "succeeded",
+        "output_sync": {"status": output_sync_status},
+    }
+    monkeypatch.setattr(
+        controller_service,
+        "load_run_view",
+        lambda _paths, _run_id: run_view,
+    )
+
+    result = _wait_runs(
+        monkeypatch,
+        paths,
+        [{"run_id": run_id, "after_etag": run_view["etag"]}],
+    )
+
+    assert result["ready"] is ready
+    assert result["timed_out"] is timed_out
 
 
 @pytest.mark.parametrize(

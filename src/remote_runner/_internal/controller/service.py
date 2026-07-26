@@ -27,6 +27,7 @@ from ..output_sync import (
     sync_status,
 )
 from ..result_metadata import MONITOR_RESULT_INTENTS
+from ..run_readiness import cohort_report_readiness
 from ..stopping import stop as stop_execution
 from ..tmux import dispatcher_tmux_session, exact_tmux_target, resolve_tmux_executable
 from .dashboard import collect_server_snapshot, enrich_active_runs, validate_payload
@@ -61,7 +62,6 @@ OVERVIEW_RECORD_LIMIT = 20
 MAX_WAIT_SECONDS = 55
 MAX_WAIT_RUNS = 64
 ETAG_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-WAKE_PHASES = {"attention_required", "missing", "purged"}
 
 
 def ensure_dispatcher(
@@ -649,12 +649,7 @@ def wait_run(args: argparse.Namespace) -> dict[str, Any]:
             args.run_id,
         )
         changed = after_etag is None or view["etag"] != after_etag
-        if changed or view["phase"] in {
-            "terminal",
-            "attention_required",
-            "missing",
-            "purged",
-        }:
+        if changed or view["phase"] in {"attention_required", "missing", "purged"}:
             return {
                 "changed": changed,
                 "timed_out": False,
@@ -734,9 +729,7 @@ def wait_runs(args: argparse.Namespace) -> dict[str, Any]:
             for (run_id, after_etag), view in zip(requests, views, strict=True)
             if after_etag is None or view["etag"] != after_etag
         ]
-        ready = any(view["phase"] in WAKE_PHASES for view in views) or all(
-            view["phase"] == "terminal" for view in views
-        )
+        ready = cohort_report_readiness(views) != "waiting"
         if changed_run_ids or ready:
             return {
                 "changed": bool(changed_run_ids),

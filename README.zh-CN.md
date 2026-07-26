@@ -11,7 +11,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 - 由控制器持久化队列与运行状态，任务不会依赖原始客户端进程。
 - 根据已配置的容量、可用性和优先级自动选择执行服务器。
 - 在远程 detached worktree 中准备并运行精确的 Git revision。
-- 支持前台等待和事件驱动的 Codex 任务唤醒。
+- 支持前台实时等待和事件驱动的 Codex 任务历史回报。
 - 提供可交互的 Textual 和本地网页控制面板，并支持确认后停止任务。
 - 提供明确的停止、清理、彻底删除、服务器排空和输出归档流程。
 
@@ -97,6 +97,7 @@ remote-runner run \
   --task-id "validation/smoke" \
   --result-intent supporting \
   --wait \
+  --until reportable \
   --command '"$RR_PROJECT_PYTHON" -m pytest -q'
 ```
 
@@ -106,7 +107,7 @@ remote-runner run \
 
 ```bash
 remote-runner monitor --project-config /path/to/.remote-runner.yaml
-remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-...
+remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-... --until reportable
 remote-runner tui --project-config /path/to/.remote-runner.yaml
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
@@ -119,6 +120,8 @@ remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
 ## Codex 集成
 
 [SKILL.md](SKILL.md) 和 [agents/openai.yaml](agents/openai.yaml) 提供 Codex skill 的元数据与运行契约。它们用于补充 CLI；Python wheel 不会安装任何用户专属的 Codex 配置。
+
+如果结果必须实时出现在 Codex App 任务中，应保持前台等待，并在结果就绪后调用一次 App 自有的 `send_message_to_thread` 工具。后台 `remote-runner wakeup` 在等待期间不启动模型回合，但其公开保证仅为 `thread_history_only`；它无法强制另一个桌面连接刷新。事件发生后，它会在一个完成回合中使用只读监控及已有日志或同步产物完成失败诊断或结果分析，再将完整回合写入任务历史。
 
 ## 安全与支持
 

@@ -10,10 +10,12 @@ from typing import Any, Callable
 from .config import load_managed_project_config
 from .controller.client import call_controller
 from .execution_registry import resolve_project_config, validate_current_run_id
+from .run_readiness import output_sync_status, report_readiness
 
 
 RUN_VIEW_SCHEMA_VERSION = 1
 CONTROLLER_WAIT_SECONDS = 50
+LEGACY_TERMINAL_BACKOFF_SECONDS = 10
 TERMINAL_PHASE = "terminal"
 STOP_PHASES = {"attention_required", "missing", "purged"}
 ETAG_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -93,8 +95,9 @@ def wait_for_run(
     *,
     reporter: Reporter = _stderr_report,
 ) -> dict[str, Any]:
-    if getattr(args, "until", "execution-terminal") != "execution-terminal":
-        raise ValueError("only --until execution-terminal is currently supported")
+    until = getattr(args, "until", "execution-terminal")
+    if until not in {"execution-terminal", "reportable"}:
+        raise ValueError("--until must be execution-terminal or reportable")
     run_id = validate_current_run_id(args.run_id)
     timeout = _validate_positive(args.timeout, "--timeout")
     connection_grace = _validate_positive(
@@ -116,7 +119,7 @@ def wait_for_run(
     transport_retries = 0
     controller_calls = 0
     view: dict[str, Any] | None = None
-    reported_phase: str | None = None
+    reported_state: tuple[str, object, str] | None = None
 
     while True:
         now = time.monotonic()
@@ -187,10 +190,14 @@ def wait_for_run(
         first_transport_error_at = None
         view = _run_view(payload, run_id)
         phase = str(view["phase"])
-        if phase != reported_phase:
+        sync_status = output_sync_status(view)
+        state = (phase, view.get("outcome"), sync_status)
+        if state != reported_state:
             detail = f" outcome={view['outcome']}" if view.get("outcome") else ""
+            if phase == TERMINAL_PHASE and view.get("outcome") == "succeeded":
+                detail += f" output_sync={sync_status}"
             reporter(f"[remote-runner wait] {run_id} phase={phase}{detail}")
-            reported_phase = phase
+            reported_state = state
         elif payload.get("timed_out") is True:
             elapsed = max(0.0, time.monotonic() - started_at)
             reporter(
@@ -199,6 +206,27 @@ def wait_for_run(
             )
 
         if phase == TERMINAL_PHASE:
+            if until == "reportable":
+                readiness = report_readiness(view)
+                if readiness == "waiting":
+                    if (
+                        payload.get("changed") is False
+                        and payload.get("timed_out") is False
+                    ):
+                        delay = LEGACY_TERMINAL_BACKOFF_SECONDS
+                        if deadline is not None:
+                            delay = min(delay, max(0.0, deadline - time.monotonic()))
+                        if delay > 0:
+                            time.sleep(delay)
+                    continue
+                if readiness == "attention":
+                    return _result(
+                        wait_status="attention_required",
+                        started_at=started_at,
+                        controller_calls=controller_calls,
+                        transport_retries=transport_retries,
+                        view=view,
+                    )
             return _result(
                 wait_status="completed",
                 started_at=started_at,

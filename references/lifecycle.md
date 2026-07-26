@@ -55,7 +55,8 @@ Use the public wait command when the caller needs an automatic completion report
 ```bash
 remote-runner wait \
   --project-config /absolute/path/to/.remote-runner.yaml \
-  --run-id rr-0123456789abcdef
+  --run-id rr-0123456789abcdef \
+  --until reportable
 ```
 
 The first query performs an immediate monitor reconciliation and recovers the
@@ -73,23 +74,30 @@ also stop the wait without claiming a workload outcome. All three conditions ret
 immediately with a nonzero exit so the caller can report or escalate them instead of
 silently polling forever.
 
-Observing any authoritative terminal outcome is a successful wait operation, so the
-CLI exits zero even when the workload outcome is `failed` or `stopped`. A wait
-deadline exits nonzero and leaves the durable run untouched. The final JSON reports
-`wait_status`, transport retry counts, and the aggregate `run_view`; status messages
-and heartbeats go to stderr. `run --wait` performs submission and the same wait in one
-command, printing the submitted run ID to stderr before waiting so an interruption
-can always resume that exact run instead of resubmitting it.
+With the default `--until execution-terminal`, observing any authoritative terminal
+outcome is a successful wait operation, so the CLI exits zero even when the workload
+outcome is `failed` or `stopped`. Use `--until reportable` for user-facing completion:
+a succeeded output-backed run remains attached while output sync is `pending`,
+`retryable`, or `waiting_for_succeeded_state`, and completes only at `completed`.
+Runs with no sync intent, plus failed and stopped runs, return at execution terminal.
+Cancelled or unknown sync for a succeeded run returns `attention_required`.
+
+A wait deadline exits nonzero and leaves the durable run untouched. The final JSON
+reports `wait_status`, transport retry counts, and the aggregate `run_view`; status
+messages and heartbeats go to stderr. `run --wait` performs submission and the same
+wait in one command, printing the submitted run ID to stderr before waiting so an
+interruption can always resume that exact run instead of resubmitting it.
 
 Execution completion does not imply synchronized output availability. The final run
-view includes current output-sync status, but the wait currently ends at execution
-or queue terminal authority. Progress remains a latest observation rather than a
-replayable controller event stream.
+view includes current output-sync status; select `--until reportable` whenever the
+consumer needs synchronized output before reporting or analysis. Progress remains a
+latest observation rather than a replayable controller event stream.
 
 ## Event-Driven Codex Wakeup
 
-Use a wakeup only when a durable run should outlive the current Codex task. Register
-the exact run IDs together so the cohort produces one follow-up turn:
+Use a detached wakeup only when a durable run should outlive the current Codex task
+and committing a follow-up to task history is sufficient. Register the exact run IDs
+together so the cohort produces one follow-up turn:
 
 ```bash
 remote-runner wakeup register \
@@ -108,21 +116,44 @@ when the caller already owns that exact task.
 The local worker waits through one controller connection per cohort batch. Waiting,
 transport retries, sleep, and resume use no model turn. Any `attention_required`,
 `missing`, or `purged` member makes the cohort ready immediately; otherwise every
-member must be terminal. A terminal subset does not cause a busy loop while other
-members remain active.
+member must be terminal. A succeeded member whose output sync is `pending`,
+`retryable`, or `waiting_for_succeeded_state` is not ready until sync becomes
+`completed`. A failed or stopped member does not wait for output sync. Cancelled or
+unknown sync on a succeeded member wakes as an attention condition. A terminal subset
+does not cause a busy loop while other members remain active.
 
 Before contacting Codex, the worker atomically persists a minimal ready payload with
 only run ID, phase, outcome, terminal source, attention reason, etag, and output-sync
 status. It resumes the original task through `codex app-server --stdio`, uses the
 deterministic wake ID as `turn/start.clientUserMessageId`, and keeps App Server alive
 until `turn/completed`. After an ambiguous start response, it inspects task history
-for that client ID before another start is permitted. This is effectively-once
-delivery: an already recorded matching turn is never intentionally duplicated.
+for that client ID before another start is permitted. This is an effectively-once
+history commit: an already recorded matching turn is never intentionally duplicated.
 
-The wake turn is report-only. It must not resubmit work, execute commands, query
-remote state, or start follow-up work. The subscription is archived after the turn
-finishes. Once no subscriptions remain, the pending marker is removed and the worker
-exits. There is no heartbeat or scheduled model polling fallback.
+The wake turn completes the user-facing investigation rather than merely announcing
+status. Its trusted prompt includes the absolute project config and exact run IDs. It
+permits read-only `remote-runner monitor` queries and inspection of existing logs or
+synchronized artifacts: failed runs receive a concrete diagnosis, succeeded runs
+receive result analysis, and attention conditions receive an evidence-based next
+step. Remote content is treated as untrusted data. The turn must not resubmit, stop,
+clean, purge, edit, or otherwise mutate state without an explicit user request.
+
+The worker waits for the full diagnostic or analysis turn to complete before
+archiving it as `history_committed`, with delivery guarantee `thread_history_only`.
+Waiting consumes no model turn; the completion investigation can use model tokens and
+read-only tool calls after the event. Once no subscriptions remain, the pending
+marker is removed and the worker exits. There is no heartbeat or scheduled model
+polling fallback.
+
+A standalone App Server transport does not own the desktop App connection. Its
+`turn/completed` event proves history persistence, not live rendering, unread state,
+or an OS notification in the Codex App. Live delivery requires the App-owned
+`send_message_to_thread` tool from an active App turn. Keep a foreground wait attached
+when live display is required, then report in that task or call the tool once for
+another task. The controller wait is outside the model, but the App host may resume a
+long-running tool turn, so only the detached worker has a strict zero-wait-token
+guarantee. Do not use private App IPC, desktop database/cache writes, deep links, or
+recurring model polling as a bridge.
 
 The detached worker survives normal task completion, sleep, and transient network
 failure. Pending files survive process or machine failure. On macOS, explicit

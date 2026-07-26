@@ -4,13 +4,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .codex_app_server import deliver_wakeup
+from .codex_app_server import commit_wakeup_turn
 from .wakeup import (
     AMBIGUOUS_START_SECONDS,
     CONTROLLER_WAIT_SECONDS,
     WakeupPaths,
     _sync_pending_marker_locked,
-    archive_delivery,
+    archive_history_commit,
     build_wake_prompt,
     claim_delivery,
     list_subscriptions,
@@ -80,11 +80,14 @@ def run_worker(
                         continue
                     claimed = refreshed
                 try:
-                    delivery = deliver_wakeup(
+                    delivery = commit_wakeup_turn(
                         Path(str(claimed["codex_executable"])),
                         str(claimed["thread_id"]),
                         wake_id,
-                        build_wake_prompt(payload),
+                        build_wake_prompt(
+                            payload,
+                            project_config=Path(str(claimed["project_config"])),
+                        ),
                         start_if_missing=allow_start,
                     )
                 except (OSError, RuntimeError, ValueError) as exc:
@@ -107,11 +110,11 @@ def run_worker(
                     )
                     time.sleep(retry_delay(int(latest["delivery_attempts"])))
                     continue
-                archive_delivery(paths, wake_id, delivery)
+                archive_history_commit(paths, wake_id, delivery)
                 processed += 1
                 if once:
                     return {
-                        "status": "delivered",
+                        "status": "history_committed",
                         "processed": processed,
                         "wake_id": wake_id,
                     }
@@ -123,7 +126,7 @@ def run_worker(
                 batch_cursor += 1
                 wake_ids = [str(subscription["wake_id"]) for subscription in batch]
                 try:
-                    poll_batch(paths, batch)
+                    observation = poll_batch(paths, batch)
                 except (OSError, RuntimeError, ValueError) as exc:
                     record_error(
                         paths,
@@ -148,6 +151,13 @@ def run_worker(
                     ]
                     if attempt_values:
                         time.sleep(retry_delay(max(attempt_values)))
+                else:
+                    if (
+                        not once
+                        and observation["ready"] == 0
+                        and observation["controller_ready"] is True
+                    ):
+                        time.sleep(CONTROLLER_WAIT_SECONDS)
                 if once:
                     return {"status": "observed", "processed": processed}
                 continue

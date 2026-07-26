@@ -1,4 +1,4 @@
 interface:
   display_name: "Remote Runner"
   short_description: "Run and follow durable remote workloads"
-  default_prompt: "Use $remote-runner to submit my clean committed HEAD, then keep a foreground wait or register one event-driven wakeup for the exact run cohort and report only authoritative terminal or attention states."
+  default_prompt: "Use $remote-runner to submit my clean committed HEAD, keep a foreground wait for a live Codex App report, and report only after authoritative failure or attention, or after succeeded output synchronization completes. Use detached wakeup only when a history-only follow-up is acceptable."

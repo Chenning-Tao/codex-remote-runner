@@ -15,7 +15,7 @@ tested, but operators should review upgrades before applying them to active pool
 - Durable queued and running workloads backed by controller-owned state.
 - Automatic placement using configured capacity, availability, and priority.
 - Exact Git revision preparation in detached remote worktrees.
-- Foreground waits and event-driven Codex task wakeups.
+- Foreground live waits and event-driven Codex history follow-ups.
 - Interactive Textual and local browser dashboards with confirmed run stopping.
 - Explicit stop, cleanup, purge, server drain, and output archival workflows.
 
@@ -117,6 +117,7 @@ remote-runner run \
   --task-id "validation/smoke" \
   --result-intent supporting \
   --wait \
+  --until reportable \
   --command '"$RR_PROJECT_PYTHON" -m pytest -q'
 ```
 
@@ -128,7 +129,7 @@ Common follow-up commands:
 
 ```bash
 remote-runner monitor --project-config /path/to/.remote-runner.yaml
-remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-...
+remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-... --until reportable
 remote-runner tui --project-config /path/to/.remote-runner.yaml
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
@@ -149,6 +150,14 @@ operations.
 [SKILL.md](SKILL.md) and [agents/openai.yaml](agents/openai.yaml) provide the Codex
 skill metadata and operating contract. They complement the CLI; the Python wheel
 does not install user-specific Codex configuration.
+
+For a result that must appear live in the Codex App, keep the wait attached and use
+the App-owned `send_message_to_thread` tool once the result is ready. Detached
+`remote-runner wakeup` uses no model turns while waiting, but its public guarantee is
+only `thread_history_only`; it cannot force a separate desktop connection to refresh.
+After an event, its single completion turn may use read-only monitoring and existing
+logs or synchronized artifacts to finish the diagnosis or result analysis before it
+is committed to history.
 
 ## Security And Support
 
