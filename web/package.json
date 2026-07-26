@@ -15,12 +15,12 @@
     "@patternfly/react-core": "6.6.0",
     "@patternfly/react-table": "6.6.0",
     "lucide-react": "1.26.0",
-    "react": "19.2.0",
+    "react": "19.2.8",
     "react-dom": "19.2.0"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
-    "@types/react": "19.2.7",
+    "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.4",
     "typescript": "5.9.3",
