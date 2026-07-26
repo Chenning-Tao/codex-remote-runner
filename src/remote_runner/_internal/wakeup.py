@@ -54,6 +54,8 @@ ATTENTION_REASONS = {
     "queue and execution terminal authorities conflict",
     "queue is terminal while the execution remains active",
     "execution record is not a supported current authoritative record",
+    "execution launch outcome remains unknown",
+    "remote runtime is absent while execution authority remains active",
     "queue is dispatched but no execution record is available",
     "queue status is unsupported",
 }

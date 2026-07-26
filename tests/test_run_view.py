@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from remote_runner._internal import monitoring
 from remote_runner._internal.controller.run_view import derive_run_view
 
 
@@ -17,12 +18,18 @@ def queue(status: str, revision: int = 1) -> dict[str, object]:
     }
 
 
-def execution(status: str, revision: int = 1) -> dict[str, object]:
+def execution(
+    status: str,
+    revision: int = 1,
+    *,
+    error: str | None = None,
+) -> dict[str, object]:
     return {
         "registry_kind": "current",
         "authoritative_status": status,
         "revision": revision,
         "updated_at": "2026-07-24T00:00:00+00:00",
+        "error": error,
     }
 
 
@@ -103,6 +110,50 @@ def test_noncurrent_execution_fails_closed() -> None:
 
     assert view["phase"] == "attention_required"
     assert "not a supported current" in view["attention_reason"]
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "reason"),
+    [
+        (
+            "registered",
+            "connection closed; launch outcome is unknown",
+            "execution launch outcome remains unknown",
+        ),
+        (
+            "running",
+            monitoring.RUNTIME_ABSENT_ERROR,
+            "remote runtime is absent while execution authority remains active",
+        ),
+    ],
+)
+def test_active_execution_with_verified_conflict_requires_attention(
+    status: str,
+    error: str,
+    reason: str,
+) -> None:
+    view = derive_run_view(
+        project_id="example",
+        run_id=RUN_ID,
+        queue=queue("dispatched"),
+        execution=execution(status, error=error),
+        output_sync={"status": "not_enqueued"},
+    )
+
+    assert view["phase"] == "attention_required"
+    assert view["attention_reason"] == reason
+
+
+def test_unclassified_active_execution_error_remains_active() -> None:
+    view = derive_run_view(
+        project_id="example",
+        run_id=RUN_ID,
+        queue=queue("dispatched"),
+        execution=execution("running", error="diagnostic note"),
+        output_sync={"status": "not_enqueued"},
+    )
+
+    assert view["phase"] == "running"
 
 
 def test_missing_and_purged_runs_are_distinct() -> None:

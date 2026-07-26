@@ -74,6 +74,13 @@ also stop the wait without claiming a workload outcome. All three conditions ret
 immediately with a nonzero exit so the caller can report or escalate them instead of
 silently polling forever.
 
+An active execution whose launch outcome remains unknown is also
+`attention_required`. Monitoring records the same condition when SSH is reachable and
+a stored running execution has neither its exact process group nor tmux session. This
+does not invent a terminal outcome: it exposes the verified authority/runtime
+conflict so a wait or wakeup cannot remain pending forever. Unreachable or incomplete
+observations remain non-authoritative and do not trigger this condition.
+
 With the default `--until execution-terminal`, observing any authoritative terminal
 outcome is a successful wait operation, so the CLI exits zero even when the workload
 outcome is `failed` or `stopped`. Use `--until reportable` for user-facing completion:
@@ -165,7 +172,9 @@ remote-runner wakeup install
 ```
 
 This writes and loads a user LaunchAgent whose `KeepAlive.PathState` is the pending
-marker. It starts only while work exists. Because installation changes user launch
+marker. Its environment contains the resolved executable directories needed by the
+installed Python, remote-runner, Codex, and Node commands, rather than relying on
+launchd's minimal default `PATH`. It starts only while work exists. Because installation changes user launch
 configuration, do not perform it during an ordinary run. Inspect current state with
 `remote-runner wakeup list`, cancel one pending subscription with
 `remote-runner wakeup cancel --wake-id ID`, and remove the supervisor explicitly with

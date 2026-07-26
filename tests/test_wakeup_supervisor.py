@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,6 +46,9 @@ def test_install_creates_an_on_demand_pathstate_launch_agent(
         "PathState": {str(paths.pending_marker): True}
     }
     assert payload["ProgramArguments"][-2:] == ["--state-root", str(paths.root)]
+    executable_path = payload["EnvironmentVariables"]["PATH"].split(os.pathsep)
+    assert str(Path(sys.executable).resolve().parent) in executable_path
+    assert "/usr/bin" in executable_path
     assert "RunAtLoad" not in payload
     assert [call[0] for call in calls] == ["print", "enable", "bootstrap", "print"]
 

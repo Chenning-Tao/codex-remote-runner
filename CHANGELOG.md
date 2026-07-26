@@ -21,6 +21,10 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 - Report standalone App Server completion as `history_committed` with a
   `thread_history_only` guarantee instead of claiming live Codex App delivery.
+- Preserve the executable search path in the wakeup LaunchAgent so Homebrew-based
+  Codex installations can resolve their Node interpreter.
+- Wake with `attention_required` when a launch remains ambiguous or a reachable
+  server has no runtime for an execution still recorded as active.
 
 ## 0.3.1 - 2026-07-25
 
