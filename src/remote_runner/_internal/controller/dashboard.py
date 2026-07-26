@@ -83,6 +83,10 @@ def validate_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "configured_cores": _optional_non_negative_int(
                     raw.get("configured_cores"), "configured_cores"
                 ),
+                "standard_slots": _optional_non_negative_int(
+                    raw.get("standard_slots", 1), "standard_slots"
+                )
+                or 0,
                 "test_slots": _optional_non_negative_int(
                     raw.get("test_slots"), "test_slots"
                 )
@@ -104,8 +108,12 @@ def _probe_server(server: dict[str, Any], timeout: int) -> dict[str, Any]:
             "testing_enabled",
             "output_root_configured",
             "configured_cores",
+            "standard_slots",
             "test_slots",
+            "capacity_revision",
+            "capacity_customized",
         )
+        if field in server
     }
     configuration_error = server.get("configuration_error")
     if configuration_error is not None:

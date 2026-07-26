@@ -89,10 +89,10 @@ def test_preflight_reads_the_exact_thread_without_starting_a_turn() -> None:
     assert client.started == []
 
 
-def test_deliver_starts_one_turn_and_waits_for_completion() -> None:
+def test_history_commit_starts_one_turn_and_waits_for_completion() -> None:
     client = FakeClient({"id": THREAD_ID, "turns": []})
 
-    result = codex_app_server.deliver_wakeup(
+    result = codex_app_server.commit_wakeup_turn(
         Path("/opt/codex"),
         THREAD_ID,
         WAKE_ID,
@@ -105,15 +105,16 @@ def test_deliver_starts_one_turn_and_waits_for_completion() -> None:
         "turn_id": "turn-new",
         "turn_status": "completed",
         "already_started": False,
+        "visibility": "thread_history_only",
     }
     assert client.started == [(THREAD_ID, WAKE_ID, "report this event")]
     assert client.waited == [(THREAD_ID, "turn-new")]
 
 
-def test_deliver_uses_client_message_id_as_effectively_once_marker() -> None:
+def test_history_commit_uses_client_message_id_as_effectively_once_marker() -> None:
     client = FakeClient({"id": THREAD_ID, "turns": [user_turn()]})
 
-    result = codex_app_server.deliver_wakeup(
+    result = codex_app_server.commit_wakeup_turn(
         Path("/opt/codex"),
         THREAD_ID,
         WAKE_ID,
@@ -131,7 +132,7 @@ def test_ambiguous_retry_can_inspect_without_starting_again() -> None:
     client = FakeClient({"id": THREAD_ID, "turns": []})
 
     with pytest.raises(codex_app_server.WakeupTurnNotFound):
-        codex_app_server.deliver_wakeup(
+        codex_app_server.commit_wakeup_turn(
             Path("/opt/codex"),
             THREAD_ID,
             WAKE_ID,
@@ -143,10 +144,10 @@ def test_ambiguous_retry_can_inspect_without_starting_again() -> None:
     assert client.started == []
 
 
-def test_deliver_rejoins_an_in_progress_matching_turn() -> None:
+def test_history_commit_rejoins_an_in_progress_matching_turn() -> None:
     client = FakeClient({"id": THREAD_ID, "turns": [user_turn("inProgress")]})
 
-    result = codex_app_server.deliver_wakeup(
+    result = codex_app_server.commit_wakeup_turn(
         Path("/opt/codex"),
         THREAD_ID,
         WAKE_ID,

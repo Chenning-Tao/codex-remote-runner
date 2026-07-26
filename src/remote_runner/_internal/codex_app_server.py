@@ -360,7 +360,7 @@ def preflight_thread(
         client.read_thread(validate_thread_id(thread_id), include_turns=False)
 
 
-def deliver_wakeup(
+def commit_wakeup_turn(
     executable: Path,
     thread_id: str,
     wake_id: str,
@@ -390,4 +390,5 @@ def deliver_wakeup(
             "turn_id": turn["id"],
             "turn_status": turn["status"],
             "already_started": duplicate,
+            "visibility": "thread_history_only",
         }

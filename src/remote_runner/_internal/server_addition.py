@@ -54,6 +54,11 @@ def add(args: argparse.Namespace) -> dict[str, Any]:
         run_id,
     )
     revision = str(queued["revision"])
+    workload_class = getattr(args, "target_workload_class", None) or queued[
+        "workload_class"
+    ]
+    if workload_class not in {"standard", "test"}:
+        raise ValueError("target workload class must be standard or test")
     existing = [str(name) for name in queued["prepared_servers"]]
     if args.server in existing:
         return {
@@ -69,7 +74,7 @@ def add(args: argparse.Namespace) -> dict[str, Any]:
             "output identity; resubmit with --output-relpath"
         )
     if (
-        queued["workload_class"] == "test"
+        workload_class == "test"
         and args.server not in config.scheduling.testing_servers
     ):
         raise ValueError(
@@ -93,7 +98,7 @@ def add(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"server {args.server!r} requires output_root for this relative-output run"
         )
-    if queued["workload_class"] == "test" and int(candidate.get("test_slots", 0)) <= 0:
+    if workload_class == "test" and int(candidate.get("test_slots", 0)) <= 0:
         raise ValueError(
             f"test workload server {args.server!r} requires positive testing.slots"
         )

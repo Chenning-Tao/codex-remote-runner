@@ -15,7 +15,7 @@ tested, but operators should review upgrades before applying them to active pool
 - Durable queued and running workloads backed by controller-owned state.
 - Automatic placement using configured capacity, availability, and priority.
 - Exact Git revision preparation in detached remote worktrees.
-- Foreground waits and event-driven Codex task wakeups.
+- Foreground live waits and event-driven Codex history follow-ups.
 - Interactive Textual and local browser dashboards with confirmed run stopping.
 - Explicit stop, cleanup, purge, server drain, and output archival workflows.
 
@@ -100,7 +100,10 @@ same controller snapshot used by the TUI. Use `--no-open` to leave the browser
 closed or `--port PORT` to select another local port. The browser never receives
 SSH configuration. The details drawer can stop one exact queued or running
 workload, change a queued workload's priority and eligible servers, and prepare
-its exact revision on a newly selected compatible server before enabling it.
+its exact revision on a newly selected compatible server before enabling it. It
+can also switch queued work between the standard and test lanes and edit each
+server's controller-wide standard/test concurrency limits. Slot limits control
+admission only and do not rewrite worker counts or stop running work.
 Queue writes use controller revisions and a bounded preparation reservation so
 stale edits or work that has entered dispatch are rejected.
 
@@ -117,6 +120,7 @@ remote-runner run \
   --task-id "validation/smoke" \
   --result-intent supporting \
   --wait \
+  --until reportable \
   --command '"$RR_PROJECT_PYTHON" -m pytest -q'
 ```
 
@@ -128,7 +132,7 @@ Common follow-up commands:
 
 ```bash
 remote-runner monitor --project-config /path/to/.remote-runner.yaml
-remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-...
+remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-... --until reportable
 remote-runner tui --project-config /path/to/.remote-runner.yaml
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
@@ -149,6 +153,14 @@ operations.
 [SKILL.md](SKILL.md) and [agents/openai.yaml](agents/openai.yaml) provide the Codex
 skill metadata and operating contract. They complement the CLI; the Python wheel
 does not install user-specific Codex configuration.
+
+For a result that must appear live in the Codex App, keep the wait attached and use
+the App-owned `send_message_to_thread` tool once the result is ready. Detached
+`remote-runner wakeup` uses no model turns while waiting, but its public guarantee is
+only `thread_history_only`; it cannot force a separate desktop connection to refresh.
+After an event, its single completion turn may use read-only monitoring and existing
+logs or synchronized artifacts to finish the diagnosis or result analysis before it
+is committed to history.
 
 ## Security And Support
 

@@ -17,6 +17,10 @@ RUN_VIEW_SCHEMA_VERSION = 1
 EXECUTION_TERMINAL = {"succeeded", "failed", "stopped"}
 QUEUE_TERMINAL = {"failed", "stopped"}
 ACTIVE_PHASES = {"queued", "dispatching", "registered", "running"}
+UNKNOWN_LAUNCH_ATTENTION = "execution launch outcome remains unknown"
+RUNTIME_ABSENT_ATTENTION = (
+    "remote runtime is absent while execution authority remains active"
+)
 
 
 def _queue_projection(
@@ -86,6 +90,13 @@ def _derive_phase(
                 None,
                 "queue is terminal while the execution remains active",
             )
+        execution_error = None if execution is None else execution.get("error")
+        if execution_error == monitoring.RUNTIME_ABSENT_ERROR:
+            return "attention_required", None, None, RUNTIME_ABSENT_ATTENTION
+        if isinstance(execution_error, str) and "launch outcome is unknown" in (
+            execution_error.lower()
+        ):
+            return "attention_required", None, None, UNKNOWN_LAUNCH_ATTENTION
         return str(execution_status), None, None, None
 
     if execution is not None:

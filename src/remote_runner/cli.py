@@ -84,8 +84,12 @@ def _add_source_preparation(parser: argparse.ArgumentParser) -> None:
 def _add_wait_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--until",
-        choices=("execution-terminal",),
+        choices=("execution-terminal", "reportable"),
         default="execution-terminal",
+        help=(
+            "stop at execution terminal state, or keep successful output-backed "
+            "runs attached until output synchronization is complete"
+        ),
     )
     parser.add_argument(
         "--max-wait",
@@ -179,7 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--wait",
         action="store_true",
-        help="wait for the submitted run to reach an authoritative terminal state",
+        help="wait for the submitted run according to --until",
     )
     _add_wait_options(run_parser)
 
@@ -200,7 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     wait_parser = subparsers.add_parser(
         "wait",
-        help="wait for one run to reach an authoritative terminal state",
+        help="wait for one run to reach the selected authoritative condition",
     )
     _add_project_config(wait_parser)
     wait_parser.add_argument("--run-id", required=True)
@@ -209,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     wakeup_parser = subparsers.add_parser(
         "wakeup",
-        help="wake a Codex task once a run cohort finishes or needs attention",
+        help="persist a Codex history turn once a run cohort is reportable",
     )
     wakeup_actions = wakeup_parser.add_subparsers(
         dest="wakeup_action",
@@ -218,7 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wakeup_register = wakeup_actions.add_parser(
         "register",
-        help="register a durable wakeup for one exact run cohort",
+        help="register a durable history follow-up for one exact run cohort",
     )
     _add_project_config(wakeup_register)
     wakeup_register.add_argument(

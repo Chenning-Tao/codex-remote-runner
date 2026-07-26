@@ -43,6 +43,7 @@ remote-runner run \
   --task-id "task id or context" \
   --result-intent candidate \
   --wait \
+  --until reportable \
   --command '"$RR_PROJECT_PYTHON" experiment.py'
 ```
 
@@ -70,19 +71,28 @@ with `run --wait` or wait for an existing run with:
 ```bash
 remote-runner wait \
   --project-config /absolute/path/to/.remote-runner.yaml \
-  --run-id "<run-id>"
+  --run-id "<run-id>" \
+  --until reportable
 ```
 
 Keep the command session attached until it returns. Inspect `run_view.outcome` (or
 `wait.run_view.outcome` from `run --wait`): a failed or stopped workload is still a
 successfully observed wait and therefore may have CLI exit zero.
 
+Use the attached path when the result must appear live in a Codex App task. The
+controller wait itself runs outside the model; keep one command session attached and
+do not add a model heartbeat. The App host may still resume a long-running tool turn,
+so this is not the detached worker's strict zero-wait-token guarantee. Once the
+authoritative result is ready, report in the same task. When the report belongs in
+another App task, call `send_message_to_thread` exactly once with the trusted final
+payload.
+
 A wait deadline or `Ctrl-C` ends only the wait, never the durable run. Resume with
 the same exact run ID. For several runs, report only after every requested run has a
 terminal outcome or an explicit attention condition.
 
-If the run should outlive the current Codex task, register one event-driven wakeup as
-the final command before ending the task:
+If the run should outlive the current Codex task and persisted history after reopening
+the task is sufficient, register one detached history follow-up as the final command:
 
 ```bash
 remote-runner wakeup register \
@@ -90,11 +100,23 @@ remote-runner wakeup register \
   --run-id "<run-id>"
 ```
 
-Repeat `--run-id` for a cohort. The worker consumes no model turns while waiting,
-wakes the current `CODEX_THREAD_ID` once when any run needs attention or every run is
-terminal, and exits after the last subscription is delivered or cancelled. Do not
-create a heartbeat or scheduled polling fallback. If registration fails, keep the
-foreground wait instead of leaving follow-up to the user.
+Repeat `--run-id` for a cohort. The worker consumes no model turns while waiting. A
+succeeded run with output synchronization stays pending until synchronization is
+`completed`; failed, stopped, missing, purged, or attention states wake without
+waiting for output synchronization. The worker then starts one completion turn
+through public `codex app-server`, supplies the exact project config and run IDs, and
+records `history_committed` only after that turn finishes. The turn may use read-only
+monitoring and existing logs or artifacts to diagnose failures, analyze synchronized
+results, or explain attention conditions. It must not mutate or resubmit work without
+an explicit user request. Waiting uses no model turn; completion analysis consumes
+model tokens only after the event.
+
+`thread_history_only` is not a live Codex App delivery guarantee. A standalone App
+Server connection cannot call the App-owned `send_message_to_thread` tool or update
+the desktop connection registry. Do not use detached wakeup when live in-task display
+is required, and do not bridge that gap with private IPC, desktop state writes, deep
+links, heartbeats, or scheduled polling. If registration fails, keep the foreground
+wait instead of leaving follow-up to the user.
 
 Pending subscriptions are durable. On macOS, `remote-runner wakeup install` is an
 explicit one-time LaunchAgent change that also restores pending work after login or
@@ -110,7 +132,7 @@ interpreting authority, progress, output synchronization, or transport ambiguity
 - `remote-runner prepare`: prepare one reusable clean revision.
 - `remote-runner run`: submit durable work; add `--wait` for one foreground run.
 - `remote-runner wait`: block on one exact run's authoritative terminal state.
-- `remote-runner wakeup`: register, inspect, or cancel an event-driven Codex follow-up.
+- `remote-runner wakeup`: register, inspect, or cancel a detached history follow-up.
 - `remote-runner monitor`: inspect a project, task cohort, or exact run.
 - `remote-runner stop`: stop one exact queued or running run through the controller.
 - `remote-runner sync-pool` / `add-server`: extend eligible queued work.

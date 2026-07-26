@@ -11,7 +11,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 - 由控制器持久化队列与运行状态，任务不会依赖原始客户端进程。
 - 根据已配置的容量、可用性和优先级自动选择执行服务器。
 - 在远程 detached worktree 中准备并运行精确的 Git revision。
-- 支持前台等待和事件驱动的 Codex 任务唤醒。
+- 支持前台实时等待和事件驱动的 Codex 任务历史回报。
 - 提供可交互的 Textual 和本地网页控制面板，并支持确认后停止任务。
 - 提供明确的停止、清理、彻底删除、服务器排空和输出归档流程。
 
@@ -83,6 +83,11 @@ Remote Runner 使用两个 YAML 文件：
 remote-runner web --project-config /absolute/path/to/.remote-runner.yaml
 ```
 
+控制台绑定在 `127.0.0.1`，可在服务器详情中直接设置控制器全局共享的
+Standard/Test 并发任务数，也可以在排队任务详情中切换任务类型、优先级和
+候选服务器。槽位只限制任务准入，不修改 worker 数，也不会停止已经运行的
+任务；将槽位设为 `0` 会暂停该类型的新任务。
+
 该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示与 TUI 相同的 controller snapshot。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置。详情栏可以停止一个精确的排队中或运行中任务，也可以修改排队任务的优先级和可用服务器；如果新选择的兼容服务器尚未准备，Web 进程会先为任务的精确 revision 完成准备，再启用该服务器。队列写操作使用 controller revision 和有时限的准备租约，旧快照修改或已经进入调度的任务会被拒绝。
 
 ## 运行
@@ -97,6 +102,7 @@ remote-runner run \
   --task-id "validation/smoke" \
   --result-intent supporting \
   --wait \
+  --until reportable \
   --command '"$RR_PROJECT_PYTHON" -m pytest -q'
 ```
 
@@ -106,7 +112,7 @@ remote-runner run \
 
 ```bash
 remote-runner monitor --project-config /path/to/.remote-runner.yaml
-remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-...
+remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-... --until reportable
 remote-runner tui --project-config /path/to/.remote-runner.yaml
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
@@ -119,6 +125,8 @@ remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
 ## Codex 集成
 
 [SKILL.md](SKILL.md) 和 [agents/openai.yaml](agents/openai.yaml) 提供 Codex skill 的元数据与运行契约。它们用于补充 CLI；Python wheel 不会安装任何用户专属的 Codex 配置。
+
+如果结果必须实时出现在 Codex App 任务中，应保持前台等待，并在结果就绪后调用一次 App 自有的 `send_message_to_thread` 工具。后台 `remote-runner wakeup` 在等待期间不启动模型回合，但其公开保证仅为 `thread_history_only`；它无法强制另一个桌面连接刷新。事件发生后，它会在一个完成回合中使用只读监控及已有日志或同步产物完成失败诊断或结果分析，再将完整回合写入任务历史。
 
 ## 安全与支持
 

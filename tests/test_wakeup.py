@@ -96,6 +96,7 @@ def run_view(
     *,
     outcome: str | None = None,
     etag_character: str = "a",
+    output_sync_status: str = "not_enqueued",
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -110,7 +111,7 @@ def run_view(
         ),
         "queue": {"error": "must not reach the wake prompt"},
         "execution": {"error": "must not reach the wake prompt"},
-        "output_sync": {"status": "not_enqueued", "last_error": "secret"},
+        "output_sync": {"status": output_sync_status, "last_error": "secret"},
         "purge": None,
     }
 
@@ -127,6 +128,7 @@ def test_register_is_durable_private_and_idempotent(
 
     assert first["created"] is True
     assert second["created"] is False
+    assert first["delivery_guarantee"] == "thread_history_only"
     assert first["wake_id"] == second["wake_id"]
     assert first["run_ids"] == [RUN_ID, OTHER_RUN_ID]
     assert preflighted == [(Path("/opt/homebrew/bin/codex"), THREAD_ID)]
@@ -255,13 +257,122 @@ def test_cohort_becomes_ready_only_when_every_run_is_terminal(
 
     assert pending is not None and pending["status"] == "pending"
     assert ready is not None and ready["status"] == "ready"
-    prompt = wakeup.build_wake_prompt(ready["ready_payload"])
+    prompt = wakeup.build_wake_prompt(
+        ready["ready_payload"], project_config=args.project_config
+    )
     assert RUN_ID in prompt and OTHER_RUN_ID in prompt
     assert "outcome=succeeded" in prompt
     assert "outcome=failed" in prompt
     assert "must not reach" not in prompt
     assert "secret" not in prompt
+    assert "remote-runner monitor --project-config" in prompt
+    assert str(args.project_config) in prompt
+    assert "concrete failure cause" in prompt
     assert "Do not resubmit" in prompt
+    assert "do not merely announce" in prompt
+
+
+def test_succeeded_run_waits_for_output_sync_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_registration(monkeypatch)
+    args = register_args(tmp_path, config(tmp_path))
+    registered = wakeup.register(args)
+    paths = wakeup.wakeup_paths(args.state_root)
+
+    waiting = wakeup.record_views(
+        paths,
+        registered["wake_id"],
+        [
+            run_view(
+                RUN_ID,
+                "terminal",
+                outcome="succeeded",
+                output_sync_status="pending",
+            )
+        ],
+    )
+    ready = wakeup.record_views(
+        paths,
+        registered["wake_id"],
+        [
+            run_view(
+                RUN_ID,
+                "terminal",
+                outcome="succeeded",
+                etag_character="b",
+                output_sync_status="completed",
+            )
+        ],
+    )
+
+    assert waiting is not None and waiting["status"] == "pending"
+    assert waiting["ready_payload"] is None
+    assert ready is not None and ready["status"] == "ready"
+    assert ready["ready_payload"]["runs"][0]["output_sync_status"] == "completed"
+    prompt = wakeup.build_wake_prompt(
+        ready["ready_payload"], project_config=args.project_config
+    )
+    assert "ready for downstream analysis" in prompt
+    assert "substantive findings" in prompt
+
+
+def test_failed_run_does_not_wait_for_output_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_registration(monkeypatch)
+    args = register_args(tmp_path, config(tmp_path))
+    registered = wakeup.register(args)
+    paths = wakeup.wakeup_paths(args.state_root)
+
+    ready = wakeup.record_views(
+        paths,
+        registered["wake_id"],
+        [
+            run_view(
+                RUN_ID,
+                "terminal",
+                outcome="failed",
+                output_sync_status="pending",
+            )
+        ],
+    )
+
+    assert ready is not None and ready["status"] == "ready"
+    assert ready["ready_payload"]["reason"] == "terminal"
+
+
+def test_cancelled_output_sync_wakes_for_attention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_registration(monkeypatch)
+    args = register_args(tmp_path, config(tmp_path))
+    registered = wakeup.register(args)
+    paths = wakeup.wakeup_paths(args.state_root)
+
+    ready = wakeup.record_views(
+        paths,
+        registered["wake_id"],
+        [
+            run_view(
+                RUN_ID,
+                "terminal",
+                outcome="succeeded",
+                output_sync_status="cancelled",
+            )
+        ],
+    )
+
+    assert ready is not None and ready["status"] == "ready"
+    assert ready["ready_payload"]["reason"] == "attention_required"
+    prompt = wakeup.build_wake_prompt(
+        ready["ready_payload"], project_config=args.project_config
+    )
+    assert "output_sync_status=cancelled" in prompt
+    assert "safest next step" in prompt
 
 
 @pytest.mark.parametrize("phase", ["attention_required", "missing", "purged"])
@@ -313,6 +424,7 @@ def test_poll_batch_uses_one_controller_call_for_the_cohort(
     result = wakeup.poll_batch(paths, batch, wait_seconds=10)
 
     assert result["updated"] == 1
+    assert result["controller_ready"] is False
     assert observed[0][0] == "wait-runs"
     assert observed[0][1] == {
         "schema_version": 1,
@@ -325,7 +437,7 @@ def test_poll_batch_uses_one_controller_call_for_the_cohort(
     assert observed[0][2] == 28
 
 
-def test_worker_delivers_ready_subscription_once_then_exits_idle(
+def test_worker_commits_ready_subscription_once_then_exits_idle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -344,9 +456,9 @@ def test_worker_delivers_ready_subscription_once_then_exits_idle(
         "time",
         lambda: float(ready["delivery_not_before"]) + 1,
     )
-    delivered: list[tuple[Path, str, str, str]] = []
+    committed: list[tuple[Path, str, str, str]] = []
 
-    def deliver(
+    def commit(
         executable: Path,
         thread_id: str,
         wake_id: str,
@@ -354,28 +466,29 @@ def test_worker_delivers_ready_subscription_once_then_exits_idle(
         *,
         start_if_missing: bool,
     ):
-        delivered.append((executable, thread_id, wake_id, prompt))
+        committed.append((executable, thread_id, wake_id, prompt))
         assert start_if_missing is True
         return {
             "wake_id": wake_id,
             "turn_id": "turn-1",
             "turn_status": "completed",
             "already_started": False,
+            "visibility": "thread_history_only",
         }
 
-    monkeypatch.setattr(wakeup_worker, "deliver_wakeup", deliver)
+    monkeypatch.setattr(wakeup_worker, "commit_wakeup_turn", commit)
 
     result = wakeup_worker.run_worker(paths)
 
     assert result == {"status": "idle", "processed": 1}
-    assert len(delivered) == 1
-    assert delivered[0][2] == registered["wake_id"]
+    assert len(committed) == 1
+    assert committed[0][2] == registered["wake_id"]
     assert wakeup.list_subscriptions(paths) == []
     assert not paths.pending_marker.exists()
     completed = wakeup._read_json(
         paths.completed_dir / f"{registered['wake_id']}.json"
     )
-    assert completed["status"] == "delivered"
+    assert completed["status"] == "history_committed"
 
 
 def test_worker_persists_controller_failure_without_starting_codex(
@@ -393,7 +506,7 @@ def test_worker_persists_controller_failure_without_starting_codex(
     )
     monkeypatch.setattr(
         wakeup_worker,
-        "deliver_wakeup",
+        "commit_wakeup_turn",
         lambda *_args, **_kwargs: pytest.fail("Codex must not start before readiness"),
     )
 
@@ -433,9 +546,10 @@ def test_worker_inspects_history_before_retrying_an_ambiguous_turn_start(
             "turn_id": "turn-1",
             "turn_status": "completed",
             "already_started": False,
+            "visibility": "thread_history_only",
         }
 
-    monkeypatch.setattr(wakeup_worker, "deliver_wakeup", deliver)
+    monkeypatch.setattr(wakeup_worker, "commit_wakeup_turn", deliver)
 
     first = wakeup_worker.run_worker(paths, once=True)
     now[0] += 1
@@ -445,7 +559,7 @@ def test_worker_inspects_history_before_retrying_an_ambiguous_turn_start(
 
     assert first["status"] == "delivery_retryable"
     assert second["status"] == "delivery_retryable"
-    assert third["status"] == "delivered"
+    assert third["status"] == "history_committed"
     assert starts == [True, False, True]
 
 

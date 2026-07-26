@@ -567,6 +567,69 @@ def test_terminal_status_with_live_group_does_not_advance_local_state(
     assert state["status"] == "running"
 
 
+def test_absent_runtime_records_attention_without_inventing_a_terminal_state(
+    tmp_path: Path,
+) -> None:
+    _config, paths = make_current_run(tmp_path)
+    _manifest, state = load_current_run(paths, RUN_ID)
+    update_current_state(
+        paths,
+        RUN_ID,
+        int(state["revision"]),
+        {"status": "running", "started_at": "2026-07-13T00:00:00Z"},
+    )
+    current_row = monitoring.load_registry_rows(paths)[0]
+    probe = {
+        "observation": "unknown",
+        "observation_source": "stale_remote_status",
+        "ssh_reachable": True,
+        "tmux_alive": False,
+        "pgid_alive": False,
+    }
+
+    first = monitoring.reconcile_current(paths, current_row, probe)
+    _manifest, recorded = load_current_run(paths, RUN_ID)
+    second = monitoring.reconcile_current(paths, first, probe)
+    _manifest, unchanged = load_current_run(paths, RUN_ID)
+
+    assert first["authoritative_status"] == "running"
+    assert recorded["status"] == "running"
+    assert recorded["error"] == monitoring.RUNTIME_ABSENT_ERROR
+    assert second["error"] == monitoring.RUNTIME_ABSENT_ERROR
+    assert unchanged["revision"] == recorded["revision"]
+
+
+def test_live_runtime_clears_monitor_generated_absence_attention(tmp_path: Path) -> None:
+    _config, paths = make_current_run(tmp_path)
+    _manifest, state = load_current_run(paths, RUN_ID)
+    update_current_state(
+        paths,
+        RUN_ID,
+        int(state["revision"]),
+        {
+            "status": "running",
+            "started_at": "2026-07-13T00:00:00Z",
+            "error": monitoring.RUNTIME_ABSENT_ERROR,
+        },
+    )
+    current_row = monitoring.load_registry_rows(paths)[0]
+    probe = {
+        "observation": "running",
+        "observation_source": "live_process",
+        "ssh_reachable": True,
+        "tmux_alive": True,
+        "pgid_alive": True,
+        "remote_status_record": {"state": "running"},
+    }
+
+    reconciled = monitoring.reconcile_current(paths, current_row, probe)
+    _manifest, state = load_current_run(paths, RUN_ID)
+
+    assert reconciled["authoritative_status"] == "running"
+    assert state["status"] == "running"
+    assert state["error"] is None
+
+
 def test_monitoring_legacy_record_never_changes_its_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

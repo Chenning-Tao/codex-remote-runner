@@ -19,8 +19,8 @@ Keep connection endpoints, configured cores, placement priority, and global
 enablement in `~/.codex/remote-servers.yaml`. Keep project execution ownership
 in one `.remote-runner.yaml`.
 
-Testing capacity belongs to the physical server and is shared by every project
-under the controller root:
+Task-slot capacity belongs to the physical server and is shared by every project
+under the controller root. The global registry supplies the initial test value:
 
 ```yaml
 servers:
@@ -31,8 +31,15 @@ servers:
       slots: 1
 ```
 
-`testing.slots` limits concurrent test-class runs, not cores or workers. A
-positive value enables the test lane; omission disables it for that server.
+The controller initially uses one standard slot and the configured
+`testing.slots` value. The local web dashboard can then persist both values in
+the controller-wide `scheduler/server-capacities.yaml` registry. Web overrides
+remain authoritative across projects and later dashboard refreshes.
+
+Standard and test slots limit concurrent runs only; they do not divide cores,
+rewrite worker arguments, or stop existing work. Zero disables new dispatch in
+that lane. Lowering a limit below current occupancy lets existing runs finish and
+blocks later dispatch until occupancy falls below the new limit.
 
 ## Project Configuration
 
@@ -129,9 +136,11 @@ Server names come from the global server registry and identify controller-wide
 capacity. Project queues remain isolated, while dispatch leases are shared by
 all projects under one controller root so two projects cannot launch onto the
 same server concurrently. Keep `project_id` unique within that controller root.
-Standard runs exclude other standard runs on a server. Test runs ignore standard
-occupancy and consume only the server-wide test slots; running tests likewise do
-not prevent a standard run from starting.
+Standard and test runs consume their respective controller-wide slots
+independently. Test occupancy does not prevent a standard run from starting, and
+standard occupancy does not consume test slots. Dispatch reads the current
+controller capacity instead of the historical slot values frozen into queued
+server descriptors.
 
 ## Output Synchronization
 

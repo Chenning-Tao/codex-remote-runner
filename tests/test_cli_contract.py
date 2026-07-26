@@ -80,6 +80,7 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
     wait_help = help_text("wait")
     assert "--run-id" in wait_help
     assert "--until" in wait_help
+    assert "reportable" in wait_help
     assert "--max-wait" in wait_help
     wakeup_register_help = help_text("wakeup", "register")
     assert "--run-id" in wakeup_register_help
@@ -190,10 +191,9 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
         "Run and follow durable remote workloads"
         == metadata["interface"]["short_description"]
     )
-    assert "event-driven wakeup" in metadata["interface"]["default_prompt"]
-    assert (
-        "authoritative terminal or attention" in metadata["interface"]["default_prompt"]
-    )
+    assert "foreground wait for a live Codex App report" in metadata["interface"]["default_prompt"]
+    assert "output synchronization completes" in metadata["interface"]["default_prompt"]
+    assert "history-only follow-up" in metadata["interface"]["default_prompt"]
 
 
 def test_user_facing_skill_and_help_hide_internal_schemas() -> None:

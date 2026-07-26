@@ -74,6 +74,7 @@ class ControllerSchedulerPaths:
     leases_dir: Path
     locks_dir: Path
     drains_path: Path
+    capacities_path: Path
 
 
 def controller_scheduler_paths(root: Path) -> ControllerSchedulerPaths:
@@ -85,6 +86,7 @@ def controller_scheduler_paths(root: Path) -> ControllerSchedulerPaths:
         leases_dir=scheduler_root / "leases",
         locks_dir=scheduler_root / "locks",
         drains_path=scheduler_root / "drained-servers.yaml",
+        capacities_path=scheduler_root / "server-capacities.yaml",
     )
 
 
@@ -135,6 +137,174 @@ def _scheduler_lock(root: Path) -> contextlib.AbstractContextManager[None]:
 def scheduler_lock(root: Path) -> contextlib.AbstractContextManager[None]:
     """Serialize release activation with controller-wide dispatch leases."""
     return _scheduler_lock(root)
+
+
+def _capacity_slots(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1024:
+        raise ValueError(f"{field} must be an integer between 0 and 1024")
+    return value
+
+
+def _capacity_defaults(server: dict[str, Any]) -> tuple[str, int, int]:
+    name = server.get("name")
+    if not isinstance(name, str) or not PROJECT_ID_RE.fullmatch(name):
+        raise ValueError("server capacity default contains an invalid server name")
+    standard_slots = _capacity_slots(
+        server.get("standard_slots", 1),
+        f"standard slots for {name!r}",
+    )
+    test_slots = _capacity_slots(
+        server.get("test_slots", 0),
+        f"test slots for {name!r}",
+    )
+    return name, standard_slots, test_slots
+
+
+def _load_server_capacities_unlocked(
+    scheduler: ControllerSchedulerPaths,
+) -> dict[str, dict[str, Any]]:
+    if not scheduler.capacities_path.is_file():
+        return {}
+    payload = load_yaml(scheduler.capacities_path)
+    if payload.get("schema_version") != 1:
+        raise ValueError("unsupported server-capacity registry schema")
+    servers = payload.get("servers")
+    if not isinstance(servers, dict):
+        raise ValueError("server-capacity registry servers must be a mapping")
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, raw in servers.items():
+        if not isinstance(name, str) or not PROJECT_ID_RE.fullmatch(name):
+            raise ValueError("server-capacity registry contains an invalid server name")
+        if not isinstance(raw, dict):
+            raise ValueError(f"server-capacity entry for {name!r} must be a mapping")
+        revision = raw.get("revision")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError(f"server-capacity revision for {name!r} is invalid")
+        customized = raw.get("customized", False)
+        if not isinstance(customized, bool):
+            raise ValueError(f"server-capacity customized flag for {name!r} is invalid")
+        updated_at = raw.get("updated_at")
+        if not isinstance(updated_at, str) or not updated_at:
+            raise ValueError(f"server-capacity entry for {name!r} lacks updated_at")
+        normalized[name] = {
+            "standard_slots": _capacity_slots(
+                raw.get("standard_slots"), f"standard slots for {name!r}"
+            ),
+            "test_slots": _capacity_slots(
+                raw.get("test_slots"), f"test slots for {name!r}"
+            ),
+            "revision": revision,
+            "customized": customized,
+            "updated_at": updated_at,
+            **(
+                {"updated_by_project": raw["updated_by_project"]}
+                if isinstance(raw.get("updated_by_project"), str)
+                else {}
+            ),
+        }
+    return normalized
+
+
+def ensure_server_capacities(
+    paths: ControllerPaths,
+    defaults: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    parsed = [_capacity_defaults(server) for server in defaults]
+    _ensure_controller_tree(paths)
+    scheduler = controller_scheduler_paths(paths.root)
+    _private_tree(scheduler.scheduler_root)
+    with _scheduler_lock(paths.root):
+        servers = _load_server_capacities_unlocked(scheduler)
+        changed = False
+        for name, standard_slots, test_slots in parsed:
+            current = servers.get(name)
+            if current is None:
+                servers[name] = {
+                    "standard_slots": standard_slots,
+                    "test_slots": test_slots,
+                    "revision": 0,
+                    "customized": False,
+                    "updated_at": utc_now(),
+                }
+                changed = True
+            elif not current["customized"] and (
+                current["standard_slots"] != standard_slots
+                or current["test_slots"] != test_slots
+            ):
+                servers[name] = {
+                    **current,
+                    "standard_slots": standard_slots,
+                    "test_slots": test_slots,
+                    "revision": int(current["revision"]) + 1,
+                    "updated_at": utc_now(),
+                }
+                changed = True
+        if changed:
+            write_yaml(
+                scheduler.capacities_path,
+                {"schema_version": 1, "servers": dict(sorted(servers.items()))},
+            )
+        return {name: dict(value) for name, value in servers.items()}
+
+
+def list_server_capacities(paths: ControllerPaths) -> dict[str, dict[str, Any]]:
+    scheduler = controller_scheduler_paths(paths.root)
+    with _scheduler_lock(paths.root):
+        return {
+            name: dict(value)
+            for name, value in _load_server_capacities_unlocked(scheduler).items()
+        }
+
+
+def update_server_capacity(
+    paths: ControllerPaths,
+    server: str,
+    *,
+    expected_revision: int,
+    standard_slots: int,
+    test_slots: int,
+) -> dict[str, Any]:
+    if not PROJECT_ID_RE.fullmatch(server):
+        raise ValueError(f"invalid server name: {server!r}")
+    if (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 0
+    ):
+        raise ValueError("server capacity expected_revision must be non-negative")
+    standard_slots = _capacity_slots(standard_slots, "standard slots")
+    test_slots = _capacity_slots(test_slots, "test slots")
+    _ensure_controller_tree(paths)
+    scheduler = controller_scheduler_paths(paths.root)
+    _private_tree(scheduler.scheduler_root)
+    with _scheduler_lock(paths.root):
+        servers = _load_server_capacities_unlocked(scheduler)
+        current = servers.get(server)
+        if current is None:
+            raise FileNotFoundError(f"server capacity does not exist: {server}")
+        if int(current["revision"]) != expected_revision:
+            raise RuntimeError("server capacity revision conflict")
+        changed = (
+            current["standard_slots"] != standard_slots
+            or current["test_slots"] != test_slots
+            or not current["customized"]
+        )
+        if not changed:
+            return {"changed": False, "server": server, "capacity": current}
+        updated = {
+            "standard_slots": standard_slots,
+            "test_slots": test_slots,
+            "revision": expected_revision + 1,
+            "customized": True,
+            "updated_at": utc_now(),
+            "updated_by_project": paths.project_id,
+        }
+        servers[server] = updated
+        write_yaml(
+            scheduler.capacities_path,
+            {"schema_version": 1, "servers": dict(sorted(servers.items()))},
+        )
+        return {"changed": True, "server": server, "capacity": updated}
 
 
 def run_purge_lock(
@@ -645,9 +815,6 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(eligible_servers_locked, bool):
         raise ValueError("queued job eligible_servers_locked must be boolean")
     job["eligible_servers_locked"] = eligible_servers_locked
-    if job["workload_class"] == "test":
-        if any(int(server["test_slots"]) <= 0 for server in prepared):
-            raise ValueError("queued test workload requires positive test_slots")
     command = str(job["submitted_command"])
     if job["submitted_command_sha256"] != sha256_bytes(command.encode("utf-8")):
         raise ValueError("queued submitted command digest mismatch")
@@ -969,6 +1136,7 @@ def update_queued_job(
     *,
     expected_revision: int,
     queue_priority: str | None = None,
+    workload_class: str | None = None,
     eligible_servers: list[str] | None = None,
     move: str | None = None,
     placement_token: str | None = None,
@@ -982,9 +1150,16 @@ def update_queued_job(
         raise ValueError("queued job expected_revision must be a non-negative integer")
     if queue_priority is not None:
         queue_priority = normalize_queue_priority(queue_priority)
+    if workload_class is not None:
+        workload_class = normalize_workload_class(workload_class)
     if move not in {None, "up", "down"}:
         raise ValueError("queued job move must be 'up' or 'down'")
-    if queue_priority is None and eligible_servers is None and move is None:
+    if (
+        queue_priority is None
+        and workload_class is None
+        and eligible_servers is None
+        and move is None
+    ):
         raise ValueError("queued job update does not contain any changes")
 
     with _queue_lock(paths):
@@ -1041,13 +1216,31 @@ def update_queued_job(
                 updated_job["eligible_servers_locked"] = True
                 changed = True
 
+        if workload_class is not None and workload_class != job["workload_class"]:
+            updated_job["workload_class"] = workload_class
+            destination = [
+                candidate
+                for candidate, _candidate_state in queued_rows
+                if candidate["run_id"] != validated_run_id
+                and candidate["workload_class"] == workload_class
+                and candidate["queue_priority"] == updated_job["queue_priority"]
+            ]
+            updated_job["queue_position"] = (
+                max(
+                    (int(candidate["queue_position"]) for candidate in destination),
+                    default=0,
+                )
+                + 1024
+            )
+            changed = True
+
         if queue_priority is not None and queue_priority != job["queue_priority"]:
             updated_job["queue_priority"] = queue_priority
             destination = [
                 candidate
                 for candidate, _candidate_state in queued_rows
                 if candidate["run_id"] != validated_run_id
-                and candidate["workload_class"] == job["workload_class"]
+                and candidate["workload_class"] == updated_job["workload_class"]
                 and candidate["queue_priority"] == queue_priority
             ]
             updated_job["queue_position"] = (

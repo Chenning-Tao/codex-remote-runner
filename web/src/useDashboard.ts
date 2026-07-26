@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ConnectionState, DashboardDocument, QueueUpdateChanges } from "./types";
+import type {
+  CapacityUpdateChanges,
+  ConnectionState,
+  DashboardDocument,
+  QueueUpdateChanges,
+} from "./types";
 
 interface DashboardResult {
   document: DashboardDocument | null;
@@ -11,6 +16,11 @@ interface DashboardResult {
     runId: string,
     expectedRevision: number,
     changes: QueueUpdateChanges,
+  ) => Promise<void>;
+  updateCapacity: (
+    server: string,
+    expectedRevision: number,
+    changes: CapacityUpdateChanges,
   ) => Promise<void>;
 }
 
@@ -46,6 +56,12 @@ const queueErrorMessages: Record<string, string> = {
   queue_conflict: "任务刚刚发生了变化，请根据刷新后的队列重试。",
   invalid_queue_update: "队列设置无效，请检查优先级和服务器选择。",
   queue_preparation_failed: "服务器准备失败，原调度设置保持不变。",
+};
+
+const capacityErrorMessages: Record<string, string> = {
+  capacity_not_found: "这台服务器已经不在当前项目中，列表已刷新。",
+  capacity_conflict: "服务器容量刚刚发生了变化，请根据刷新后的数值重试。",
+  invalid_capacity_update: "容量设置无效，请输入 0 到 1024 之间的整数。",
 };
 
 function parseDocument(value: string): DashboardDocument {
@@ -144,6 +160,42 @@ export function useDashboard(): DashboardResult {
     );
   }, []);
 
+  const updateCapacity = useCallback(async (
+    server: string,
+    expectedRevision: number,
+    changes: CapacityUpdateChanges,
+  ) => {
+    const response = await fetch(`/api/servers/${encodeURIComponent(server)}/capacity`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Remote-Runner-Action": "update-capacity",
+      },
+      body: JSON.stringify({ server, expected_revision: expectedRevision, ...changes }),
+    });
+    if (response.ok) return;
+    let code = "invalid_capacity_update";
+    let detail: string | null = null;
+    try {
+      const payload: unknown = await response.json();
+      if (
+        payload
+        && typeof payload === "object"
+        && "error" in payload
+        && typeof payload.error === "string"
+      ) {
+        code = payload.error;
+        if ("detail" in payload && typeof payload.detail === "string") detail = payload.detail;
+      }
+    } catch {
+      // Keep the status-based fallback when the server response is not JSON.
+    }
+    throw new QueueUpdateError(
+      detail ?? capacityErrorMessages[code] ?? `容量修改失败（${response.status}）`,
+      code,
+    );
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -186,5 +238,13 @@ export function useDashboard(): DashboardResult {
     };
   }, [generation]);
 
-  return { document, connection, initialError, reconnect, stopRun, updateQueue };
+  return {
+    document,
+    connection,
+    initialError,
+    reconnect,
+    stopRun,
+    updateQueue,
+    updateCapacity,
+  };
 }

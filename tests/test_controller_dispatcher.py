@@ -13,12 +13,14 @@ from remote_runner._internal.controller import dispatcher as controller_dispatch
 from remote_runner._internal.controller.registry import (
     acquire_dispatch_lease,
     controller_paths,
+    ensure_server_capacities,
     load_job,
     reserve_queued_job_update,
     set_server_drained,
     submit_job,
     transition_queued_state,
     update_queued_job,
+    update_server_capacity,
 )
 from remote_runner._internal.execution_registry import sha256_bytes, write_yaml
 from remote_runner._internal.worktree import WorktreeResult
@@ -404,7 +406,7 @@ def test_saturated_runner_owned_work_stays_queued(
     outcome = controller_dispatcher.dispatch_once(paths)
 
     assert outcome.action == "queued"
-    assert outcome.message == "runner capacity saturated"
+    assert outcome.message == "standard slots full (1/1)"
 
 
 def test_dispatch_does_not_probe_server_in_frozen_snapshot_after_drain(
@@ -447,7 +449,7 @@ def test_recent_runner_work_stays_queued_before_load5_rises(
     outcome = controller_dispatcher.dispatch_once(paths)
 
     assert outcome.action == "queued"
-    assert outcome.message == "runner capacity saturated"
+    assert outcome.message == "standard slots full (1/1)"
 
 
 def test_external_saturation_without_runner_work_still_dispatches(
@@ -949,10 +951,65 @@ def test_standard_lane_ignores_running_test_work(tmp_path: Path, monkeypatch) ->
         controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
     )
 
-    outcome = controller_dispatcher.dispatch_once(paths)
+    outcomes = controller_dispatcher.dispatch_batch(paths)
 
-    assert outcome.action == "started"
-    assert outcome.run_id == RUN_ID
+    assert outcomes[0].action == "started"
+    assert outcomes[0].run_id == RUN_ID
+
+
+@pytest.mark.parametrize(
+    ("workload_class", "capacity_changes", "active_class"),
+    [
+        ("standard", {"standard_slots": 2, "test_slots": 1}, "standard"),
+        ("test", {"standard_slots": 1, "test_slots": 2}, "test"),
+    ],
+)
+def test_dispatch_uses_live_controller_slots_for_existing_queued_job(
+    tmp_path: Path,
+    monkeypatch,
+    workload_class: str,
+    capacity_changes: dict[str, int],
+    active_class: str,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    queued = job(workload_class=workload_class)
+    submit_job(paths, queued)
+    server = queued["prepared_servers"][0]
+    ensure_server_capacities(paths, [server])
+    update_server_capacity(
+        paths,
+        str(server["name"]),
+        expected_revision=0,
+        **capacity_changes,
+    )
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "probe_server_state",
+        lambda *_args: {
+            "reachable": True,
+            "load5": 0.0,
+            "active_runs": (
+                {"run_id": "rr-running00000000", "workload_class": active_class},
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "prepare_remote_worktree",
+        lambda **_kwargs: WorktreeResult("/srv/example/worktrees/" + "a" * 40, False),
+    )
+    monkeypatch.setattr(
+        controller_dispatcher, "_register_execution", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
+
+    outcomes = controller_dispatcher.dispatch_batch(paths)
+
+    assert outcomes[0].action == "started"
+    assert outcomes[0].run_id == RUN_ID
 
 
 def test_unknown_launch_outcome_stays_reconcilable(tmp_path: Path, monkeypatch) -> None:
@@ -993,28 +1050,172 @@ def test_unknown_launch_outcome_stays_reconcilable(tmp_path: Path, monkeypatch) 
     assert load_job(paths, RUN_ID)[1]["status"] == "dispatched"
 
 
-def test_dispatch_loop_immediately_drains_started_jobs(
+def test_dispatch_batch_shares_probes_and_launches_distinct_servers_concurrently(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     paths = controller_paths(tmp_path / "controller", "example")
-    outcomes = iter(
+    submit_job(paths, job(two_servers=True), now="2026-01-01T00:00:00+00:00")
+    second = job(two_servers=True)
+    second["run_id"] = "rr-fedcba9876543210"
+    second["output_relpath"] = "second/result.json"
+    second_servers = second["prepared_servers"]
+    assert isinstance(second_servers, list)
+    second_servers[1]["output_root"] = "/home/second/project"
+    submit_job(paths, second, now="2026-01-01T00:00:01+00:00")
+    probes: list[str] = []
+    registrations: dict[str, dict[str, object]] = {}
+
+    def probe(ssh: str, *_args) -> dict[str, object]:
+        probes.append(ssh)
+        return {"reachable": True, "load5": 0.0, "active_run_ids": ()}
+
+    launches = Barrier(2)
+
+    def prepare(**kwargs) -> WorktreeResult:
+        launches.wait(timeout=2)
+        return WorktreeResult(
+            "/srv/example/worktrees/" + str(kwargs["revision"]),
+            False,
+        )
+
+    monkeypatch.setattr(controller_dispatcher, "probe_server_state", probe)
+    monkeypatch.setattr(controller_dispatcher, "prepare_remote_worktree", prepare)
+
+    def register(_paths, queued, server, **kwargs) -> None:
+        registrations[str(queued["run_id"])] = {"server": server, **kwargs}
+
+    monkeypatch.setattr(controller_dispatcher, "_register_execution", register)
+    monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
+
+    outcomes = controller_dispatcher.dispatch_batch(paths)
+
+    assert [outcome.action for outcome in outcomes] == ["started", "started"]
+    assert {outcome.server for outcome in outcomes} == {"compute-b", "archive"}
+    assert probes.count("compute-b") == 2
+    assert probes.count("archive") == 2
+    assert registrations[str(second["run_id"])]["output_root"] == "/home/second/project"
+    assert registrations[str(second["run_id"])]["output_path"] == (
+        "/home/second/project/second/result.json"
+    )
+    assert load_job(paths, RUN_ID)[1]["status"] == "dispatched"
+    assert load_job(paths, str(second["run_id"]))[1]["status"] == "dispatched"
+
+
+def test_dispatch_batch_rechecks_each_server_after_global_lease(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, job(two_servers=True), now="2026-01-01T00:00:00+00:00")
+    second = job(two_servers=True)
+    second["run_id"] = "rr-fedcba9876543210"
+    submit_job(paths, second, now="2026-01-01T00:00:01+00:00")
+    probes: dict[str, int] = {"compute-b": 0, "archive": 0}
+
+    def probe(ssh: str, *_args) -> dict[str, object]:
+        probes[ssh] += 1
+        active = ()
+        if ssh == "archive" and probes[ssh] == 2:
+            active = ({"run_id": "rr-external0000000", "workload_class": "standard"},)
+        return {"reachable": True, "load5": 0.0, "active_runs": active}
+
+    monkeypatch.setattr(controller_dispatcher, "probe_server_state", probe)
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "prepare_remote_worktree",
+        lambda **kwargs: WorktreeResult(
+            "/srv/example/worktrees/" + str(kwargs["revision"]), False
+        ),
+    )
+    monkeypatch.setattr(
+        controller_dispatcher, "_register_execution", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
+
+    outcomes = controller_dispatcher.dispatch_batch(paths)
+
+    assert sorted(outcome.action for outcome in outcomes) == ["queued", "started"]
+    assert probes == {"compute-b": 2, "archive": 2}
+    assert load_job(paths, RUN_ID)[1]["status"] == "dispatched"
+    assert load_job(paths, str(second["run_id"]))[1]["status"] == "queued"
+
+
+def test_dispatch_batch_tries_unplanned_server_when_preferred_lease_is_busy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, job(two_servers=True))
+    assert acquire_dispatch_lease(
+        paths,
+        server="compute-b",
+        run_id="rr-1111111111111111",
+        ttl_seconds=120,
+    )
+    probes: list[str] = []
+
+    def probe(ssh: str, *_args) -> dict[str, object]:
+        probes.append(ssh)
+        return {"reachable": True, "load5": 0.0, "active_run_ids": ()}
+
+    monkeypatch.setattr(controller_dispatcher, "probe_server_state", probe)
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "prepare_remote_worktree",
+        lambda **kwargs: WorktreeResult(
+            "/srv/example/worktrees/" + str(kwargs["revision"]), False
+        ),
+    )
+    monkeypatch.setattr(
+        controller_dispatcher, "_register_execution", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
+
+    outcomes = controller_dispatcher.dispatch_batch(paths)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].action == "started"
+    assert outcomes[0].server == "archive"
+    assert probes.count("compute-b") == 1
+    assert probes.count("archive") == 2
+
+
+def test_dispatch_loop_immediately_drains_started_batches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    batches = iter(
         (
-            controller_dispatcher.DispatchOutcome("started", RUN_ID, "compute-b"),
-            controller_dispatcher.DispatchOutcome(
-                "started", "rr-fedcba9876543210", "archive"
-            ),
-            controller_dispatcher.DispatchOutcome("queued", RUN_ID),
+            [
+                controller_dispatcher.DispatchOutcome("started", RUN_ID, "compute-b"),
+                controller_dispatcher.DispatchOutcome(
+                    "started", "rr-fedcba9876543210", "archive"
+                ),
+            ],
+            [controller_dispatcher.DispatchOutcome("queued", RUN_ID)],
         )
     )
     dispatches: list[controller_dispatcher.DispatchOutcome] = []
 
-    def dispatch_once(*_args, **_kwargs) -> controller_dispatcher.DispatchOutcome:
-        outcome = next(outcomes)
-        dispatches.append(outcome)
-        return outcome
+    def dispatch_batch(
+        *_args, **_kwargs
+    ) -> list[controller_dispatcher.DispatchOutcome]:
+        outcomes = next(batches)
+        dispatches.extend(outcomes)
+        return outcomes
 
-    monkeypatch.setattr(controller_dispatcher, "dispatch_once", dispatch_once)
+    monkeypatch.setattr(controller_dispatcher, "dispatch_batch", dispatch_batch)
 
     def stop_after_first_sleep(_seconds: int) -> None:
         raise RuntimeError("stop test loop")

@@ -38,6 +38,7 @@ def view(
     *,
     outcome: str | None = None,
     etag_character: str = "a",
+    output_sync_status: str = "not_enqueued",
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -49,7 +50,7 @@ def view(
         "terminal_source": "execution" if outcome is not None else None,
         "queue": None,
         "execution": None,
-        "output_sync": {"status": "not_enqueued"},
+        "output_sync": {"status": output_sync_status},
         "purge": None,
     }
 
@@ -136,6 +137,147 @@ def test_wait_uses_etag_long_poll_until_terminal(
         "50",
     )
     assert observed[1][2] == 68
+
+
+def test_reportable_wait_continues_until_output_sync_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    responses = iter(
+        [
+            {
+                "run_view": view(
+                    "terminal",
+                    outcome="succeeded",
+                    output_sync_status="pending",
+                )
+            },
+            {
+                "changed": True,
+                "timed_out": False,
+                "run_view": view(
+                    "terminal",
+                    outcome="succeeded",
+                    etag_character="b",
+                    output_sync_status="completed",
+                ),
+            },
+        ]
+    )
+
+    def call(_config, action: str, **_kwargs):
+        calls.append(action)
+        return next(responses)
+
+    monkeypatch.setattr(waiting, "call_controller", call)
+    result = waiting.wait_for_run(
+        args(config(tmp_path), until="reportable"),
+        reporter=lambda _line: None,
+    )
+
+    assert result["wait_status"] == "completed"
+    assert result["run_view"]["output_sync"]["status"] == "completed"
+    assert calls == ["status", "wait-run"]
+
+
+def test_reportable_wait_throttles_an_older_terminal_controller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        [
+            {
+                "run_view": view(
+                    "terminal",
+                    outcome="succeeded",
+                    output_sync_status="pending",
+                )
+            },
+            {
+                "changed": False,
+                "timed_out": False,
+                "run_view": view(
+                    "terminal",
+                    outcome="succeeded",
+                    output_sync_status="pending",
+                ),
+            },
+            {
+                "changed": True,
+                "timed_out": False,
+                "run_view": view(
+                    "terminal",
+                    outcome="succeeded",
+                    etag_character="b",
+                    output_sync_status="completed",
+                ),
+            },
+        ]
+    )
+    delays: list[float] = []
+    monkeypatch.setattr(waiting, "call_controller", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(waiting.time, "sleep", delays.append)
+
+    result = waiting.wait_for_run(
+        args(config(tmp_path), until="reportable"),
+        reporter=lambda _line: None,
+    )
+
+    assert result["wait_status"] == "completed"
+    assert delays == [waiting.LEGACY_TERMINAL_BACKOFF_SECONDS]
+
+
+def test_reportable_wait_does_not_delay_a_failed_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def call(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "run_view": view(
+                "terminal",
+                outcome="failed",
+                output_sync_status="pending",
+            )
+        }
+
+    monkeypatch.setattr(waiting, "call_controller", call)
+    result = waiting.wait_for_run(
+        args(config(tmp_path), until="reportable"),
+        reporter=lambda _line: None,
+    )
+
+    assert result["wait_status"] == "completed"
+    assert calls == 1
+
+
+def test_reportable_wait_surfaces_cancelled_output_sync_as_attention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        waiting,
+        "call_controller",
+        lambda *_args, **_kwargs: {
+            "run_view": view(
+                "terminal",
+                outcome="succeeded",
+                output_sync_status="cancelled",
+            )
+        },
+    )
+
+    result = waiting.wait_for_run(
+        args(config(tmp_path), until="reportable"),
+        reporter=lambda _line: None,
+    )
+
+    assert result["wait_status"] == "attention_required"
+    assert waiting.wait_exit_code(result) == 4
 
 
 def test_wait_retries_a_transient_controller_failure(

@@ -52,6 +52,9 @@ LOG_TAIL_MARKER = "__REMOTE_RUNNER_LOG_TAIL__"
 TERMINAL_STATUSES = {"succeeded", "failed", "stopped"}
 REMOTE_STATUS_STATES = TERMINAL_STATUSES | {"running"}
 MAX_MONITOR_WORKERS = 8
+RUNTIME_ABSENT_ERROR = (
+    "verified remote runtime is absent while execution authority remains active"
+)
 
 FAILURE_PATTERNS: list[tuple[str, str]] = [
     ("resource", "out of memory"),
@@ -502,11 +505,45 @@ def reconcile_current(
         or (isinstance(remote, dict) and remote.get("state") == "running")
     ):
         desired = "running"
+
+    _manifest, current = load_current_run(paths, str(row["run_id"]))
+    if current["status"] in TERMINAL_STATUSES:
+        updated = dict(row)
+        updated.update(_current_state_projection(current))
+        return updated
+
+    runtime_absent = (
+        current["status"] == "running"
+        and probe.get("ssh_reachable") is True
+        and probe.get("tmux_alive") is False
+        and probe.get("pgid_alive") is False
+        and probe.get("observation") not in TERMINAL_STATUSES
+    )
+    if runtime_absent:
+        if current.get("error") != RUNTIME_ABSENT_ERROR:
+            current = update_current_state(
+                paths,
+                str(row["run_id"]),
+                int(current["revision"]),
+                {"error": RUNTIME_ABSENT_ERROR},
+                action="monitor_attention",
+            )
+        updated = dict(row)
+        updated.update(_current_state_projection(current))
+        return updated
+
     if desired is None:
         return row
 
-    _manifest, current = load_current_run(paths, str(row["run_id"]))
-    if current["status"] in TERMINAL_STATUSES or current["status"] == desired:
+    if current["status"] == desired:
+        if current.get("error") == RUNTIME_ABSENT_ERROR:
+            current = update_current_state(
+                paths,
+                str(row["run_id"]),
+                int(current["revision"]),
+                {"error": None},
+                action="monitor_recovered",
+            )
         updated = dict(row)
         updated.update(_current_state_projection(current))
         return updated

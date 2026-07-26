@@ -21,6 +21,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from ._internal.config import load_managed_project_config
+from ._internal.capacity_control import request_capacity_update
 from ._internal.dashboard import query_dashboard
 from ._internal.execution_registry import (
     resolve_project_config,
@@ -36,6 +37,9 @@ STATIC_ROOT = Path(__file__).with_name("web_static")
 SnapshotQuery = Callable[[argparse.Namespace], dict[str, Any]]
 StopQuery = Callable[[argparse.Namespace], dict[str, Any]]
 QueueUpdateQuery = Callable[[argparse.Namespace, str, dict[str, Any]], dict[str, Any]]
+CapacityUpdateQuery = Callable[
+    [argparse.Namespace, str, dict[str, Any]], dict[str, Any]
+]
 
 
 def _concise_controller_error(exc: Exception) -> str:
@@ -220,6 +224,7 @@ def create_app(
     manage_probe: bool = True,
     stop_query: StopQuery = request_stop,
     queue_update_query: QueueUpdateQuery = request_queue_update,
+    capacity_update_query: CapacityUpdateQuery = request_capacity_update,
 ) -> Starlette:
     if not (static_root / "index.html").is_file():
         raise RuntimeError(
@@ -317,6 +322,7 @@ def create_app(
             "run_id",
             "expected_revision",
             "queue_priority",
+            "workload_class",
             "eligible_servers",
             "move",
         }
@@ -328,7 +334,12 @@ def create_app(
             or not isinstance(payload.get("expected_revision"), int)
             or not any(
                 field in payload
-                for field in ("queue_priority", "eligible_servers", "move")
+                for field in (
+                    "queue_priority",
+                    "workload_class",
+                    "eligible_servers",
+                    "move",
+                )
             )
         ):
             return JSONResponse(
@@ -386,6 +397,85 @@ def create_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    async def capacity_update_endpoint(request: Request) -> Response:
+        if request.headers.get("x-remote-runner-action") != "update-capacity":
+            return JSONResponse(
+                {"error": "missing capacity update action header"}, status_code=403
+            )
+        content_type = (
+            request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        )
+        if content_type != "application/json":
+            return JSONResponse(
+                {"error": "capacity update request must use application/json"},
+                status_code=415,
+            )
+        server = request.path_params["server"]
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if (
+            not isinstance(payload, dict)
+            or set(payload)
+            != {"server", "expected_revision", "standard_slots", "test_slots"}
+            or payload.get("server") != server
+            or isinstance(payload.get("expected_revision"), bool)
+            or not isinstance(payload.get("expected_revision"), int)
+            or any(
+                isinstance(payload.get(field), bool)
+                or not isinstance(payload.get(field), int)
+                or not 0 <= payload[field] <= 1024
+                for field in ("standard_slots", "test_slots")
+            )
+        ):
+            return JSONResponse(
+                {"error": "capacity update request is invalid"}, status_code=400
+            )
+        snapshot = probe.document().get("snapshot")
+        known_servers = {
+            item.get("name")
+            for item in snapshot.get("servers", [])
+            if isinstance(snapshot, dict) and isinstance(item, dict)
+        } if isinstance(snapshot, dict) else set()
+        if server not in known_servers:
+            return JSONResponse({"error": "capacity_not_found"}, status_code=404)
+        controller_payload = dict(payload)
+        controller_payload.pop("server")
+        update_args = argparse.Namespace(**vars(probe.args))
+        try:
+            result = await asyncio.to_thread(
+                capacity_update_query,
+                update_args,
+                server,
+                controller_payload,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            detail = _concise_controller_error(exc)
+            if detail == "server capacity revision conflict":
+                await probe.probe_once()
+                return JSONResponse(
+                    {"error": "capacity_conflict"},
+                    status_code=409,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if detail.startswith("server capacity does not exist:"):
+                await probe.probe_once()
+                return JSONResponse(
+                    {"error": "capacity_not_found"},
+                    status_code=404,
+                    headers={"Cache-Control": "no-store"},
+                )
+            return JSONResponse(
+                {"error": "invalid_capacity_update", "detail": detail},
+                status_code=400,
+            )
+        await probe.probe_once()
+        return JSONResponse(
+            {"status": "updated", "server": server, "result": result},
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def events_endpoint(request: Request) -> Response:
         async def stream() -> AsyncIterator[str]:
             sequence = -1
@@ -415,6 +505,11 @@ def create_app(
             Route(
                 "/api/queue/{run_id:str}",
                 queue_update_endpoint,
+                methods=["PATCH"],
+            ),
+            Route(
+                "/api/servers/{server:str}/capacity",
+                capacity_update_endpoint,
                 methods=["PATCH"],
             ),
             Mount("/", StaticFiles(directory=static_root, html=True), name="web"),

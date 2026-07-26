@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,14 @@ from .wakeup import WakeupPaths
 
 
 LAUNCHD_LABEL = "com.openai.codex-remote-runner-wakeup"
+SYSTEM_EXECUTABLE_DIRS = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+)
 
 
 def _is_macos() -> bool:
@@ -31,6 +40,16 @@ def _service_target() -> str:
     return f"{_domain()}/{LAUNCHD_LABEL}"
 
 
+def _executable_path() -> str:
+    directories = [str(Path(sys.executable).resolve().parent)]
+    for name in ("remote-runner", "codex", "node"):
+        resolved = shutil.which(name)
+        if resolved is not None:
+            directories.append(str(Path(resolved).resolve().parent))
+    directories.extend(SYSTEM_EXECUTABLE_DIRS)
+    return os.pathsep.join(dict.fromkeys(directories))
+
+
 def _plist(paths: WakeupPaths) -> dict[str, Any]:
     return {
         "Label": LAUNCHD_LABEL,
@@ -47,6 +66,7 @@ def _plist(paths: WakeupPaths) -> dict[str, Any]:
         "KeepAlive": {"PathState": {str(paths.pending_marker): True}},
         "ProcessType": "Background",
         "ThrottleInterval": 5,
+        "EnvironmentVariables": {"PATH": _executable_path()},
         "StandardOutPath": str(paths.root / "worker.stdout.log"),
         "StandardErrorPath": str(paths.root / "worker.stderr.log"),
     }

@@ -46,6 +46,7 @@ def build_server_inventory(
             "auto_select": runtime.auto_select,
             "python": runtime.python,
             "configured_cores": None,
+            "standard_slots": 1,
             "test_slots": 0,
             "testing_enabled": name in config.scheduling.testing_servers,
             "output_root_configured": runtime.output_root is not None,

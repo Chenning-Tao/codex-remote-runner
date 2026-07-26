@@ -50,6 +50,16 @@ def request_queue_update(
     config_path = resolve_project_config(args.project_config)
     config = load_managed_project_config(config_path)
     selected = payload.get("eligible_servers")
+    workload_class = payload.get("workload_class")
+    if workload_class == "test" and isinstance(selected, list):
+        outside = [
+            name for name in selected if name not in config.scheduling.testing_servers
+        ]
+        if outside:
+            raise ValueError(
+                "test workload servers are outside the configured testing pool: "
+                + ", ".join(outside)
+            )
     if not isinstance(selected, list):
         return call_controller(
             config,
@@ -100,6 +110,7 @@ def request_queue_update(
             addition_args.run_id = validated_run_id
             addition_args.server = server
             addition_args.placement_token = token
+            addition_args.target_workload_class = workload_class
             server_addition.add(addition_args)
         committed_payload = {
             **payload,
