@@ -5,6 +5,8 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.3.2 - 2026-07-26
+
 ### Added
 
 - Added controller-wide, revision-guarded standard and test slot limits that can
