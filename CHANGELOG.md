@@ -5,6 +5,20 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.3.3 - 2026-07-26
+
+### Changed
+
+- Labeled server utilization consistently as one-minute load in the TUI and web
+  dashboard.
+- Updated the supported Starlette and React dependency lines.
+
+### Fixed
+
+- Gave detached wakeup turns explicit read-only network access and disabled
+  interactive approvals so unattended `remote-runner monitor` diagnostics can
+  reach the controller over SSH.
+
 ## 0.3.2 - 2026-07-26
 
 ### Added
