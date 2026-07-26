@@ -1,6 +1,6 @@
 [project]
 name = "codex-remote-runner"
-version = "0.3.3"
+version = "0.3.4"
 description = "Durable remote workload scheduling and lifecycle management for Codex"
 readme = "README.md"
 license = "Apache-2.0"

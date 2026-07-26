@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/check-react-versions.mjs",
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false"
   },
@@ -16,7 +17,7 @@
     "@patternfly/react-table": "6.6.0",
     "lucide-react": "1.26.0",
     "react": "19.2.8",
-    "react-dom": "19.2.0"
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
