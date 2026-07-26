@@ -42,8 +42,8 @@ lifecycle operations across a project-owned server pool.
 
 - The current web dashboard is single-project and bound to the local machine. It
   streams the same controller snapshot used by the TUI, can stop one exact
-  queued or running workload after explicit confirmation, and can modify an
-  exact workload while it remains queued.
+  queued or running workload after explicit confirmation, and can modify one or
+  several selected workloads while they remain queued.
 - Progress is optional. When a program does not report progress, the interface
   shows authoritative lifecycle state without an empty or fabricated progress
   field.
@@ -60,6 +60,9 @@ lifecycle operations across a project-owned server pool.
   controls never mutate work that has entered dispatch.
 - Stop and queue-control web writes always delegate authority to the controller
   and use the queue state's revision to reject stale edits.
+- Batch server selection applies one explicit eligible-server set to every
+  selected queued workload. Each workload remains independently revision-guarded,
+  and partial failures are reported without rolling back successful updates.
 - Server details expose controller-wide standard and test slot limits. Queue
   details can switch queued work between those lanes. Capacity changes are
   revision-guarded, admission-only, and never preempt running work.

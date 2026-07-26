@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
+  BatchQueueUpdateItem,
+  BatchQueueUpdateResult,
   CapacityUpdateChanges,
   ConnectionState,
   DashboardDocument,
@@ -17,6 +19,10 @@ interface DashboardResult {
     expectedRevision: number,
     changes: QueueUpdateChanges,
   ) => Promise<void>;
+  updateQueueBatch: (
+    updates: BatchQueueUpdateItem[],
+    eligibleServers: string[],
+  ) => Promise<BatchQueueUpdateResult>;
   updateCapacity: (
     server: string,
     expectedRevision: number,
@@ -160,6 +166,48 @@ export function useDashboard(): DashboardResult {
     );
   }, []);
 
+  const updateQueueBatch = useCallback(async (
+    updates: BatchQueueUpdateItem[],
+    eligibleServers: string[],
+  ): Promise<BatchQueueUpdateResult> => {
+    const response = await fetch("/api/queue-batch", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Remote-Runner-Action": "update-queue-batch",
+      },
+      body: JSON.stringify({ updates, eligible_servers: eligibleServers }),
+    });
+    let payload: unknown = null;
+    try {
+      payload = await response.json();
+    } catch {
+      // The status-based error below remains useful for a non-JSON response.
+    }
+    if (
+      response.ok
+      && payload
+      && typeof payload === "object"
+      && "status" in payload
+      && "succeeded" in payload
+      && Array.isArray(payload.succeeded)
+      && "failed" in payload
+      && Array.isArray(payload.failed)
+    ) {
+      return payload as BatchQueueUpdateResult;
+    }
+    let code = "invalid_queue_update";
+    let detail: string | null = null;
+    if (payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string") {
+      code = payload.error;
+      if ("detail" in payload && typeof payload.detail === "string") detail = payload.detail;
+    }
+    throw new QueueUpdateError(
+      detail ?? queueErrorMessages[code] ?? `批量修改失败（${response.status}）`,
+      code,
+    );
+  }, []);
+
   const updateCapacity = useCallback(async (
     server: string,
     expectedRevision: number,
@@ -245,6 +293,7 @@ export function useDashboard(): DashboardResult {
     reconnect,
     stopRun,
     updateQueue,
+    updateQueueBatch,
     updateCapacity,
   };
 }
