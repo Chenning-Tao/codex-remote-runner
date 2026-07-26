@@ -28,7 +28,7 @@ PROGRESS_BAR_WIDTH = 10
 SERVER_COLUMN_LABELS = (
     "Server",
     "State",
-    "Load5 / cores",
+    "Load1 / cores",
     "Lane",
     "Task",
     "Progress",
@@ -143,11 +143,11 @@ def _run_label(run: dict[str, Any]) -> str:
 
 
 def _load_text(server: dict[str, Any]) -> str:
-    load5 = server.get("load5")
+    load1 = server.get("load1")
     cores = server.get("configured_cores")
-    if not isinstance(load5, (int, float)) or isinstance(load5, bool):
+    if not isinstance(load1, (int, float)) or isinstance(load1, bool):
         return "--"
-    return f"{float(load5):.1f} / {cores if cores is not None else '--'}"
+    return f"{float(load1):.1f} / {cores if cores is not None else '--'}"
 
 
 def _server_rows(servers: list[object]) -> list[tuple[str, tuple[str, ...]]]:

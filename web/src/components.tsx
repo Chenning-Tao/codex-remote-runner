@@ -235,8 +235,8 @@ function RunEntry({
 
 function loadPercent(server: ServerSnapshot): number | null {
   const cores = server.remote_cores ?? server.configured_cores;
-  if (typeof server.load5 !== "number" || typeof cores !== "number" || cores <= 0) return null;
-  return Math.min(100, Math.max(0, (server.load5 / cores) * 100));
+  if (typeof server.load1 !== "number" || typeof cores !== "number" || cores <= 0) return null;
+  return Math.min(100, Math.max(0, (server.load1 / cores) * 100));
 }
 
 export function ServerTable({
@@ -281,7 +281,7 @@ export function ServerTable({
                 <td>
                   <div className="rr-resource-cell">
                     <div className="rr-resource-line">
-                      <span>5 分钟负载</span>
+                      <span>1 分钟负载</span>
                       <span className="rr-mono">{serverLoad(server)}</span>
                     </div>
                     {utilization !== null && (

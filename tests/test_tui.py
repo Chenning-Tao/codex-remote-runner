@@ -76,6 +76,7 @@ def test_server_table_groups_workloads_without_repeating_server_load() -> None:
             {
                 "name": "compute-a",
                 "state": "busy",
+                "load1": 14.0,
                 "load5": 12.0,
                 "configured_cores": 256,
                 "test_slots": 2,
@@ -100,7 +101,7 @@ def test_server_table_groups_workloads_without_repeating_server_load() -> None:
     assert rows[0][1] == (
         "compute-a",
         "busy",
-        "12.0 / 256",
+        "14.0 / 256",
         "std",
         "long standard task label",
         "[====------] 42.0% ETA 18m00s",

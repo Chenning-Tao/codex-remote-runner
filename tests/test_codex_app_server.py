@@ -188,7 +188,7 @@ def test_json_rpc_request_omits_jsonrpc_header_and_ignores_notifications(
     ]
 
 
-def test_turn_start_sets_the_dedupe_id_and_text_input(
+def test_turn_start_sets_noninteractive_read_only_network_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = object.__new__(codex_app_server.AppServerClient)
@@ -209,6 +209,11 @@ def test_turn_start_sets_the_dedupe_id_and_text_input(
                 "threadId": THREAD_ID,
                 "clientUserMessageId": WAKE_ID,
                 "input": [{"type": "text", "text": "state changed"}],
+                "approvalPolicy": "never",
+                "sandboxPolicy": {
+                    "type": "readOnly",
+                    "networkAccess": True,
+                },
             },
         )
     ]
