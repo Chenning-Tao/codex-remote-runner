@@ -68,7 +68,7 @@ export function serverState(server: ServerSnapshot): string {
 }
 
 export function serverLoad(server: ServerSnapshot): string {
-  const load = typeof server.load5 === "number" ? server.load5.toFixed(1) : "--";
+  const load = typeof server.load1 === "number" ? server.load1.toFixed(1) : "--";
   const cores = typeof server.configured_cores === "number" ? server.configured_cores : "--";
   return `${load} / ${cores}`;
 }
