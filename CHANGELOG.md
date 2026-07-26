@@ -5,6 +5,13 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.3.4 - 2026-07-26
+
+### Fixed
+
+- Restored the web dashboard by keeping the exact `react` and `react-dom`
+  versions aligned, and made the web build reject future version mismatches.
+
 ## 0.3.3 - 2026-07-26
 
 ### Changed

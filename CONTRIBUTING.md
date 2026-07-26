@@ -40,7 +40,7 @@ in `CHANGELOG.md`.
 
 ## Releases
 
-Use the version tag alone, such as `v0.3.3`, as the GitHub Release title.
+Use the version tag alone, such as `v0.3.4`, as the GitHub Release title.
 
 ## Reporting Bugs
 
