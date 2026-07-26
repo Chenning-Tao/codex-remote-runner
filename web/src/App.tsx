@@ -13,7 +13,7 @@ import {
   ToggleGroupItem,
   Tooltip,
 } from "@patternfly/react-core";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, ServerCog, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   ConnectionStatus,
@@ -25,11 +25,21 @@ import {
   SummaryStrip,
 } from "./components";
 import { ageFrom, serverState, textMatches } from "./format";
-import type { QueueEntry, Selection, ServerSnapshot } from "./types";
+import type {
+  BatchQueueUpdateResult,
+  QueueEntry,
+  Selection,
+  ServerSnapshot,
+} from "./types";
 import { useDashboard } from "./useDashboard";
 
 type PriorityFilter = "all" | "urgent" | "normal";
 type MobileView = "servers" | "queue";
+type QueueActionNotice = {
+  variant: "success" | "danger";
+  title: string;
+  messages: string[];
+};
 const QUEUE_PAGE_SIZE = 20;
 
 const priorityLabels: Record<PriorityFilter, string> = {
@@ -87,6 +97,7 @@ export default function App() {
     reconnect,
     stopRun,
     updateQueue,
+    updateQueueBatch,
     updateCapacity,
   } = useDashboard();
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") ?? "");
@@ -96,7 +107,8 @@ export default function App() {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [now, setNow] = useState(Date.now());
   const [mutatingRunId, setMutatingRunId] = useState<string | null>(null);
-  const [queueActionError, setQueueActionError] = useState<string | null>(null);
+  const [queueActionNotice, setQueueActionNotice] = useState<QueueActionNotice | null>(null);
+  const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -182,12 +194,43 @@ export default function App() {
           ? { kind: "server", value: refreshed, drained: current.drained }
           : null;
       }
-      if (current?.kind !== "queue") return current;
-      const runId = current.value.job.run_id;
-      const refreshed = document?.snapshot?.queue?.find(
-        (entry) => entry.job.run_id === runId,
-      );
-      return refreshed ? { kind: "queue", value: refreshed } : null;
+      if (current?.kind === "queue") {
+        const runId = current.value.job.run_id;
+        const refreshed = document?.snapshot?.queue?.find(
+          (entry) => entry.job.run_id === runId,
+        );
+        return refreshed ? { kind: "queue", value: refreshed } : null;
+      }
+      if (current?.kind === "queue-batch") {
+        const selected = new Set(current.value.map((entry) => entry.job.run_id));
+        const refreshed = (document?.snapshot?.queue ?? []).filter(
+          (entry) => (
+            selected.has(entry.job.run_id)
+            && entry.state.status === "queued"
+            && !entry.state.placement_update
+            && typeof entry.state.revision === "number"
+          ),
+        );
+        return refreshed.length ? { kind: "queue-batch", value: refreshed } : null;
+      }
+      return current;
+    });
+  }, [document]);
+
+  useEffect(() => {
+    const editable = new Set(
+      (document?.snapshot?.queue ?? [])
+        .filter((entry) => (
+          entry.state.status === "queued"
+          && !entry.state.placement_update
+          && Boolean(entry.job.run_id)
+          && typeof entry.state.revision === "number"
+        ))
+        .map((entry) => entry.job.run_id!),
+    );
+    setSelectedRunIds((current) => {
+      const next = new Set([...current].filter((runId) => editable.has(runId)));
+      return next.size === current.size ? current : next;
     });
   }, [document]);
 
@@ -206,14 +249,74 @@ export default function App() {
     const revision = entry.state.revision;
     if (!runId || typeof revision !== "number" || mutatingRunId) return;
     setMutatingRunId(runId);
-    setQueueActionError(null);
+    setQueueActionNotice(null);
     try {
       await updateQueue(runId, revision, { move: direction });
     } catch (error: unknown) {
-      setQueueActionError(error instanceof Error ? error.message : "调整队列顺序失败");
+      setQueueActionNotice({
+        variant: "danger",
+        title: "队列顺序修改失败",
+        messages: [error instanceof Error ? error.message : "调整队列顺序失败"],
+      });
     } finally {
       setMutatingRunId(null);
     }
+  }
+
+  function toggleQueueSelection(entry: QueueEntry, checked: boolean) {
+    const runId = entry.job.run_id;
+    if (!runId) return;
+    setSelectedRunIds((current) => {
+      const next = new Set(current);
+      checked ? next.add(runId) : next.delete(runId);
+      return next;
+    });
+  }
+
+  function toggleQueuePageSelection(entries: QueueEntry[], checked: boolean) {
+    setSelectedRunIds((current) => {
+      const next = new Set(current);
+      for (const entry of entries) {
+        const runId = entry.job.run_id;
+        if (!runId) continue;
+        checked ? next.add(runId) : next.delete(runId);
+      }
+      return next;
+    });
+  }
+
+  function openBatchServerSettings() {
+    const entries = (document?.snapshot?.queue ?? []).filter(
+      (entry) => entry.job.run_id && selectedRunIds.has(entry.job.run_id),
+    );
+    if (entries.length) setSelection({ kind: "queue-batch", value: entries });
+  }
+
+  function handleBatchResult(result: BatchQueueUpdateResult) {
+    const failedRunIds = new Set(result.failed.map((failure) => failure.run_id));
+    setSelectedRunIds(failedRunIds);
+    if (!result.failed.length) {
+      setQueueActionNotice({
+        variant: "success",
+        title: "服务器已批量更新",
+        messages: [`已将服务器设置应用到 ${result.succeeded.length} 项任务。`],
+      });
+    } else {
+      const entriesByRunId = new Map(
+        (document?.snapshot?.queue ?? []).map((entry) => [entry.job.run_id, entry]),
+      );
+      const messages = result.failed.map((failure) => {
+        const entry = entriesByRunId.get(failure.run_id);
+        const taskName = entry?.job.label ?? entry?.job.task_id ?? failure.run_id;
+        return `${taskName}（${failure.run_id}）：${failure.detail ?? failure.error}`;
+      });
+      setQueueActionNotice({
+        variant: "danger",
+        title: `已更新 ${result.succeeded.length} 项，${result.failed.length} 项失败`,
+        messages,
+      });
+    }
+    window.requestAnimationFrame(() => window.document.getElementById("queue-title")?.focus());
   }
 
   const panel = selection ? (
@@ -222,6 +325,8 @@ export default function App() {
       onClose={() => setSelection(null)}
       onStop={stopRun}
       onQueueUpdate={updateQueue}
+      onBatchQueueUpdate={updateQueueBatch}
+      onBatchResult={handleBatchResult}
       onCapacityUpdate={updateCapacity}
       availableServers={document?.snapshot?.servers ?? []}
     />
@@ -329,10 +434,34 @@ export default function App() {
                 <section className={`rr-data-section rr-queue-section ${mobileView !== "queue" ? "rr-mobile-hidden" : ""}`} aria-labelledby="queue-title">
                   <header className="rr-section-header">
                     <div>
-                      <h2 id="queue-title">队列</h2>
+                      <h2 id="queue-title" tabIndex={-1}>队列</h2>
                       <p>等待分配服务器的任务</p>
                     </div>
-                    <span className="rr-count rr-mono">{queueCount}</span>
+                    <div className="rr-section-header-actions">
+                      {selectedRunIds.size > 0 && (
+                        <>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            icon={<ServerCog aria-hidden="true" />}
+                            onClick={openBatchServerSettings}
+                          >
+                            设置服务器（{selectedRunIds.size}）
+                          </Button>
+                          <Tooltip content="清除已选任务">
+                            <Button
+                              variant="plain"
+                              size="sm"
+                              aria-label="清除已选任务"
+                              onClick={() => setSelectedRunIds(new Set())}
+                            >
+                              <X aria-hidden="true" />
+                            </Button>
+                          </Tooltip>
+                        </>
+                      )}
+                      <span className="rr-count rr-mono">{queueCount}</span>
+                    </div>
                   </header>
                   {!document ? (
                     <div className="rr-loading" aria-label="正在加载队列"><Skeleton width="27%" /><Skeleton width="100%" /></div>
@@ -343,14 +472,22 @@ export default function App() {
                           当前控制器仅返回 {queue.length} / {queuedTotal} 项任务；升级控制器后可查看全部分页。
                         </div>
                       )}
-                      {queueActionError && (
+                      {queueActionNotice && (
                         <Alert
                           isInline
-                          variant="danger"
-                          title="队列顺序修改失败"
+                          variant={queueActionNotice.variant}
+                          title={queueActionNotice.title}
                           className="rr-queue-action-alert"
                         >
-                          {queueActionError}
+                          {queueActionNotice.messages.length === 1 ? (
+                            queueActionNotice.messages[0]
+                          ) : (
+                            <ul className="rr-queue-action-list">
+                              {queueActionNotice.messages.map((message) => (
+                                <li key={message}>{message}</li>
+                              ))}
+                            </ul>
+                          )}
                         </Alert>
                       )}
                       <QueueTable
@@ -360,6 +497,9 @@ export default function App() {
                         onMove={moveQueueEntry}
                         movement={queueMovement}
                         mutatingRunId={mutatingRunId}
+                        selectedRunIds={selectedRunIds}
+                        onToggleSelection={toggleQueueSelection}
+                        onTogglePageSelection={toggleQueuePageSelection}
                       />
                       <QueuePagination
                         page={currentQueuePage}

@@ -42,6 +42,8 @@ import {
 } from "./format";
 import type {
   ActiveRun,
+  BatchQueueUpdateItem,
+  BatchQueueUpdateResult,
   CapacityUpdateChanges,
   ConnectionState,
   DashboardDocument,
@@ -106,6 +108,37 @@ function resultIntentLabel(intent: string | undefined): string {
     excluded: "排除",
     unclassified: "未分类",
   }[intent] ?? intent;
+}
+
+function queueWorkload(entry: QueueEntry): "standard" | "test" {
+  return entry.job.workload_class === "test" ? "test" : "standard";
+}
+
+function preparedServerNames(entry: QueueEntry): string[] {
+  return entry.job.supported_servers ?? entry.job.eligible_servers ?? [];
+}
+
+function serverSupportsWorkload(
+  server: ServerSnapshot,
+  workload: "standard" | "test",
+): boolean {
+  return workload === "standard"
+    ? (server.standard_slots ?? 1) > 0
+    : server.testing_enabled === true && (server.test_slots ?? 0) > 0;
+}
+
+function taskCanUseServer(entry: QueueEntry, server: ServerSnapshot): boolean {
+  if (!serverSupportsWorkload(server, queueWorkload(entry))) return false;
+  if (preparedServerNames(entry).includes(server.name)) return true;
+  return entry.job.portable_output !== false
+    && server.enabled !== false
+    && !server.configuration_error
+    && typeof server.configured_cores === "number"
+    && server.configured_cores >= (entry.job.minimum_cores ?? 1)
+    && (
+      entry.job.requires_output_root !== true
+      || server.output_root_configured === true
+    );
 }
 
 export function ServerStatus({ server, drained = false }: { server: ServerSnapshot; drained?: boolean }) {
@@ -327,6 +360,9 @@ export function QueueTable({
   onMove,
   movement,
   mutatingRunId,
+  selectedRunIds,
+  onToggleSelection,
+  onTogglePageSelection,
 }: {
   entries: QueueEntry[];
   now: number;
@@ -334,14 +370,36 @@ export function QueueTable({
   onMove: (entry: QueueEntry, direction: "up" | "down") => void;
   movement: Map<string, { up: boolean; down: boolean }>;
   mutatingRunId: string | null;
+  selectedRunIds: Set<string>;
+  onToggleSelection: (entry: QueueEntry, checked: boolean) => void;
+  onTogglePageSelection: (entries: QueueEntry[], checked: boolean) => void;
 }) {
   if (!entries.length) return <div className="rr-empty">没有符合当前条件的排队任务。</div>;
+  const selectableEntries = entries.filter((entry) => (
+    entry.state.status === "queued"
+    && !entry.state.placement_update
+    && Boolean(entry.job.run_id)
+    && typeof entry.state.revision === "number"
+  ));
+  const selectedOnPage = selectableEntries.filter(
+    (entry) => selectedRunIds.has(entry.job.run_id!),
+  ).length;
   return (
     <div className="rr-table-scroll">
       <table className="rr-queue-table">
         <caption className="rr-visually-hidden">尚未分配的任务队列</caption>
         <thead>
           <tr>
+            <th scope="col" className="rr-queue-select-cell">
+              <Checkbox
+                id="queue-select-page"
+                aria-label="选择当前页全部可编辑任务"
+                isLabelWrapped
+                isChecked={selectedOnPage === 0 ? false : selectedOnPage === selectableEntries.length ? true : null}
+                isDisabled={!selectableEntries.length}
+                onChange={(_event, checked) => onTogglePageSelection(selectableEntries, checked)}
+              />
+            </th>
             <th scope="col">任务</th>
             <th scope="col">优先级</th>
             <th scope="col">等待时间</th>
@@ -349,12 +407,27 @@ export function QueueTable({
           </tr>
         </thead>
         <tbody>
-          {entries.map((entry) => {
+          {entries.map((entry, entryIndex) => {
             const runId = entry.job.run_id ?? "";
+            const checkboxId = runId || `row-${entryIndex}`;
             const allowed = movement.get(runId) ?? { up: false, down: false };
             const busy = mutatingRunId !== null;
+            const selectable = entry.state.status === "queued"
+              && !entry.state.placement_update
+              && Boolean(runId)
+              && typeof entry.state.revision === "number";
             return (
-            <tr key={runId || entry.job.label}>
+            <tr key={runId || entry.job.label} aria-selected={selectedRunIds.has(runId)}>
+              <td className="rr-queue-select-cell">
+                <Checkbox
+                  id={`queue-select-${checkboxId}`}
+                  aria-label={`选择任务 ${entry.job.label ?? runId}`}
+                  isLabelWrapped
+                  isChecked={selectedRunIds.has(runId)}
+                  isDisabled={!selectable}
+                  onChange={(_event, checked) => onToggleSelection(entry, checked)}
+                />
+              </td>
               <td>
                 <button type="button" className="rr-queue-task" onClick={() => onSelect({ kind: "queue", value: entry })}>
                   <strong>{entry.job.label ?? entry.job.run_id ?? "排队任务"}</strong>
@@ -486,6 +559,8 @@ export function DetailPanel({
   onClose,
   onStop,
   onQueueUpdate,
+  onBatchQueueUpdate,
+  onBatchResult,
   onCapacityUpdate,
   availableServers,
 }: {
@@ -497,6 +572,11 @@ export function DetailPanel({
     expectedRevision: number,
     changes: QueueUpdateChanges,
   ) => Promise<void>;
+  onBatchQueueUpdate: (
+    updates: BatchQueueUpdateItem[],
+    eligibleServers: string[],
+  ) => Promise<BatchQueueUpdateResult>;
+  onBatchResult: (result: BatchQueueUpdateResult) => void;
   onCapacityUpdate: (
     server: string,
     expectedRevision: number,
@@ -518,12 +598,17 @@ export function DetailPanel({
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
   const queueEntry = selection.kind === "queue" ? selection.value : null;
+  const batchEntries = selection.kind === "queue-batch" ? selection.value : [];
   const queueRunId = queueEntry?.job.run_id;
+  const batchRunKey = batchEntries.map((entry) => entry.job.run_id).join("\0");
   const [draftPriority, setDraftPriority] = useState<"urgent" | "normal">("normal");
   const [draftWorkload, setDraftWorkload] = useState<"standard" | "test">("standard");
   const [draftServers, setDraftServers] = useState<string[]>([]);
   const [savingQueue, setSavingQueue] = useState(false);
   const [queueError, setQueueError] = useState<string | null>(null);
+  const [draftBatchServers, setDraftBatchServers] = useState<string[]>([]);
+  const [savingBatch, setSavingBatch] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
   const selectedServer = selection.kind === "server" ? selection.value : null;
   const [draftStandardSlots, setDraftStandardSlots] = useState(1);
   const [draftTestSlots, setDraftTestSlots] = useState(0);
@@ -567,6 +652,26 @@ export function DetailPanel({
       ? (server.standard_slots ?? 1) > 0
       : server.testing_enabled === true && (server.test_slots ?? 0) > 0;
   };
+  const batchServerOptions = availableServers.filter((server) => (
+    batchEntries.length > 0
+    && batchEntries.every((entry) => taskCanUseServer(entry, server))
+  ));
+  const batchServerOptionKey = batchServerOptions.map((server) => server.name).join("\0");
+  const batchPreparationCounts = new Map(
+    batchServerOptions.map((server) => [
+      server.name,
+      batchEntries.filter(
+        (entry) => !preparedServerNames(entry).includes(server.name),
+      ).length,
+    ]),
+  );
+  const batchRequiresPreparation = draftBatchServers.some(
+    (server) => (batchPreparationCounts.get(server) ?? 0) > 0,
+  );
+  const batchPlacementUpdating = batchEntries.some(
+    (entry) => Boolean(entry.state.placement_update),
+  );
+  const panelBusy = stopping || savingQueue || savingCapacity || savingBatch;
 
   useEffect(() => {
     setConfirmingStop(false);
@@ -583,11 +688,31 @@ export function DetailPanel({
   }, [queueRunId]);
 
   useEffect(() => {
+    if (!batchEntries.length) return;
+    const commonServers = (batchEntries[0].job.eligible_servers ?? []).filter(
+      (server) => batchEntries.every(
+        (entry) => (entry.job.eligible_servers ?? []).includes(server),
+      ) && batchServerOptions.some((option) => option.name === server),
+    );
+    setDraftBatchServers(commonServers);
+    setSavingBatch(false);
+    setBatchError(null);
+  }, [batchRunKey, batchServerOptionKey]);
+
+  useEffect(() => {
     setDraftStandardSlots(selectedServer?.standard_slots ?? 1);
     setDraftTestSlots(selectedServer?.test_slots ?? 0);
     setSavingCapacity(false);
     setCapacityError(null);
   }, [selectedServer?.name, selectedServer?.capacity_revision]);
+
+  useEffect(() => {
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape" && !panelBusy) onClose();
+    }
+    window.document.addEventListener("keydown", closeOnEscape);
+    return () => window.document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose, panelBusy]);
 
   async function stopSelectedRun() {
     if (!stopRunId || stopping) return;
@@ -633,6 +758,30 @@ export function DetailPanel({
       }
       setQueueError(error instanceof Error ? error.message : "保存队列设置失败");
       setSavingQueue(false);
+    }
+  }
+
+  async function saveBatchServerSettings() {
+    if (savingBatch || !draftBatchServers.length) return;
+    const updates: BatchQueueUpdateItem[] = [];
+    for (const entry of batchEntries) {
+      const runId = entry.job.run_id;
+      const revision = entry.state.revision;
+      if (!runId || typeof revision !== "number") {
+        setBatchError("部分任务已无法编辑，请关闭面板后重新选择。");
+        return;
+      }
+      updates.push({ run_id: runId, expected_revision: revision });
+    }
+    setSavingBatch(true);
+    setBatchError(null);
+    try {
+      const result = await onBatchQueueUpdate(updates, draftBatchServers);
+      onBatchResult(result);
+      onClose();
+    } catch (error: unknown) {
+      setBatchError(error instanceof Error ? error.message : "批量设置服务器失败");
+      setSavingBatch(false);
     }
   }
 
@@ -748,7 +897,7 @@ export function DetailPanel({
         </DescriptionList>
       </>
     );
-  } else {
+  } else if (selection.kind === "queue") {
     const entry = selection.value;
     title = entry.job.label ?? entry.job.run_id ?? "排队任务";
     kind = "排队任务";
@@ -847,6 +996,58 @@ export function DetailPanel({
         </DescriptionList>
       </>
     );
+  } else {
+    title = `${batchEntries.length} 项排队任务`;
+    kind = "批量设置服务器";
+    body = (
+      <section className="rr-queue-editor" aria-labelledby="rr-batch-server-editor-title">
+        <h3 id="rr-batch-server-editor-title">统一可用服务器</h3>
+        <p className="rr-batch-editor-copy">
+          保存后，这些任务将使用同一组服务器。这里只显示满足全部任务配置要求的服务器。
+          各任务独立更新，期间可能有部分任务失败。
+        </p>
+        <fieldset className="rr-server-options">
+          <legend>支持的服务器</legend>
+          {batchServerOptions.length ? batchServerOptions.map((server) => {
+            const preparationCount = batchPreparationCounts.get(server.name) ?? 0;
+            return (
+              <Checkbox
+                key={server.name}
+                id={`queue-batch-server-${server.name}`}
+                label={(
+                  <span className="rr-server-option-label">
+                    <span>{server.name}</span>
+                    {preparationCount > 0 && <small>需准备 {preparationCount} 项</small>}
+                  </span>
+                )}
+                isChecked={draftBatchServers.includes(server.name)}
+                isDisabled={savingBatch}
+                onChange={(_event, checked) => {
+                  setDraftBatchServers((current) => checked
+                    ? [...current, server.name]
+                    : current.filter((name) => name !== server.name));
+                }}
+              />
+            );
+          }) : (
+            <div className="rr-batch-empty" role="status">
+              没有同时满足全部所选任务要求的服务器。
+            </div>
+          )}
+        </fieldset>
+        {batchError && <div className="rr-stop-error" role="alert">{batchError}</div>}
+        <Button
+          variant="primary"
+          icon={savingBatch ? <LoaderCircle className="rr-spin" /> : <Save />}
+          isDisabled={savingBatch || batchPlacementUpdating || !draftBatchServers.length}
+          onClick={saveBatchServerSettings}
+        >
+          {savingBatch
+            ? batchRequiresPreparation ? "正在准备并应用…" : "正在批量应用…"
+            : batchRequiresPreparation ? "准备并应用到全部" : "应用到全部"}
+        </Button>
+      </section>
+    );
   }
 
   return (
@@ -856,7 +1057,9 @@ export function DetailPanel({
           <p className="rr-eyebrow">{kind}</p>
           <h2 id="rr-detail-title">{title}</h2>
         </div>
-        <DrawerActions><DrawerCloseButton onClose={onClose} aria-label="关闭详情" /></DrawerActions>
+        <DrawerActions>
+          {!panelBusy && <DrawerCloseButton onClose={onClose} aria-label="关闭详情" />}
+        </DrawerActions>
       </DrawerHead>
       <DrawerPanelBody>{body}</DrawerPanelBody>
       {stopRunId && (

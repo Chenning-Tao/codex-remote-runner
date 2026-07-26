@@ -397,6 +397,114 @@ def create_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    async def queue_batch_update_endpoint(request: Request) -> Response:
+        if request.headers.get("x-remote-runner-action") != "update-queue-batch":
+            return JSONResponse(
+                {"error": "missing batch queue update action header"},
+                status_code=403,
+            )
+        content_type = (
+            request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        )
+        if content_type != "application/json":
+            return JSONResponse(
+                {"error": "batch queue update request must use application/json"},
+                status_code=415,
+            )
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        updates = payload.get("updates") if isinstance(payload, dict) else None
+        eligible_servers = (
+            payload.get("eligible_servers") if isinstance(payload, dict) else None
+        )
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"updates", "eligible_servers"}
+            or not isinstance(updates, list)
+            or not 1 <= len(updates) <= 100
+            or not isinstance(eligible_servers, list)
+            or not eligible_servers
+            or len(eligible_servers) > 100
+            or any(not isinstance(server, str) or not server for server in eligible_servers)
+            or len(set(eligible_servers)) != len(eligible_servers)
+        ):
+            return JSONResponse(
+                {"error": "batch queue update request is invalid"}, status_code=400
+            )
+
+        normalized_updates: list[tuple[str, int]] = []
+        try:
+            for update in updates:
+                if (
+                    not isinstance(update, dict)
+                    or set(update) != {"run_id", "expected_revision"}
+                    or not isinstance(update.get("run_id"), str)
+                    or isinstance(update.get("expected_revision"), bool)
+                    or not isinstance(update.get("expected_revision"), int)
+                ):
+                    raise ValueError("batch queue update item is invalid")
+                normalized_updates.append(
+                    (
+                        validate_current_run_id(update["run_id"]),
+                        update["expected_revision"],
+                    )
+                )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        run_ids = [run_id for run_id, _revision in normalized_updates]
+        if len(set(run_ids)) != len(run_ids):
+            return JSONResponse(
+                {"error": "batch queue update contains duplicate runs"},
+                status_code=400,
+            )
+
+        update_args = argparse.Namespace(**vars(probe.args))
+        succeeded: list[str] = []
+        failed: list[dict[str, str]] = []
+        for run_id, expected_revision in normalized_updates:
+            try:
+                await asyncio.to_thread(
+                    queue_update_query,
+                    update_args,
+                    run_id,
+                    {
+                        "expected_revision": expected_revision,
+                        "eligible_servers": eligible_servers,
+                    },
+                )
+                succeeded.append(run_id)
+            except QueuePreparationError as exc:
+                failed.append(
+                    {
+                        "run_id": run_id,
+                        "error": "queue_preparation_failed",
+                        "detail": str(exc),
+                    }
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                detail = _concise_controller_error(exc)
+                if detail.startswith("queued run does not exist:"):
+                    code = "queue_not_found"
+                elif detail == "queued state revision conflict" or detail.endswith(
+                    "placement update in progress"
+                ):
+                    code = "queue_conflict"
+                elif detail.endswith(", not editable"):
+                    code = "queue_not_editable"
+                else:
+                    code = "invalid_queue_update"
+                failed.append({"run_id": run_id, "error": code, "detail": detail})
+
+        await probe.probe_once()
+        status = "updated" if not failed else "partial" if succeeded else "failed"
+        return JSONResponse(
+            {"status": status, "succeeded": succeeded, "failed": failed},
+            status_code=200 if not failed else 207,
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def capacity_update_endpoint(request: Request) -> Response:
         if request.headers.get("x-remote-runner-action") != "update-capacity":
             return JSONResponse(
@@ -505,6 +613,11 @@ def create_app(
             Route(
                 "/api/queue/{run_id:str}",
                 queue_update_endpoint,
+                methods=["PATCH"],
+            ),
+            Route(
+                "/api/queue-batch",
+                queue_batch_update_endpoint,
                 methods=["PATCH"],
             ),
             Route(

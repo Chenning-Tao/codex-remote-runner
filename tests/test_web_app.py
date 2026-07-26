@@ -436,6 +436,129 @@ def test_web_capacity_update_requires_revision_and_refreshes_snapshot(
     assert server["capacity_revision"] == 3
 
 
+def test_web_batch_queue_update_reports_partial_results_and_refreshes_snapshot(
+    tmp_path: Path,
+) -> None:
+    first_run = "rr-0123456789abcdef"
+    second_run = "rr-fedcba9876543210"
+    snapshots = iter(
+        (
+            {
+                "servers": [],
+                "queue": [
+                    {"job": {"run_id": first_run}},
+                    {"job": {"run_id": second_run}},
+                ],
+            },
+            {"servers": [], "queue": [{"job": {"run_id": second_run}}]},
+        )
+    )
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: next(snapshots),
+    )
+    asyncio.run(probe.probe_once())
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def update_query(
+        _args: argparse.Namespace,
+        run_id: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        calls.append((run_id, payload))
+        if run_id == second_run:
+            raise RuntimeError("queued state revision conflict")
+        return {"changed": True}
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        queue_update_query=update_query,
+    )
+    request = {
+        "updates": [
+            {"run_id": first_run, "expected_revision": 3},
+            {"run_id": second_run, "expected_revision": 8},
+        ],
+        "eligible_servers": ["compute-a", "compute-b"],
+    }
+
+    with TestClient(app) as client:
+        rejected = client.patch("/api/queue-batch", json=request)
+        assert rejected.status_code == 403
+        response = client.patch(
+            "/api/queue-batch",
+            headers={"x-remote-runner-action": "update-queue-batch"},
+            json=request,
+        )
+
+    assert response.status_code == 207
+    assert response.json() == {
+        "status": "partial",
+        "succeeded": [first_run],
+        "failed": [
+            {
+                "run_id": second_run,
+                "error": "queue_conflict",
+                "detail": "queued state revision conflict",
+            }
+        ],
+    }
+    assert calls == [
+        (
+            first_run,
+            {
+                "expected_revision": 3,
+                "eligible_servers": ["compute-a", "compute-b"],
+            },
+        ),
+        (
+            second_run,
+            {
+                "expected_revision": 8,
+                "eligible_servers": ["compute-a", "compute-b"],
+            },
+        ),
+    ]
+    assert probe.document()["snapshot"] == {
+        "servers": [],
+        "queue": [{"job": {"run_id": second_run}}],
+    }
+
+
+def test_web_batch_queue_update_rejects_duplicate_runs(tmp_path: Path) -> None:
+    run_id = "rr-0123456789abcdef"
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: {"servers": [], "queue": []},
+    )
+    asyncio.run(probe.probe_once())
+    app = create_app(probe, static_root=static_root(tmp_path), manage_probe=False)
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/queue-batch",
+            headers={"x-remote-runner-action": "update-queue-batch"},
+            json={
+                "updates": [
+                    {"run_id": run_id, "expected_revision": 1},
+                    {"run_id": run_id, "expected_revision": 1},
+                ],
+                "eligible_servers": ["compute-a"],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "batch queue update contains duplicate runs"
+    }
+
+
 def test_web_queue_update_reports_conflict_and_refreshes_snapshot(
     tmp_path: Path,
 ) -> None:

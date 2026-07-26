@@ -20,8 +20,8 @@ these external standards and design-system references:
   IDs, run IDs, task IDs, server names, and user-authored workload labels remain
   untranslated.
 - The first release is single-project and loopback-only. Controller write
-  actions are limited to stopping one exact run and modifying one exact run
-  while its queue state is `queued`.
+  actions are limited to stopping one exact run and modifying selected runs
+  while each queue state is `queued`.
 - The first viewport shows the product identity, controller health, capacity,
   active work, and queued work without marketing content.
 - Research and scheduling identifiers remain visible but visually subordinate to
@@ -95,6 +95,12 @@ these external standards and design-system references:
   with the manual controls.
 - The detail drawer edits priority and eligible servers as one save operation.
   At least one server must remain eligible.
+- Queue checkboxes support selection across filtering and pagination. Batch
+  server editing replaces the eligible-server set on every selected task and
+  offers only servers compatible with all selected tasks.
+- A batch write preserves each task's independent revision guard and preparation
+  lifecycle. Partial completion keeps failed tasks selected and reports their
+  controller errors instead of presenting the batch as atomic.
 - Server selection lists the task's prepared servers plus compatible configured
   project servers. Compatibility respects project enablement, minimum cores,
   testing-pool membership, testing slots, and portable-output requirements.

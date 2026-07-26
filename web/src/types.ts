@@ -86,6 +86,23 @@ export interface QueueUpdateChanges {
   move?: "up" | "down";
 }
 
+export interface BatchQueueUpdateItem {
+  run_id: string;
+  expected_revision: number;
+}
+
+export interface BatchQueueUpdateFailure {
+  run_id: string;
+  error: string;
+  detail?: string;
+}
+
+export interface BatchQueueUpdateResult {
+  status: "updated" | "partial" | "failed";
+  succeeded: string[];
+  failed: BatchQueueUpdateFailure[];
+}
+
 export interface CapacityUpdateChanges {
   standard_slots: number;
   test_slots: number;
@@ -138,4 +155,5 @@ export interface DashboardDocument {
 export type Selection =
   | { kind: "server"; value: ServerSnapshot; drained: boolean }
   | { kind: "run"; value: ActiveRun; server: ServerSnapshot; drained: boolean }
-  | { kind: "queue"; value: QueueEntry };
+  | { kind: "queue"; value: QueueEntry }
+  | { kind: "queue-batch"; value: QueueEntry[] };

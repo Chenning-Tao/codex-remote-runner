@@ -5,6 +5,23 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.3.5 - 2026-07-26
+
+### Added
+
+- Added cross-page queue selection and batch eligible-server updates to the web
+  dashboard, including shared compatibility filtering and per-task preparation
+  counts.
+- Added a revision-guarded batch queue API that reports successful and failed
+  workload updates independently without rolling back completed changes.
+
+### Changed
+
+- Kept failed workloads selected after a partial batch update and exposed every
+  controller error with its task and run identifiers.
+- Improved the batch editor's pending, success, keyboard, focus, and responsive
+  states.
+
 ## 0.3.4 - 2026-07-26
 
 ### Fixed
