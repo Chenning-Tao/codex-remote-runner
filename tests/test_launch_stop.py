@@ -254,6 +254,14 @@ def test_launch_plan_is_normal_and_command_is_not_in_argv(tmp_path: Path) -> Non
     ).lower()
 
 
+def test_launch_plan_reuses_remote_runner_ssh_control_connection(tmp_path: Path) -> None:
+    _config, plan = register_local_run(tmp_path, "true\n")
+
+    assert "ControlMaster=auto" in plan.bootstrap_ssh_argv
+    assert "ControlPersist=60" in plan.bootstrap_ssh_argv
+    assert "ControlPath=~/.ssh/remote-runner-%C" in plan.bootstrap_ssh_argv
+
+
 def test_launch_control_plane_uses_configured_project_python(tmp_path: Path) -> None:
     configured_python = "/opt/project env/bin/python"
     _config, plan = register_local_run(
