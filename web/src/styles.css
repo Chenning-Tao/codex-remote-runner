@@ -897,14 +897,16 @@ input {
 }
 
 .rr-queue-editor,
-.rr-capacity-editor {
+.rr-capacity-editor,
+.rr-scheduling-editor {
   margin-bottom: 18px;
   padding-bottom: 18px;
   border-bottom: 1px solid var(--rr-border);
 }
 
 .rr-queue-editor h3,
-.rr-capacity-editor h3 {
+.rr-capacity-editor h3,
+.rr-scheduling-editor h3 {
   margin: 0 0 15px;
   color: var(--rr-text);
   font-size: 16px;
@@ -931,6 +933,51 @@ input {
 
 .rr-capacity-editor {
   margin-top: 18px;
+}
+
+.rr-scheduling-editor {
+  margin-top: 18px;
+}
+
+.rr-scheduling-editor > p {
+  max-width: 52ch;
+  margin: -5px 0 16px;
+  color: var(--rr-text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.rr-scheduling-editor .pf-v6-c-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.rr-scheduling-confirm {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  background: var(--rr-surface-raised);
+  border: 1px solid var(--rr-border);
+  border-radius: 6px;
+}
+
+.rr-scheduling-confirm strong {
+  color: var(--rr-text);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.rr-scheduling-confirm > span {
+  color: var(--rr-text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.rr-scheduling-confirm > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
 }
 
 .rr-capacity-fields {

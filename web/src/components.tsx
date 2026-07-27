@@ -24,8 +24,10 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleOff,
+  CirclePause,
   Gauge,
   LoaderCircle,
+  Play,
   Save,
   ShieldAlert,
   CircleStop,
@@ -52,7 +54,7 @@ import type {
   Selection,
   ServerSnapshot,
 } from "./types";
-import { QueueUpdateError, StopRunError } from "./useDashboard";
+import { QueueUpdateError, ServerDrainError, StopRunError } from "./useDashboard";
 
 interface StatusVisual {
   text: string;
@@ -562,6 +564,7 @@ export function DetailPanel({
   onBatchQueueUpdate,
   onBatchResult,
   onCapacityUpdate,
+  onServerDrainUpdate,
   availableServers,
 }: {
   selection: Selection;
@@ -582,6 +585,7 @@ export function DetailPanel({
     expectedRevision: number,
     changes: CapacityUpdateChanges,
   ) => Promise<void>;
+  onServerDrainUpdate: (server: string, drained: boolean) => Promise<void>;
   availableServers: ServerSnapshot[];
 }) {
   let title: string;
@@ -620,6 +624,9 @@ export function DetailPanel({
   const [draftTestSlots, setDraftTestSlots] = useState(0);
   const [savingCapacity, setSavingCapacity] = useState(false);
   const [capacityError, setCapacityError] = useState<string | null>(null);
+  const [confirmingDrain, setConfirmingDrain] = useState(false);
+  const [updatingDrain, setUpdatingDrain] = useState(false);
+  const [drainError, setDrainError] = useState<string | null>(null);
   const preparedServers = queueEntry?.job.supported_servers
     ?? queueEntry?.job.eligible_servers
     ?? [];
@@ -696,7 +703,7 @@ export function DetailPanel({
   const batchPlacementUpdating = batchEntries.some(
     (entry) => Boolean(entry.state.placement_update),
   );
-  const panelBusy = stopping || savingQueue || savingCapacity || savingBatch;
+  const panelBusy = stopping || savingQueue || savingCapacity || savingBatch || updatingDrain;
 
   useEffect(() => {
     setConfirmingStop(false);
@@ -730,6 +737,12 @@ export function DetailPanel({
     setSavingCapacity(false);
     setCapacityError(null);
   }, [selectedServer?.name, selectedServer?.capacity_revision]);
+
+  useEffect(() => {
+    setConfirmingDrain(false);
+    setUpdatingDrain(false);
+    setDrainError(null);
+  }, [selectedServer?.name, selection.kind === "server" ? selection.drained : false]);
 
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
@@ -840,6 +853,24 @@ export function DetailPanel({
     }
   }
 
+  async function updateServerDrain(drained: boolean) {
+    if (!selectedServer || updatingDrain) return;
+    setUpdatingDrain(true);
+    setDrainError(null);
+    try {
+      await onServerDrainUpdate(selectedServer.name, drained);
+      setConfirmingDrain(false);
+      setUpdatingDrain(false);
+    } catch (error: unknown) {
+      if (error instanceof ServerDrainError && error.code === "server_not_found") {
+        onClose();
+        return;
+      }
+      setDrainError(error instanceof Error ? error.message : "修改服务器调度状态失败");
+      setUpdatingDrain(false);
+    }
+  }
+
   if (selection.kind === "server") {
     const server = selection.value;
     title = server.name;
@@ -847,6 +878,52 @@ export function DetailPanel({
     body = (
       <>
         <div className="rr-detail-status"><ServerStatus server={server} drained={selection.drained} /></div>
+        <section className="rr-scheduling-editor" aria-labelledby="rr-scheduling-editor-title">
+          <h3 id="rr-scheduling-editor-title">调度控制</h3>
+          <p>
+            {selection.drained
+              ? "已暂停所有项目向这台服务器分配新任务；现有任务不受影响。"
+              : "允许控制器从所有项目向这台服务器分配新任务。"}
+          </p>
+          {drainError && <div className="rr-stop-error" role="alert">{drainError}</div>}
+          {selection.drained ? (
+            <Button
+              variant="primary"
+              icon={updatingDrain ? <LoaderCircle className="rr-spin" /> : <Play />}
+              isDisabled={panelBusy}
+              onClick={() => updateServerDrain(false)}
+            >
+              {updatingDrain ? "正在恢复…" : "恢复调度"}
+            </Button>
+          ) : confirmingDrain ? (
+            <div className="rr-scheduling-confirm" role="group" aria-label="确认暂停服务器调度">
+              <strong>确认暂停所有项目的新任务调度？</strong>
+              <span>已在运行的任务会继续执行。</span>
+              <div>
+                <Button
+                  variant="danger"
+                  icon={updatingDrain ? <LoaderCircle className="rr-spin" /> : <CirclePause />}
+                  isDisabled={panelBusy}
+                  onClick={() => updateServerDrain(true)}
+                >
+                  {updatingDrain ? "正在暂停…" : "确认暂停"}
+                </Button>
+                <Button variant="link" isDisabled={panelBusy} onClick={() => setConfirmingDrain(false)}>
+                  取消
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button
+              variant="secondary"
+              icon={<CirclePause />}
+              isDisabled={panelBusy}
+              onClick={() => setConfirmingDrain(true)}
+            >
+              暂停调度
+            </Button>
+          )}
+        </section>
         <section className="rr-capacity-editor" aria-labelledby="rr-capacity-editor-title">
           <h3 id="rr-capacity-editor-title">并发任务容量</h3>
           <div className="rr-capacity-fields">
@@ -889,7 +966,7 @@ export function DetailPanel({
           <Button
             variant="primary"
             icon={savingCapacity ? <LoaderCircle className="rr-spin" /> : <Save />}
-            isDisabled={savingCapacity || typeof server.capacity_revision !== "number"}
+            isDisabled={panelBusy || typeof server.capacity_revision !== "number"}
             onClick={saveCapacitySettings}
           >
             {savingCapacity ? "正在保存…" : "保存容量"}

@@ -30,6 +30,7 @@ from ._internal.execution_registry import (
 from ._internal.experiment_client import request_query as request_experiment_query
 from ._internal.experiment_contracts import MAX_CONTRACT_BYTES
 from ._internal.queue_control import QueuePreparationError, request_queue_update
+from ._internal.server_draining import request_server_drain_update
 from ._internal.stopping import request_stop
 
 
@@ -42,6 +43,7 @@ QueueUpdateQuery = Callable[[argparse.Namespace, str, dict[str, Any]], dict[str,
 CapacityUpdateQuery = Callable[
     [argparse.Namespace, str, dict[str, Any]], dict[str, Any]
 ]
+ServerDrainQuery = Callable[[argparse.Namespace, str, bool], dict[str, Any]]
 BatchUpdateKey = tuple[tuple[tuple[str, int], ...], tuple[str, ...]]
 BatchUpdateResult = tuple[list[str], list[dict[str, str]]]
 BatchUpdateOperation = Callable[[], Awaitable[BatchUpdateResult]]
@@ -257,6 +259,7 @@ def create_app(
     stop_query: StopQuery = request_stop,
     queue_update_query: QueueUpdateQuery = request_queue_update,
     capacity_update_query: CapacityUpdateQuery = request_capacity_update,
+    server_drain_query: ServerDrainQuery = request_server_drain_update,
     experiment_query: ExperimentQuery = request_experiment_query,
 ) -> Starlette:
     if not (static_root / "index.html").is_file():
@@ -699,6 +702,83 @@ def create_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    async def server_drain_endpoint(request: Request) -> Response:
+        operation = request.path_params["operation"]
+        drained = operation == "drain"
+        expected_action = "drain-server" if drained else "resume-server"
+        if operation not in {"drain", "resume"}:
+            return JSONResponse({"error": "invalid server drain operation"}, status_code=404)
+        if request.headers.get("x-remote-runner-action") != expected_action:
+            return JSONResponse(
+                {"error": f"missing {expected_action} action header"},
+                status_code=403,
+            )
+        content_type = (
+            request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        )
+        if content_type != "application/json":
+            return JSONResponse(
+                {"error": "server drain request must use application/json"},
+                status_code=415,
+            )
+        server = request.path_params["server"]
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"server", "confirm"}
+            or payload.get("server") != server
+            or payload.get("confirm") is not True
+        ):
+            return JSONResponse(
+                {"error": "server drain confirmation is invalid"}, status_code=400
+            )
+        snapshot = probe.document().get("snapshot")
+        known_servers = (
+            {
+                item.get("name")
+                for item in snapshot.get("servers", [])
+                if isinstance(snapshot, dict) and isinstance(item, dict)
+            }
+            if isinstance(snapshot, dict)
+            else set()
+        )
+        if server not in known_servers:
+            return JSONResponse({"error": "server_not_found"}, status_code=404)
+        update_args = argparse.Namespace(**vars(probe.args))
+        try:
+            result = await asyncio.to_thread(
+                server_drain_query,
+                update_args,
+                server,
+                drained,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            detail = _concise_controller_error(exc)
+            if "not configured for this project" in detail:
+                await probe.probe_once()
+                return JSONResponse(
+                    {"error": "server_not_found"},
+                    status_code=404,
+                    headers={"Cache-Control": "no-store"},
+                )
+            return JSONResponse(
+                {"error": "server_drain_failed", "detail": detail},
+                status_code=400,
+                headers={"Cache-Control": "no-store"},
+            )
+        await probe.probe_once()
+        return JSONResponse(
+            {
+                "status": "drained" if drained else "resumed",
+                "server": server,
+                "result": result,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def events_endpoint(request: Request) -> Response:
         async def stream() -> AsyncIterator[str]:
             sequence = -1
@@ -744,6 +824,11 @@ def create_app(
                 "/api/servers/{server:str}/capacity",
                 capacity_update_endpoint,
                 methods=["PATCH"],
+            ),
+            Route(
+                "/api/servers/{server:str}/{operation:str}",
+                server_drain_endpoint,
+                methods=["POST"],
             ),
             Mount("/", StaticFiles(directory=static_root, html=True), name="web"),
         ],
