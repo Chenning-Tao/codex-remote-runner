@@ -17,6 +17,7 @@ tested, but operators should review upgrades before applying them to active pool
 - Exact Git revision preparation in detached remote worktrees.
 - Foreground live waits and event-driven Codex history follow-ups.
 - Interactive Textual and local browser dashboards with confirmed run stopping.
+- Controller-owned experiment registry with frozen bindings and verified results.
 - Explicit stop, cleanup, purge, server drain, and output archival workflows.
 
 ```text
@@ -48,7 +49,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.3.6'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.4.0'
 remote-runner --help
 ```
 
@@ -111,10 +112,16 @@ dispatch are rejected; batch operations report partial failures explicitly.
 
 ## Experiment Registry
 
-The Experiments section indexes published generic designs, exact point revisions,
-frozen run bindings, verified structured result manifests, and explicit acceptance
-decisions. The browser is read-only and uses bounded controller queries; it never
-selects a result by timestamp or falls back to synthetic data.
+The Experiments section indexes controller-owned published generic designs, exact
+point revisions, frozen run bindings, verified structured result manifests, and
+explicit acceptance decisions. The browser is read-only and uses bounded
+controller queries; it never selects a result by timestamp or falls back to
+synthetic data.
+
+Open `?demo=experiments` to inspect the bundled `decoder_atomloss` project
+snapshot without a Controller. This static preview is test data for the dashboard
+and never writes to Controller state; the normal Experiments view remains backed
+only by the configured Controller registry.
 
 ```bash
 remote-runner experiment plan preview \

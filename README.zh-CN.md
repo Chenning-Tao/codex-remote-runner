@@ -13,6 +13,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 - 在远程 detached worktree 中准备并运行精确的 Git revision。
 - 支持前台实时等待和事件驱动的 Codex 任务历史回报。
 - 提供可交互的 Textual 和本地网页控制面板，并支持确认后停止任务。
+- 提供由控制器持有、包含冻结 binding 与已验证结果的实验注册表。
 - 提供明确的停止、清理、彻底删除、服务器排空和输出归档流程。
 
 ```text
@@ -42,7 +43,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.3.6'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.4.0'
 remote-runner --help
 ```
 
@@ -92,9 +93,14 @@ Standard/Test 并发任务数，也可以在排队任务详情中切换任务类
 
 ## 实验注册表
 
-网页中的“实验”分区展示已发布的通用实验设计、精确 point revision、冻结的
-run binding、经过输出同步验证的结构化结果，以及显式 acceptance。网页保持
-只读，结果不会按时间戳选择，真实空注册表也不会回退到合成 Demo。
+网页中的“实验”分区展示由控制器持有的已发布通用实验设计、精确 point
+revision、冻结的 run binding、经过输出同步验证的结构化结果，以及显式
+acceptance。网页保持只读并通过有界查询读取控制器；结果不会按时间戳选择，
+真实空注册表也不会回退到合成 Demo。
+
+打开 `?demo=experiments` 可以在没有 Controller 的情况下查看内置的
+`decoder_atomloss` 项目快照。它只是用于检查面板的静态测试数据，不会写入
+Controller；正常“实验”视图仍只读取当前项目配置的 Controller 注册表。
 
 ```bash
 remote-runner experiment plan preview \
