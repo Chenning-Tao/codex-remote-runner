@@ -675,6 +675,7 @@ def _register_execution(
         output_relpath=output_relpath,
         output_path=output_path,
         output_metadata=json.dumps(job.get("output_metadata", {}), sort_keys=True),
+        experiment_binding=job.get("experiment_binding"),
         run_id=job["run_id"],
         privacy=job.get("privacy"),
     )

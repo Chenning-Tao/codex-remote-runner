@@ -17,6 +17,7 @@ from .execution_registry import (
     utc_now,
     validate_current_run_id,
 )
+from .experiment_contracts import normalize_run_binding
 from .output_paths import validate_resolved_output
 from .result_metadata import (
     LEGACY_RESULT_INTENT,
@@ -129,6 +130,16 @@ def register(args: argparse.Namespace) -> Path:
         manifest["submitted_command"] = submitted_command
         manifest["submitted_command_sha256"] = sha256_bytes(submitted_command.encode("utf-8"))
     manifest["worker_defaulted"] = worker_defaulted is True
+    raw_experiment_binding = getattr(args, "experiment_binding", None)
+    if raw_experiment_binding is not None:
+        experiment_binding = normalize_run_binding(raw_experiment_binding)
+        if experiment_binding["run_id"] != run_id:
+            raise ValueError("experiment binding run_id does not match the manifest")
+        if source_revision is None or experiment_binding["source_revision"] != source_revision:
+            raise ValueError(
+                "experiment binding source_revision does not match the manifest"
+            )
+        manifest["experiment_binding"] = experiment_binding
     privacy = getattr(args, "privacy", None)
     if privacy is not None:
         if privacy != PROCESS_TITLE_PRIVACY_MODE:

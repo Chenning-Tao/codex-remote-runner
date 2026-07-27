@@ -109,6 +109,30 @@ several queued workloads. Queue writes use per-run controller revisions and a
 bounded preparation reservation so stale edits or work that has entered
 dispatch are rejected; batch operations report partial failures explicitly.
 
+## Experiment Registry
+
+The Experiments section indexes published generic designs, exact point revisions,
+frozen run bindings, verified structured result manifests, and explicit acceptance
+decisions. The browser is read-only and uses bounded controller queries; it never
+selects a result by timestamp or falls back to synthetic data.
+
+```bash
+remote-runner experiment plan preview \
+  --project-config /path/to/.remote-runner.yaml \
+  --file experiment-plan.json
+
+remote-runner experiment query \
+  --project-config /path/to/.remote-runner.yaml \
+  --file experiment-query.json
+```
+
+Use `remote-runner run --experiment-binding binding.json` to finalize and freeze
+a binding for the exact run ID and Git revision. Native result producers emit an
+`experiment_result` manifest into synchronized output; eligible results still
+require an explicit acceptance action. See
+[the implementation plan](docs/plans/experiment-registry-results-dashboard.md)
+for contracts, authority boundaries, and remaining hardening work.
+
 ## Run
 
 Remote Runner accepts only a clean committed source revision. A minimal attached

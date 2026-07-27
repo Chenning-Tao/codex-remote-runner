@@ -9,6 +9,7 @@ from typing import Any
 from . import __version__
 from ._internal import (
     cleanup,
+    experiment_client,
     monitoring,
     output_prune,
     output_sync_client,
@@ -104,6 +105,17 @@ def _add_wait_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_experiment_common(
+    parser: argparse.ArgumentParser,
+    *,
+    document: bool = True,
+) -> None:
+    _add_project_config(parser)
+    if document:
+        parser.add_argument("--file", type=Path, required=True)
+    parser.add_argument("--timeout", type=_positive_int, default=8)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="remote-runner",
@@ -178,6 +190,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="portable relative POSIX path resolved against the selected output_root",
     )
     run_parser.add_argument("--output-metadata")
+    run_parser.add_argument(
+        "--experiment-binding",
+        type=Path,
+        help=(
+            "finalize and freeze a run_binding JSON template for this exact run "
+            "and source revision"
+        ),
+    )
     run_parser.add_argument("--privacy", choices=("process-title",))
     run_parser.add_argument("--run-id")
     run_parser.add_argument(
@@ -307,6 +327,90 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-open",
         action="store_true",
         help="start the local dashboard without opening a browser",
+    )
+
+    experiment_parser = subparsers.add_parser(
+        "experiment",
+        help="publish experiment designs and inspect the project result registry",
+    )
+    experiment_areas = experiment_parser.add_subparsers(
+        dest="experiment_area",
+        required=True,
+    )
+    experiment_query_parser = experiment_areas.add_parser(
+        "query",
+        help="execute one bounded experiment_query JSON document",
+    )
+    _add_experiment_common(experiment_query_parser)
+    experiment_query_parser.set_defaults(experiment_command="query")
+
+    experiment_plan_parser = experiment_areas.add_parser(
+        "plan",
+        help="preview or publish an experiment_plan JSON document",
+    )
+    experiment_plan_actions = experiment_plan_parser.add_subparsers(
+        dest="experiment_plan_action",
+        required=True,
+    )
+    experiment_plan_preview = experiment_plan_actions.add_parser("preview")
+    _add_experiment_common(experiment_plan_preview)
+    experiment_plan_preview.set_defaults(experiment_command="plan-preview")
+    experiment_plan_publish = experiment_plan_actions.add_parser("publish")
+    _add_experiment_common(experiment_plan_publish)
+    experiment_plan_publish.add_argument("--request-id", required=True)
+    experiment_plan_publish.add_argument("--impact-digest")
+    experiment_plan_publish.set_defaults(experiment_command="plan-publish")
+
+    experiment_binding_parser = experiment_areas.add_parser(
+        "binding",
+        help="ingest an explicit immutable run_binding document",
+    )
+    experiment_binding_actions = experiment_binding_parser.add_subparsers(
+        dest="experiment_binding_action",
+        required=True,
+    )
+    experiment_binding_ingest = experiment_binding_actions.add_parser("ingest")
+    _add_experiment_common(experiment_binding_ingest)
+    experiment_binding_ingest.set_defaults(experiment_command="binding-ingest")
+
+    experiment_result_parser = experiment_areas.add_parser(
+        "result",
+        help="ingest a structured experiment_result document",
+    )
+    experiment_result_actions = experiment_result_parser.add_subparsers(
+        dest="experiment_result_action",
+        required=True,
+    )
+    experiment_result_ingest = experiment_result_actions.add_parser("ingest")
+    _add_experiment_common(experiment_result_ingest)
+    experiment_result_ingest.set_defaults(experiment_command="result-ingest")
+
+    experiment_acceptance_parser = experiment_areas.add_parser(
+        "acceptance",
+        help="record an explicit result acceptance decision",
+    )
+    experiment_acceptance_actions = experiment_acceptance_parser.add_subparsers(
+        dest="experiment_acceptance_action",
+        required=True,
+    )
+    experiment_acceptance_record = experiment_acceptance_actions.add_parser("record")
+    _add_experiment_common(experiment_acceptance_record)
+    experiment_acceptance_record.set_defaults(
+        experiment_command="acceptance-record"
+    )
+
+    experiment_registry_parser = experiment_areas.add_parser(
+        "registry",
+        help="maintain the rebuildable experiment projection",
+    )
+    experiment_registry_actions = experiment_registry_parser.add_subparsers(
+        dest="experiment_registry_action",
+        required=True,
+    )
+    experiment_registry_rebuild = experiment_registry_actions.add_parser("rebuild")
+    _add_experiment_common(experiment_registry_rebuild, document=False)
+    experiment_registry_rebuild.set_defaults(
+        experiment_command="registry-rebuild"
     )
 
     stop_parser = subparsers.add_parser(
@@ -461,6 +565,8 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.subcommand == "wait":
         result = waiting.wait_for_run(args)
         return result, waiting.wait_exit_code(result)
+    if args.subcommand == "experiment":
+        return experiment_client.execute(args), 0
     if args.subcommand == "wakeup":
         if args.wakeup_action == "register":
             return wakeup.register(args), 0

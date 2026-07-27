@@ -9,6 +9,10 @@ from typing import Any
 from .config import load_managed_project_config
 from .controller.client import call_controller
 from .execution_registry import resolve_project_config, sha256_bytes
+from .experiment_contracts import (
+    MAX_CONTRACT_BYTES,
+    normalize_run_binding,
+)
 from .output_paths import normalize_output_relpath
 from .pool import (
     normalize_candidate_servers,
@@ -149,6 +153,45 @@ def _validate_output_candidates(
                 "--output-relpath requires remote output_root for every eligible "
                 f"server; missing: {', '.join(missing)}"
             )
+
+
+def _finalize_experiment_binding(
+    path: Path | None,
+    *,
+    run_id: str,
+    source_revision: str,
+) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    expanded = path.expanduser()
+    resolved = expanded.resolve()
+    if expanded.is_symlink() or not resolved.is_file():
+        raise ValueError(f"--experiment-binding must be a regular JSON file: {path}")
+    if resolved.stat().st_size > MAX_CONTRACT_BYTES:
+        raise ValueError(
+            f"--experiment-binding exceeds the {MAX_CONTRACT_BYTES}-byte limit"
+        )
+    try:
+        value = json.loads(resolved.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"--experiment-binding must contain UTF-8 JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("--experiment-binding must contain one JSON object")
+    binding = dict(value)
+    for field, expected in (
+        ("run_id", run_id),
+        ("source_revision", source_revision),
+    ):
+        supplied = binding.get(field)
+        if supplied is not None and supplied != expected:
+            raise ValueError(f"experiment binding {field} does not match this run")
+        binding[field] = expected
+    supplied_id = binding.get("binding_id")
+    if supplied_id is None:
+        binding["binding_id"] = f"binding-{secrets.token_hex(8)}"
+    return normalize_run_binding(binding)
+
+
 def submit(args: argparse.Namespace) -> dict[str, Any]:
     config_path = resolve_project_config(args.project_config)
     config = load_managed_project_config(config_path)
@@ -265,6 +308,24 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         output_relpath=output_relpath,
     )
     run_id = args.run_id or f"rr-{secrets.token_hex(8)}"
+    experiment_binding = _finalize_experiment_binding(
+        getattr(args, "experiment_binding", None),
+        run_id=run_id,
+        source_revision=revision,
+    )
+    if experiment_binding is not None and experiment_binding["expects_result_manifest"]:
+        if output_relpath is None:
+            raise ValueError(
+                "a result-producing experiment binding requires --output-relpath"
+            )
+        if config.output_sync is None:
+            raise ValueError(
+                "a result-producing experiment binding requires configured output_sync"
+            )
+        if result_intent != "candidate":
+            raise ValueError(
+                "a result-producing experiment binding requires --result-intent candidate"
+            )
     command = args.command
     job = {
         "run_id": run_id,
@@ -289,6 +350,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "lease_seconds": config.scheduling.lease_seconds,
         "privacy": args.privacy,
+        "experiment_binding": experiment_binding,
     }
     controller = call_controller(
         config,
@@ -305,6 +367,14 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         "workload_class": workload_class,
         "result_intent": result_intent,
         "result_tags": result_tags,
+        "experiment_binding": (
+            None
+            if experiment_binding is None
+            else {
+                "binding_id": experiment_binding["binding_id"],
+                "binding_digest": experiment_binding["binding_digest"],
+            }
+        ),
         "preparation_failures": preparation_failures,
         "preparation_reused": preparation_reused,
         "controller": controller,
