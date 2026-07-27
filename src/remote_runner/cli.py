@@ -395,9 +395,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment_acceptance_record = experiment_acceptance_actions.add_parser("record")
     _add_experiment_common(experiment_acceptance_record)
-    experiment_acceptance_record.set_defaults(
-        experiment_command="acceptance-record"
-    )
+    experiment_acceptance_record.set_defaults(experiment_command="acceptance-record")
 
     experiment_registry_parser = experiment_areas.add_parser(
         "registry",
@@ -409,9 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     experiment_registry_rebuild = experiment_registry_actions.add_parser("rebuild")
     _add_experiment_common(experiment_registry_rebuild, document=False)
-    experiment_registry_rebuild.set_defaults(
-        experiment_command="registry-rebuild"
-    )
+    experiment_registry_rebuild.set_defaults(experiment_command="registry-rebuild")
 
     stop_parser = subparsers.add_parser(
         "stop",
@@ -484,6 +480,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_project_config(prune_outputs_parser)
     prune_outputs_parser.add_argument("--run-id")
+    prune_outputs_parser.add_argument(
+        "--server",
+        action="append",
+        help="limit pruning to a configured source server; may be repeated",
+    )
     prune_outputs_parser.add_argument(
         "--apply",
         action="store_true",

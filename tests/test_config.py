@@ -35,7 +35,10 @@ def managed_config(tmp_path: Path) -> Path:
         config,
         {
             "project_id": "example",
-            "controller": {"ssh": "controller_host", "root": "/Users/test/.remote-runner"},
+            "controller": {
+                "ssh": "controller_host",
+                "root": "/Users/test/.remote-runner",
+            },
             "source": {"local_repo": "code"},
             "remote": {
                 "compute-a": {
@@ -106,6 +109,7 @@ def test_loads_default_all_succeeded_output_sync_config(tmp_path: Path) -> None:
     assert config.output_sync.target_server == "archive"
     assert config.output_sync.target_python == "/opt/example/bin/python3"
     assert config.output_sync.source_hosts == {"compute-a": "compute-a-int"}
+    assert config.output_sync.prune_source_servers == ()
     assert config.output_sync.restricted_source_keys is False
     assert config.output_sync.retry_seconds == 30
     assert config.output_sync.paused is False
@@ -128,6 +132,42 @@ def test_loads_restricted_output_source_keys(tmp_path: Path) -> None:
 
     assert config.output_sync is not None
     assert config.output_sync.restricted_source_keys is True
+
+
+def test_loads_post_sync_source_pruning_allow_list(tmp_path: Path) -> None:
+    path = managed_config(tmp_path)
+    raw = load_yaml(path)
+    raw["output_sync"] = {
+        "target_server": "archive",
+        "target_ssh": "archive",
+        "target_root": "/home/other-user/example/archive/scientific-v1",
+        "source_ssh_config": "/home/other-user/.ssh/output-sync.conf",
+        "source_hosts": {"compute-a": "compute-a-int"},
+        "prune_after_sync": {"servers": ["compute-a"]},
+    }
+    write_yaml(path, raw)
+
+    config = load_managed_project_config(path)
+
+    assert config.output_sync is not None
+    assert config.output_sync.prune_source_servers == ("compute-a",)
+
+
+def test_post_sync_pruning_rejects_non_source_server(tmp_path: Path) -> None:
+    path = managed_config(tmp_path)
+    raw = load_yaml(path)
+    raw["output_sync"] = {
+        "target_server": "archive",
+        "target_ssh": "archive",
+        "target_root": "/home/other-user/example/archive/scientific-v1",
+        "source_ssh_config": "/home/other-user/.ssh/output-sync.conf",
+        "source_hosts": {"compute-a": "compute-a-int"},
+        "prune_after_sync": {"servers": ["archive"]},
+    }
+    write_yaml(path, raw)
+
+    with pytest.raises(ValueError, match="must name configured source hosts"):
+        load_managed_project_config(path)
 
 
 def test_output_sync_requires_every_enabled_output_source(tmp_path: Path) -> None:

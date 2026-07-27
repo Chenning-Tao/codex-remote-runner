@@ -28,7 +28,7 @@ SERVER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 CONFIG_SCHEMA = 1
 INTENT_SCHEMA = 1
 
-PURGE_TARGET_PROGRAM = r'''import json
+PURGE_TARGET_PROGRAM = r"""import json
 import re
 import shutil
 import fcntl
@@ -78,7 +78,7 @@ with lock_path.open("w", encoding="utf-8") as lock_handle:
     else:
         actions["receipt"] = "already_absent"
 print(json.dumps({"ok": True, "run_id": run_id, "actions": actions}, sort_keys=True))
-'''
+"""
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,7 @@ class OutputSyncConfig:
     target_python: str
     source_ssh_config: str
     source_hosts: dict[str, str]
+    prune_source_servers: tuple[str, ...]
     restricted_source_keys: bool
     retry_seconds: int
     paused: bool
@@ -112,6 +113,7 @@ class OutputSyncConfig:
             "target_python": self.target_python,
             "source_ssh_config": self.source_ssh_config,
             "source_hosts": dict(sorted(self.source_hosts.items())),
+            "prune_after_sync": {"servers": list(self.prune_source_servers)},
             "restricted_source_keys": self.restricted_source_keys,
             "retry_seconds": self.retry_seconds,
             "paused": self.paused,
@@ -155,7 +157,9 @@ def validate_config_payload(raw: Any) -> OutputSyncConfig:
     if SERVER_RE.fullmatch(target_server) is None:
         raise ValueError("output-sync target_server contains unsafe characters")
     target_ssh = _text(raw.get("target_ssh"), "target_ssh")
-    if target_ssh.startswith("-") or any(character.isspace() for character in target_ssh):
+    if target_ssh.startswith("-") or any(
+        character.isspace() for character in target_ssh
+    ):
         raise ValueError("output-sync target_ssh must be one SSH destination argument")
     source_hosts_raw = raw.get("source_hosts")
     if not isinstance(source_hosts_raw, dict):
@@ -172,6 +176,27 @@ def validate_config_payload(raw: Any) -> OutputSyncConfig:
         source_hosts[server] = host_text
     if target_server in source_hosts:
         raise ValueError("output-sync target_server must not appear in source_hosts")
+    prune_after_sync = raw.get("prune_after_sync", {"servers": []})
+    if not isinstance(prune_after_sync, dict):
+        raise ValueError("output-sync prune_after_sync must be a mapping")
+    prune_servers_raw = prune_after_sync.get("servers", [])
+    if not isinstance(prune_servers_raw, list):
+        raise ValueError("output-sync prune_after_sync.servers must be a list")
+    prune_source_servers: list[str] = []
+    for server in prune_servers_raw:
+        if not isinstance(server, str) or SERVER_RE.fullmatch(server) is None:
+            raise ValueError(
+                "output-sync prune_after_sync.servers has an invalid server name"
+            )
+        if server not in source_hosts:
+            raise ValueError(
+                "output-sync prune_after_sync.servers must name configured source hosts"
+            )
+        prune_source_servers.append(server)
+    if len(set(prune_source_servers)) != len(prune_source_servers):
+        raise ValueError(
+            "output-sync prune_after_sync.servers must not contain duplicates"
+        )
     retry_seconds = raw.get("retry_seconds", 60)
     if (
         isinstance(retry_seconds, bool)
@@ -194,6 +219,7 @@ def validate_config_payload(raw: Any) -> OutputSyncConfig:
             raw.get("source_ssh_config"), "source_ssh_config"
         ),
         source_hosts=source_hosts,
+        prune_source_servers=tuple(sorted(prune_source_servers)),
         restricted_source_keys=restricted_source_keys,
         retry_seconds=retry_seconds,
         paused=paused,
@@ -215,7 +241,9 @@ def _private_directory(path: Path) -> None:
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     _private_directory(path.parent)
-    descriptor, raw_temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    descriptor, raw_temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
     temporary = Path(raw_temporary)
     try:
         os.fchmod(descriptor, 0o600)
@@ -338,9 +366,7 @@ def enqueue_succeeded_output(
     if pending.is_file():
         existing = _read_json(pending)
         if existing != intent:
-            raise ValueError(
-                f"output-sync intent conflict for {intent['run_id']}"
-            )
+            raise ValueError(f"output-sync intent conflict for {intent['run_id']}")
         return pending
     _write_json_atomic(pending, intent)
     return pending
@@ -375,7 +401,11 @@ def validate_intent(raw: Any) -> dict[str, Any]:
             raise ValueError("output-sync intent experiment binding identity mismatch")
         raw["experiment_binding"] = binding
     state_revision = raw.get("state_revision")
-    if isinstance(state_revision, bool) or not isinstance(state_revision, int) or state_revision < 1:
+    if (
+        isinstance(state_revision, bool)
+        or not isinstance(state_revision, int)
+        or state_revision < 1
+    ):
         raise ValueError("output-sync intent state_revision must be positive")
     return dict(raw)
 
@@ -521,7 +551,11 @@ def invoke_target(
         raise RuntimeError(
             f"{config.target_server} output-sync worker returned invalid JSON"
         ) from exc
-    if completed.returncode != 0 or not isinstance(result, dict) or result.get("ok") is not True:
+    if (
+        completed.returncode != 0
+        or not isinstance(result, dict)
+        or result.get("ok") is not True
+    ):
         detail = (
             result.get("error")
             if isinstance(result, dict) and isinstance(result.get("error"), str)
@@ -580,7 +614,11 @@ def _purge_target_run(
         result = json.loads(lines[-1]) if lines else None
     except json.JSONDecodeError as exc:
         raise RuntimeError("output-sync purge target returned invalid JSON") from exc
-    if completed.returncode != 0 or not isinstance(result, dict) or result.get("ok") is not True:
+    if (
+        completed.returncode != 0
+        or not isinstance(result, dict)
+        or result.get("ok") is not True
+    ):
         raise RuntimeError(
             completed.stderr.strip() or "output-sync purge target failed"
         )
@@ -594,7 +632,9 @@ def purge_run_sync_state(
     target_configs: dict[str, dict[str, Any]],
     connect_timeout: int,
 ) -> list[dict[str, Any]]:
-    invalid = sorted(run_id for run_id in run_ids if RUN_ID_RE.fullmatch(run_id) is None)
+    invalid = sorted(
+        run_id for run_id in run_ids if RUN_ID_RE.fullmatch(run_id) is None
+    )
     if invalid:
         raise ValueError(f"invalid output-sync purge run ids: {', '.join(invalid)}")
     if not set(target_configs).issubset(run_ids):
@@ -744,7 +784,10 @@ def process_pending_once(
 
     config = load_config(execution_paths.registry_root)
     if config is None:
-        return {"enabled": False, "pending": len(list_pending(execution_paths.registry_root))}
+        return {
+            "enabled": False,
+            "pending": len(list_pending(execution_paths.registry_root)),
+        }
     if config.paused:
         return {
             "enabled": True,
@@ -900,6 +943,27 @@ def list_completed_syncs(registry_root: Path) -> list[dict[str, Any]]:
             raise ValueError(f"output-sync completed identity mismatch: {path.name}")
         completed.append(value)
     return completed
+
+
+def has_unpruned_completed_syncs(
+    registry_root: Path,
+    source_servers: tuple[str, ...],
+) -> bool:
+    if not source_servers:
+        return False
+    selected = set(source_servers)
+    for completed in list_completed_syncs(registry_root):
+        intent = completed.get("intent")
+        receipt = completed.get("receipt")
+        if not isinstance(intent, dict) or not isinstance(receipt, dict):
+            continue
+        if intent.get("source_server") not in selected:
+            continue
+        if receipt.get("verification") != "rsync_checksum_dry_run":
+            continue
+        if receipt.get("source_deletion_performed") is False:
+            return True
+    return False
 
 
 def record_source_output_deletion(

@@ -69,16 +69,22 @@ class ManagedProjectConfig:
         if explicit_server is not None:
             runtime = self.remotes.get(explicit_server)
             if runtime is None:
-                raise ValueError(f"server {explicit_server!r} is not configured for this project")
+                raise ValueError(
+                    f"server {explicit_server!r} is not configured for this project"
+                )
             if not runtime.enabled:
-                raise ValueError(f"server {explicit_server!r} is disabled for this project")
+                raise ValueError(
+                    f"server {explicit_server!r} is disabled for this project"
+                )
             return [explicit_server]
         if candidate_servers is not None:
             candidates: list[str] = []
             for name in candidate_servers:
                 runtime = self.remotes.get(name)
                 if runtime is None:
-                    raise ValueError(f"server {name!r} is not configured for this project")
+                    raise ValueError(
+                        f"server {name!r} is not configured for this project"
+                    )
                 if not runtime.enabled:
                     raise ValueError(f"server {name!r} is disabled for this project")
                 candidates.append(name)
@@ -184,13 +190,17 @@ def load_managed_project_config(path: Path) -> ManagedProjectConfig:
             )
         remotes[name] = RemoteRuntime(
             name=name,
-            enabled=_boolean(runtime.get("enabled"), f"remote.{name}.enabled", default=True),
+            enabled=_boolean(
+                runtime.get("enabled"), f"remote.{name}.enabled", default=True
+            ),
             auto_select=_boolean(
                 runtime.get("auto_select"),
                 f"remote.{name}.auto_select",
                 default=True,
             ),
-            bare_repo=_absolute_posix(runtime.get("bare_repo"), f"remote.{name}.bare_repo"),
+            bare_repo=_absolute_posix(
+                runtime.get("bare_repo"), f"remote.{name}.bare_repo"
+            ),
             worktree_root=_absolute_posix(
                 runtime.get("worktree_root"),
                 f"remote.{name}.worktree_root",
@@ -288,7 +298,10 @@ def load_managed_project_config(path: Path) -> ManagedProjectConfig:
         )
         output_root_path = PurePosixPath(target_runtime.output_root)
         target_root_path = PurePosixPath(target_root)
-        if target_root_path != output_root_path and output_root_path not in target_root_path.parents:
+        if (
+            target_root_path != output_root_path
+            and output_root_path not in target_root_path.parents
+        ):
             raise ValueError(
                 "project config output_sync.target_root must be inside the target "
                 "server output_root"
@@ -299,7 +312,9 @@ def load_managed_project_config(path: Path) -> ManagedProjectConfig:
         expected_sources = {
             name
             for name, runtime in remotes.items()
-            if runtime.enabled and runtime.output_root is not None and name != target_server
+            if runtime.enabled
+            and runtime.output_root is not None
+            and name != target_server
         }
         configured_sources = {
             name
@@ -307,7 +322,10 @@ def load_managed_project_config(path: Path) -> ManagedProjectConfig:
             if runtime.output_root is not None and name != target_server
         }
         actual_sources = set(source_hosts_raw)
-        if not expected_sources <= actual_sources or not actual_sources <= configured_sources:
+        if (
+            not expected_sources <= actual_sources
+            or not actual_sources <= configured_sources
+        ):
             missing = sorted(expected_sources - actual_sources)
             unknown = sorted(actual_sources - configured_sources)
             details = []
@@ -326,6 +344,15 @@ def load_managed_project_config(path: Path) -> ManagedProjectConfig:
             "output_sync.retry_seconds",
             default=60,
         )
+        prune_after_sync_raw = output_sync.get("prune_after_sync", {})
+        prune_after_sync = _mapping(
+            prune_after_sync_raw, "output_sync.prune_after_sync"
+        )
+        prune_servers_raw = prune_after_sync.get("servers", [])
+        if not isinstance(prune_servers_raw, list):
+            raise ValueError(
+                "project config output_sync.prune_after_sync.servers must be a list"
+            )
         output_sync_config = validate_config_payload(
             {
                 "schema_version": 1,
@@ -340,6 +367,7 @@ def load_managed_project_config(path: Path) -> ManagedProjectConfig:
                     "output_sync.source_ssh_config",
                 ),
                 "source_hosts": source_hosts_raw,
+                "prune_after_sync": {"servers": prune_servers_raw},
                 "restricted_source_keys": _boolean(
                     output_sync.get("restricted_source_keys"),
                     "output_sync.restricted_source_keys",

@@ -92,6 +92,9 @@ output_sync:
   source_ssh_config: /srv/archive/.ssh/output-sync.conf
   source_hosts:
     compute-a: compute-a-int
+  prune_after_sync:
+    servers:
+      - compute-a
   restricted_source_keys: true
   retry_seconds: 60
   paused: false
@@ -157,9 +160,13 @@ Run `remote-runner sync-outputs` once after adding or changing this section. Eve
 later submission carries the same validated configuration to the controller. The
 controller writes one durable outbox intent when a run becomes succeeded, while a
 separate controller worker asks the target to pull only that run's output. Sync
-failures never change run authority, source data is never deleted, and canonical
-scientific selection remains a separate concern. Initial configuration is
-forward-only and does not backfill older succeeded history.
+failures never change run authority, and canonical scientific selection remains a
+separate concern. Source data is retained by default. `prune_after_sync.servers` is
+an explicit allow-list of configured source hosts whose outputs may be deleted only
+after checksum-verified archival; do not infer this policy from server names. The
+worker also reconciles eligible completed receipts when this allow-list is enabled.
+Initial synchronization configuration is forward-only and does not archive older
+succeeded history.
 
 ## Restricted Source Access
 

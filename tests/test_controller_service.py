@@ -306,6 +306,7 @@ def test_submit_persists_output_sync_configuration(
         "target_python": "/opt/python3",
         "source_ssh_config": "/home/user/.ssh/output-sync.conf",
         "source_hosts": {"compute-a": "compute-a-int"},
+        "prune_after_sync": {"servers": ["compute-a"]},
         "retry_seconds": 60,
     }
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
@@ -326,6 +327,7 @@ def test_submit_persists_output_sync_configuration(
     assert config is not None
     assert config.target_server == "archive"
     assert config.source_hosts == {"compute-a": "compute-a-int"}
+    assert config.prune_source_servers == ("compute-a",)
 
 
 def test_queued_job_returns_only_extension_constraints(tmp_path: Path) -> None:
