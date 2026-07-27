@@ -19,7 +19,7 @@ from .execution_registry import (
     sha256_bytes,
 )
 from .output_paths import validate_resolved_output
-from .remote_shell import remote_python_stdin_command
+from .remote_shell import remote_python_stdin_command, ssh_connection_options
 from .tmux import run_tmux_session
 
 
@@ -875,12 +875,7 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
         assets=assets,
         bootstrap_ssh_argv=(
             "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "ConnectTimeout=8",
+            *ssh_connection_options(8),
             str(manifest["ssh"]),
             remote_python_stdin_command(
                 project_python,

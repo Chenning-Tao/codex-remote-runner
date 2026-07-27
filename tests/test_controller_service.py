@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import io
 import json
 import subprocess
@@ -188,6 +189,38 @@ def test_edit_queued_job_switches_workload_class(tmp_path: Path, monkeypatch) ->
 
     assert result["job"]["workload_class"] == "test"
     assert result["state"]["revision"] == 1
+
+
+def test_sequential_server_updates_keep_other_expected_revisions_valid(
+    tmp_path: Path,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    run_ids = [f"rr-{index:016x}" for index in range(20)]
+    for run_id in run_ids:
+        queued = copy.deepcopy(job())
+        queued["run_id"] = run_id
+        queued["prepared_servers"].append(
+            {
+                **queued["prepared_servers"][0],
+                "name": "compute-b",
+                "ssh": "compute-b",
+            }
+        )
+        submit_job(paths, queued)
+
+    for run_id in run_ids:
+        result = controller_service.update_queued_job(
+            paths,
+            run_id,
+            expected_revision=0,
+            eligible_servers=["compute-b"],
+        )
+        assert result["changed"] is True
+
+    for run_id in run_ids:
+        queued, state = load_job(paths, run_id)
+        assert queued["eligible_servers"] == ["compute-b"]
+        assert state["revision"] == 1
 
 
 def test_edit_server_capacity_persists_both_lanes(tmp_path: Path, monkeypatch) -> None:
