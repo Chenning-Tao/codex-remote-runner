@@ -5,6 +5,18 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.3.6 - 2026-07-27
+
+### Changed
+
+- Reused the managed SSH control connection while preparing source revisions and
+  launching workloads, avoiding redundant SSH handshakes.
+
+### Fixed
+
+- Kept sequential batch queue updates on the latest controller revision so one
+  update no longer invalidates the remaining updates in the same batch.
+
 ## 0.3.5 - 2026-07-26
 
 ### Added
