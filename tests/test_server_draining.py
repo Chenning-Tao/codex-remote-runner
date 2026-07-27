@@ -64,3 +64,26 @@ def test_drain_client_rejects_unconfigured_server(tmp_path: Path) -> None:
             ),
             drained=True,
         )
+
+
+def test_web_drain_adapter_does_not_mutate_shared_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = argparse.Namespace(
+        project_config=project_config(tmp_path),
+        timeout=8,
+    )
+    observed: list[tuple[str, bool]] = []
+
+    def update(update_args: argparse.Namespace, *, drained: bool):
+        observed.append((update_args.server, drained))
+        return {"server": update_args.server, "drained": drained}
+
+    monkeypatch.setattr(server_draining, "update", update)
+
+    result = server_draining.request_server_drain_update(args, "burst", False)
+
+    assert result == {"server": "burst", "drained": False}
+    assert observed == [("burst", False)]
+    assert not hasattr(args, "server")

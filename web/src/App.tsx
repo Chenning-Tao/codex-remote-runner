@@ -1,5 +1,6 @@
 import {
   Alert,
+  AlertActionCloseButton,
   Button,
   Drawer,
   DrawerContent,
@@ -101,6 +102,7 @@ function RunsDashboard() {
     updateQueue,
     updateQueueBatch,
     updateCapacity,
+    updateServerDrain,
   } = useDashboard();
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") ?? "");
   const [priority, setPriority] = useState<PriorityFilter>(initialPriority);
@@ -116,6 +118,15 @@ function RunsDashboard() {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (queueActionNotice?.variant !== "success") return;
+    const notice = queueActionNotice;
+    const timer = window.setTimeout(() => {
+      setQueueActionNotice((current) => current === notice ? null : current);
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [queueActionNotice]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -193,7 +204,7 @@ function RunsDashboard() {
           (server) => server.name === current.value.name,
         );
         return refreshed
-          ? { kind: "server", value: refreshed, drained: current.drained }
+          ? { kind: "server", value: refreshed, drained: drainedServers.has(refreshed.name) }
           : null;
       }
       if (current?.kind === "queue") {
@@ -215,7 +226,7 @@ function RunsDashboard() {
       }
       return current;
     });
-  }, [document]);
+  }, [document, drainedServers]);
 
   useEffect(() => {
     const editable = new Set(
@@ -328,6 +339,7 @@ function RunsDashboard() {
       onBatchQueueUpdate={updateQueueBatch}
       onBatchResult={handleBatchResult}
       onCapacityUpdate={updateCapacity}
+      onServerDrainUpdate={updateServerDrain}
       availableServers={document?.snapshot?.servers ?? []}
     />
   ) : null;
@@ -480,6 +492,12 @@ function RunsDashboard() {
                           variant={queueActionNotice.variant}
                           title={queueActionNotice.title}
                           className="rr-queue-action-alert"
+                          actionClose={(
+                            <AlertActionCloseButton
+                              aria-label="关闭队列操作提示"
+                              onClose={() => setQueueActionNotice(null)}
+                            />
+                          )}
                         >
                           {queueActionNotice.messages.length === 1 ? (
                             queueActionNotice.messages[0]

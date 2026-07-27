@@ -21,3 +21,13 @@ def update(args: argparse.Namespace, *, drained: bool) -> dict[str, Any]:
         timeout=args.timeout,
         action_args=("--server", args.server),
     )
+
+
+def request_server_drain_update(
+    args: argparse.Namespace,
+    server: str,
+    drained: bool,
+) -> dict[str, Any]:
+    update_args = argparse.Namespace(**vars(args))
+    update_args.server = server
+    return update(update_args, drained=drained)

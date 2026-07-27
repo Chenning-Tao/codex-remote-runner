@@ -28,6 +28,7 @@ interface DashboardResult {
     expectedRevision: number,
     changes: CapacityUpdateChanges,
   ) => Promise<void>;
+  updateServerDrain: (server: string, drained: boolean) => Promise<void>;
 }
 
 export class StopRunError extends Error {
@@ -50,6 +51,16 @@ export class QueueUpdateError extends Error {
   }
 }
 
+export class ServerDrainError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = "ServerDrainError";
+  }
+}
+
 const stopErrorMessages: Record<string, string> = {
   run_not_found: "这个任务已经结束或不存在，列表已刷新。",
   run_dispatching: "任务正在分配服务器，请稍后重试。",
@@ -68,6 +79,11 @@ const capacityErrorMessages: Record<string, string> = {
   capacity_not_found: "这台服务器已经不在当前项目中，列表已刷新。",
   capacity_conflict: "服务器容量刚刚发生了变化，请根据刷新后的数值重试。",
   invalid_capacity_update: "容量设置无效，请输入 0 到 1024 之间的整数。",
+};
+
+const serverDrainErrorMessages: Record<string, string> = {
+  server_not_found: "这台服务器已经不在当前项目中，列表已刷新。",
+  server_drain_failed: "无法修改服务器调度状态，请稍后重试。",
 };
 
 function parseDocument(value: string): DashboardDocument {
@@ -244,6 +260,41 @@ export function useDashboard(): DashboardResult {
     );
   }, []);
 
+  const updateServerDrain = useCallback(async (server: string, drained: boolean) => {
+    const operation = drained ? "drain" : "resume";
+    const response = await fetch(`/api/servers/${encodeURIComponent(server)}/${operation}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Remote-Runner-Action": drained ? "drain-server" : "resume-server",
+      },
+      body: JSON.stringify({ server, confirm: true }),
+    });
+    if (response.ok) return;
+    let code = "server_drain_failed";
+    let detail: string | null = null;
+    try {
+      const payload: unknown = await response.json();
+      if (
+        payload
+        && typeof payload === "object"
+        && "error" in payload
+        && typeof payload.error === "string"
+      ) {
+        code = payload.error;
+        if ("detail" in payload && typeof payload.detail === "string") detail = payload.detail;
+      }
+    } catch {
+      // Keep the status-based fallback when the server response is not JSON.
+    }
+    throw new ServerDrainError(
+      detail
+        ?? serverDrainErrorMessages[code]
+        ?? `调度状态修改失败（${response.status}）`,
+      code,
+    );
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -295,5 +346,6 @@ export function useDashboard(): DashboardResult {
     updateQueue,
     updateQueueBatch,
     updateCapacity,
+    updateServerDrain,
   };
 }
