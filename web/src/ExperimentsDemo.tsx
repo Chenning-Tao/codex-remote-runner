@@ -119,11 +119,31 @@ function initialView(): ExperimentView {
   return requested === "curves" || requested === "matrix" ? requested : "results";
 }
 
-function StatusLabel({ status }: { status: ExperimentPointStatus }) {
+function isSnapshotStudy(study: ExperimentStudy): boolean {
+  return study.mode === "project-snapshot";
+}
+
+function statusLabel(study: ExperimentStudy, status: ExperimentPointStatus): string {
+  if (!isSnapshotStudy(study)) return statusMeta[status].label;
+  if (status === "complete") return "已记录";
+  if (status === "review") return "待复核";
+  return statusMeta[status].label;
+}
+
+function availablePointCount(study: ExperimentStudy): number {
+  const counts = pointStatusCounts(study);
+  return isSnapshotStudy(study) ? counts.complete + counts.review : counts.complete;
+}
+
+function isChartablePoint(study: ExperimentStudy, point: ExperimentPoint): boolean {
+  return point.status === "complete" || (isSnapshotStudy(study) && point.status === "review");
+}
+
+function StatusLabel({ study, status }: { study: ExperimentStudy; status: ExperimentPointStatus }) {
   const visual = statusMeta[status];
   return (
     <Label isCompact color={visual.color} variant="outline" icon={visual.icon}>
-      {visual.label}
+      {statusLabel(study, status)}
     </Label>
   );
 }
@@ -141,7 +161,10 @@ function formatInterval(point: ExperimentPoint, metric: ExperimentMetric): strin
 function dimensionValue(value: ExperimentScalar | undefined): string {
   if (value === null || typeof value === "undefined") return "--";
   if (typeof value === "boolean") return value ? "是" : "否";
-  return typeof value === "number" ? value.toLocaleString("zh-CN") : value;
+  if (typeof value !== "number") return value;
+  return value.toLocaleString("zh-CN", {
+    maximumFractionDigits: Number.isInteger(value) ? 0 : 8,
+  });
 }
 
 function numericMetricValue(point: ExperimentPoint, metricKey: string): number | undefined {
@@ -153,8 +176,8 @@ function metricLabel(metric: ExperimentMetric): string {
   return metric.unit ? `${metric.shortLabel} (${metric.unit})` : metric.shortLabel;
 }
 
-function pointMatchesFilter(point: ExperimentPoint, filter: PointFilter): boolean {
-  if (filter === "complete") return point.status === "complete";
+function pointMatchesFilter(study: ExperimentStudy, point: ExperimentPoint, filter: PointFilter): boolean {
+  if (filter === "complete") return isChartablePoint(study, point);
   if (filter === "attention") {
     return ["review", "failed", "stale", "planned"].includes(point.status);
   }
@@ -170,12 +193,13 @@ function StudyRail({
   selectedStudyId: string;
   onSelect: (studyId: string) => void;
 }) {
+  const snapshot = studies.every(isSnapshotStudy);
   return (
     <aside className="rr-exp-study-rail" aria-labelledby="rr-exp-study-list-title">
       <header className="rr-exp-study-rail-header">
         <div>
           <h2 id="rr-exp-study-list-title">实验组</h2>
-          <p>当前设计版本</p>
+          <p>{snapshot ? "项目快照" : "当前设计版本"}</p>
         </div>
         <span className="rr-count rr-mono">{studies.length}</span>
       </header>
@@ -183,7 +207,8 @@ function StudyRail({
         {studies.map((study) => {
           const counts = pointStatusCounts(study);
           const pointCount = study.pointCount ?? study.points.length;
-          const percent = pointCount ? Math.round((counts.complete / pointCount) * 100) : 0;
+          const available = availablePointCount(study);
+          const percent = pointCount ? Math.round((available / pointCount) * 100) : 0;
           const needsAttention = counts.failed + counts.stale + counts.review + counts.planned;
           return (
             <button
@@ -202,7 +227,7 @@ function StudyRail({
                   <span style={{ width: `${percent}%` }} />
                 </span>
                 <span>
-                  已接受 {counts.complete}/{pointCount}
+                  {isSnapshotStudy(study) ? "有记录" : "已接受"} {available}/{pointCount}
                   {needsAttention > 0 && <em>{needsAttention} 需处理</em>}
                 </span>
               </span>
@@ -227,6 +252,8 @@ function ResultsTable({
   onSelect: (point: ExperimentPoint) => void;
 }) {
   const dimensionKeys = Object.keys(study.dimensions);
+  const hasIntervals = study.points.some((point) => point.metrics[metric.key]?.interval);
+  const hasRuns = study.points.some((point) => point.runs.length > 0);
   return (
     <div className="rr-table-scroll">
       <table className="rr-exp-results-table">
@@ -236,9 +263,9 @@ function ResultsTable({
             <th>实验点</th>
             {dimensionKeys.map((key) => <th key={key}>{study.dimensions[key]}</th>)}
             <th>{metricLabel(metric)}</th>
-            <th>95% 区间</th>
+            {hasIntervals && <th>95% 区间</th>}
             <th>证据量</th>
-            <th>运行数</th>
+            {hasRuns && <th>运行数</th>}
           </tr>
         </thead>
         <tbody>
@@ -246,7 +273,7 @@ function ResultsTable({
             const reading = point.metrics[metric.key];
             return (
               <tr key={point.pointRevisionId}>
-                <td><StatusLabel status={point.status} /></td>
+                <td><StatusLabel study={study} status={point.status} /></td>
                 <td>
                   <button className="rr-exp-point-link" type="button" onClick={() => onSelect(point)}>
                     <strong>{point.displayName}</strong>
@@ -261,13 +288,13 @@ function ResultsTable({
                 <td className="rr-exp-metric-value rr-mono">
                   {formatMetricValue(reading?.value, metric)}
                 </td>
-                <td className="rr-exp-interval rr-mono">{formatInterval(point, metric)}</td>
+                {hasIntervals && <td className="rr-exp-interval rr-mono">{formatInterval(point, metric)}</td>}
                 <td className="rr-mono">
                   {typeof point.observationCount === "number"
                     ? point.observationCount.toLocaleString("zh-CN")
                     : "--"}
                 </td>
-                <td className="rr-mono">{point.runs.length || "--"}</td>
+                {hasRuns && <td className="rr-mono">{point.runs.length || "--"}</td>}
               </tr>
             );
           })}
@@ -287,20 +314,20 @@ function CurveChart({
   points: ExperimentPoint[];
   metric: ExperimentMetric;
 }) {
-  const accepted = points.filter(
-    (point) => point.status === "complete" && numericMetricValue(point, metric.key) !== undefined,
+  const chartable = points.filter(
+    (point) => isChartablePoint(study, point) && numericMetricValue(point, metric.key) !== undefined,
   );
   const xKey = study.presentation.xDimension;
   const seriesKey = study.presentation.seriesDimension;
-  const xValues = Array.from(new Set(accepted.map((point) => point.dimensions[xKey]))).sort((a, b) => {
+  const xValues = Array.from(new Set(chartable.map((point) => point.dimensions[xKey]))).sort((a, b) => {
     if (typeof a === "number" && typeof b === "number") return a - b;
     return String(a).localeCompare(String(b));
   });
-  const series = Array.from(new Set(accepted.map((point) => String(point.dimensions[seriesKey]))));
-  const values = accepted.map((point) => numericMetricValue(point, metric.key)!);
+  const series = Array.from(new Set(chartable.map((point) => String(point.dimensions[seriesKey]))));
+  const values = chartable.map((point) => numericMetricValue(point, metric.key)!);
 
   if (values.length === 0) {
-    return <div className="rr-empty">当前筛选没有带该指标的已接受结果。</div>;
+    return <div className="rr-empty">当前筛选没有带该指标的{isSnapshotStudy(study) ? "可展示记录" : "已接受结果"}。</div>;
   }
 
   const width = 860;
@@ -332,8 +359,8 @@ function CurveChart({
   return (
     <div className="rr-exp-curve-wrap">
       <div className="rr-exp-curve-meta">
-        <span><CheckCircle2 aria-hidden="true" />当前筛选内 {accepted.length} 个已接受实验点</span>
-        <span><History aria-hidden="true" />已排除过期结果</span>
+        <span><CheckCircle2 aria-hidden="true" />当前筛选内 {chartable.length} 个{isSnapshotStudy(study) ? "可展示记录" : "已接受实验点"}</span>
+        <span><History aria-hidden="true" />{isSnapshotStudy(study) ? "待复核记录以原始值展示" : "已排除过期结果"}</span>
       </div>
       <div className="rr-exp-chart-scroll">
         <svg
@@ -344,7 +371,7 @@ function CurveChart({
         >
           <title id="rr-exp-chart-title">{metricLabel(metric)}，按 {study.dimensions[xKey]} 展示</title>
           <desc id="rr-exp-chart-description">
-            当前筛选中的已接受结果按 {study.dimensions[seriesKey]} 分组，不包含历史过期结果。
+            当前筛选中的{isSnapshotStudy(study) ? "项目快照记录" : "已接受结果"}按 {study.dimensions[seriesKey]} 分组。
           </desc>
           {ticks.map((tick) => {
             const y = yAt(tick);
@@ -368,7 +395,7 @@ function CurveChart({
             </g>
           ))}
           {series.map((seriesName, seriesIndex) => {
-            const points = accepted
+            const points = chartable
               .filter((point) => String(point.dimensions[seriesKey]) === seriesName)
               .sort((a, b) => xValues.indexOf(a.dimensions[xKey]) - xValues.indexOf(b.dimensions[xKey]));
             const path = points.map((point, index) => {
@@ -493,10 +520,10 @@ function PointMatrix({
                     <button
                       type="button"
                       className={`rr-exp-matrix-cell rr-exp-matrix-${point.status}`}
-                      aria-label={`${point.displayName}: ${statusMeta[point.status].label}, ${formatMetricValue(reading?.value, metric)}`}
+                      aria-label={`${point.displayName}: ${statusLabel(study, point.status)}, ${formatMetricValue(reading?.value, metric)}`}
                       onClick={() => onSelect(point)}
                     >
-                      <span>{statusMeta[point.status].icon}{statusMeta[point.status].label}</span>
+                      <span>{statusMeta[point.status].icon}{statusLabel(study, point.status)}</span>
                       <strong className="rr-mono">{formatMetricValue(reading?.value, metric)}</strong>
                     </button>
                   </td>
@@ -520,6 +547,9 @@ function PointDetail({
   onClose: () => void;
 }) {
   const closeButtonRef = useRef<HTMLDivElement>(null);
+  const snapshot = isSnapshotStudy(study);
+  const currentRecordId = snapshot ? point.sourceRecordId : point.acceptedResultId;
+  const hasCurrentMetrics = Object.keys(point.metrics).length > 0;
 
   useEffect(() => {
     closeButtonRef.current?.querySelector("button")?.focus();
@@ -537,13 +567,13 @@ function PointDetail({
         </DrawerActions>
       </DrawerHead>
       <DrawerPanelBody>
-        <div className="rr-detail-status"><StatusLabel status={point.status} /></div>
-        {(point.staleReason || point.failureReason) && (
+        <div className="rr-detail-status"><StatusLabel study={study} status={point.status} /></div>
+        {(point.reviewReason || point.staleReason || point.failureReason) && (
           <div className={`rr-exp-detail-notice ${point.failureReason ? "rr-exp-detail-notice-danger" : ""}`} role="status">
             <AlertCircle aria-hidden="true" />
             <div>
-              <strong>{point.failureReason ? "当前结果不可用" : "当前版本已变化"}</strong>
-              <span>{point.failureReason ?? point.staleReason}</span>
+              <strong>{point.failureReason ? "当前结果不可用" : point.reviewReason ? "证据口径需注意" : "当前版本已变化"}</strong>
+              <span>{point.failureReason ?? point.reviewReason ?? point.staleReason}</span>
             </div>
           </div>
         )}
@@ -566,10 +596,10 @@ function PointDetail({
           </dl>
         </section>
         <section className="rr-exp-detail-section" aria-labelledby="rr-exp-detail-result">
-          <h3 id="rr-exp-detail-result">当前已接受结果</h3>
-          {point.acceptedResultId ? (
+          <h3 id="rr-exp-detail-result">{snapshot ? "当前快照记录" : "当前已接受结果"}</h3>
+          {currentRecordId || hasCurrentMetrics ? (
             <>
-              <p className="rr-exp-result-id rr-mono">{point.acceptedResultId}</p>
+              {currentRecordId && <p className="rr-exp-result-id rr-mono">{currentRecordId}</p>}
               <dl className="rr-exp-detail-list">
                 {study.metrics.map((metric) => (
                   <div key={metric.key}>
@@ -581,10 +611,10 @@ function PointDetail({
                   </div>
                 ))}
                 <div><dt>观测数</dt><dd className="rr-mono">{point.observationCount?.toLocaleString("zh-CN") ?? "--"}</dd></div>
-                <div><dt>候选结果数</dt><dd className="rr-mono">{point.candidateCount}</dd></div>
+                <div><dt>{snapshot ? "来源记录数" : "候选结果数"}</dt><dd className="rr-mono">{point.candidateCount}</dd></div>
               </dl>
             </>
-          ) : <p className="rr-exp-detail-empty">这个实验点版本没有已接受结果。</p>}
+          ) : <p className="rr-exp-detail-empty">{snapshot ? "这个快照点还没有结果记录。" : "这个实验点版本没有已接受结果。"}</p>}
         </section>
         {point.resultHistory && point.resultHistory.length > 0 && (
           <section className="rr-exp-detail-section" aria-labelledby="rr-exp-detail-candidates">
@@ -696,7 +726,7 @@ export function ExperimentsDashboard({ live = false }: { live?: boolean }) {
     if (!study) return [];
     const normalized = query.trim().toLocaleLowerCase();
     return study.points.filter((point) => {
-      if (!pointMatchesFilter(point, filter)) return false;
+      if (!pointMatchesFilter(study, point, filter)) return false;
       if (!normalized) return true;
       return [
         point.displayName,
@@ -758,10 +788,12 @@ export function ExperimentsDashboard({ live = false }: { live?: boolean }) {
 
   const metric = metricByKey(study, metricKey);
   const counts = pointStatusCounts(study);
+  const snapshot = isSnapshotStudy(study);
   const pointCount = study.pointCount ?? study.points.length;
+  const available = availablePointCount(study);
   const activeRuns = counts.running + counts.queued;
   const needsAttention = counts.failed + counts.stale + counts.review + counts.planned;
-  const acceptedPercent = pointCount ? Math.round((counts.complete / pointCount) * 100) : 0;
+  const coveragePercent = pointCount ? Math.round((available / pointCount) * 100) : 0;
 
   function selectPoint(point: ExperimentPoint) {
     setSelectedPoint(point);
@@ -793,31 +825,42 @@ export function ExperimentsDashboard({ live = false }: { live?: boolean }) {
                 <div className="rr-page-overview">
                   <div className="rr-page-status">
                     <Label isCompact color="grey" icon={<Database />}>
-                      {live ? "控制器注册表 · 只读" : "合成演示数据"}
+                      {live ? "控制器注册表 · 只读" : "项目快照 · 只读"}
                     </Label>
                     <span className="rr-updated rr-mono" aria-live="polite">
-                      事件:{study.eventCursor} · {new Date(refreshedAt).toLocaleTimeString("zh-CN", { hour12: false })}
+                      {live ? "事件" : "序列"}:{study.eventCursor} · {new Date(live ? refreshedAt : study.refreshedAt).toLocaleString("zh-CN", {
+                        month: "2-digit",
+                        day: "2-digit",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                        hour12: false,
+                      })}
                     </span>
-                    <Tooltip content={live ? "刷新实验注册表" : "刷新演示数据"}>
-                      <Button
-                        variant="plain"
-                        aria-label={live ? "刷新实验注册表" : "刷新演示数据"}
-                        onClick={() => live ? registry.refresh() : setRefreshedAt(Date.now())}
-                      >
-                        <RefreshCw aria-hidden="true" />
-                      </Button>
-                    </Tooltip>
+                    {live && (
+                      <Tooltip content="刷新实验注册表">
+                        <Button variant="plain" aria-label="刷新实验注册表" onClick={() => registry.refresh()}>
+                          <RefreshCw aria-hidden="true" />
+                        </Button>
+                      </Tooltip>
+                    )}
                   </div>
                   <div className="rr-summary rr-exp-summary" aria-label="实验摘要">
-                    <div className="rr-summary-item"><span className="rr-summary-label">已接受</span><strong>{counts.complete}/{pointCount}</strong></div>
+                    <div className="rr-summary-item"><span className="rr-summary-label">{snapshot ? "有记录" : "已接受"}</span><strong>{available}/{pointCount}</strong></div>
                     <div className="rr-summary-item"><span className="rr-summary-label">活跃运行</span><strong>{activeRuns}</strong></div>
                     <div className="rr-summary-item"><span className="rr-summary-label">需处理</span><strong>{needsAttention}</strong></div>
-                    <div className="rr-summary-item"><span className="rr-summary-label">完成率</span><strong>{acceptedPercent}%</strong></div>
+                    <div className="rr-summary-item"><span className="rr-summary-label">{snapshot ? "覆盖率" : "完成率"}</span><strong>{coveragePercent}%</strong></div>
                   </div>
                 </div>
               </header>
 
               <ProductNav active="experiments" />
+
+              {!live && (
+                <Alert isInline variant="info" title="decoder_atomloss 项目快照" className="rr-alert">
+                  基于 2026-07-27 13:10 CST 的项目文件与 Controller 序列 202 映射；不是正式 Registry acceptance，也不会写入 Controller。
+                </Alert>
+              )}
 
               {registry.error && (
                 <Alert isInline variant="danger" title="实验注册表刷新失败" className="rr-alert">
@@ -829,20 +872,31 @@ export function ExperimentsDashboard({ live = false }: { live?: boolean }) {
                 <div className="rr-exp-revision-identity">
                   <span className="rr-exp-revision-icon"><GitBranch aria-hidden="true" /></span>
                   <div>
-                    <p id="rr-exp-active-revision-title">当前设计版本</p>
+                    <p id="rr-exp-active-revision-title">{snapshot ? "项目快照版本" : "当前设计版本"}</p>
                     <strong className="rr-mono">{study.activeRevisionId}</strong>
                     {study.previousRevisionId && <small>基于 <span className="rr-mono">{study.previousRevisionId}</span></small>}
                   </div>
                 </div>
                 <div className="rr-exp-impact" aria-label="已发布设计影响">
-                  <span><strong>{study.impact.unchanged}</strong> 不变</span>
-                  <span><strong>{study.impact.new}</strong> 新增</span>
-                  <span><strong>{study.impact.stale}</strong> 过期</span>
-                  <span><strong>{study.impact.archived}</strong> 归档</span>
+                  {snapshot ? (
+                    <>
+                      <span><strong>{pointCount}</strong> 范围</span>
+                      <span><strong>{available}</strong> 有记录</span>
+                      <span><strong>{counts.review}</strong> 待复核</span>
+                      <span><strong>{activeRuns}</strong> 活跃</span>
+                    </>
+                  ) : (
+                    <>
+                      <span><strong>{study.impact.unchanged}</strong> 不变</span>
+                      <span><strong>{study.impact.new}</strong> 新增</span>
+                      <span><strong>{study.impact.stale}</strong> 过期</span>
+                      <span><strong>{study.impact.archived}</strong> 归档</span>
+                    </>
+                  )}
                 </div>
                 <div className="rr-exp-revision-progress">
-                  <span><strong>{acceptedPercent}%</strong> 当前接受率</span>
-                  <span className="rr-exp-progress-track" aria-hidden="true"><span style={{ width: `${acceptedPercent}%` }} /></span>
+                  <span><strong>{coveragePercent}%</strong> {snapshot ? "当前覆盖率" : "当前接受率"}</span>
+                  <span className="rr-exp-progress-track" aria-hidden="true"><span style={{ width: `${coveragePercent}%` }} /></span>
                   <small className="rr-mono">{study.planDigest.slice(0, 22)}...</small>
                 </div>
               </section>
@@ -857,7 +911,7 @@ export function ExperimentsDashboard({ live = false }: { live?: boolean }) {
                       <span>{study.description}</span>
                     </div>
                     <div className="rr-exp-state-counts" aria-label="实验点状态">
-                      <span><i className="rr-exp-state-complete" />{counts.complete} 已接受</span>
+                      <span><i className="rr-exp-state-complete" />{available} {snapshot ? "有记录" : "已接受"}</span>
                       <span><i className="rr-exp-state-running" />{activeRuns} 活跃</span>
                       <span><i className="rr-exp-state-attention" />{needsAttention} 需处理</span>
                     </div>
@@ -876,7 +930,7 @@ export function ExperimentsDashboard({ live = false }: { live?: boolean }) {
                     <ToggleGroup aria-label="实验点状态筛选">
                       {([
                         ["all", "全部"],
-                        ["complete", "已接受"],
+                        ["complete", snapshot ? "有记录" : "已接受"],
                         ["attention", "需处理"],
                       ] as const).map(([value, label]) => (
                         <ToggleGroupItem
@@ -917,8 +971,8 @@ export function ExperimentsDashboard({ live = false }: { live?: boolean }) {
               </div>
 
               <footer className="rr-exp-demo-footer">
-                <span><Database aria-hidden="true" />{live ? "控制器实验注册表 · Web 只读" : "合成演示数据 · 不写入控制器"}</span>
-                <span className="rr-mono">注册表批次 {registryEpoch} · 事件 {live ? registry.eventCursor : study.eventCursor}</span>
+                <span><Database aria-hidden="true" />{live ? "控制器实验注册表 · Web 只读" : "decoder_atomloss 项目快照 · 不写入控制器"}</span>
+                <span className="rr-mono">{live ? "注册表批次" : "快照批次"} {registryEpoch} · {live ? "事件" : "序列"} {live ? registry.eventCursor : study.eventCursor}</span>
               </footer>
             </main>
           </DrawerContentBody>

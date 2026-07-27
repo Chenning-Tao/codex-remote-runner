@@ -55,10 +55,12 @@ export interface ExperimentPoint {
   metrics: Record<string, MetricReading>;
   historicalMetrics?: Record<string, MetricReading>;
   acceptedResultId?: string;
+  sourceRecordId?: string;
   observationCount?: number;
   candidateCount: number;
   staleReason?: string;
   failureReason?: string;
+  reviewReason?: string;
   settingDigest: string;
   pointRevisionDigest: string;
   changedComponents?: string[];
@@ -72,6 +74,7 @@ export interface ExperimentStudy {
   canonicalKey: string;
   displayName: string;
   description: string;
+  mode?: "registry" | "project-snapshot";
   activeRevisionId: string;
   previousRevisionId?: string;
   planDigest: string;
@@ -98,21 +101,14 @@ export interface ExperimentStudy {
 }
 
 export const experimentDemoProject = {
-  displayName: "decoder-atomloss-demo",
-  registryEpoch: "demo-03",
+  displayName: "decoder_atomloss",
+  registryEpoch: "snapshot-20260727",
+  snapshotAt: "2026-07-27T05:10:17.593152+00:00",
+  snapshotSequence: 202,
 };
 
-function reading(
-  value: number,
-  lower?: number,
-  upper?: number,
-): MetricReading {
-  return {
-    value,
-    ...(typeof lower === "number" && typeof upper === "number"
-      ? { interval: { lower, upper, level: 0.95 } }
-      : {}),
-  };
+function reading(value: number): MetricReading {
+  return { value };
 }
 
 function digest(seed: string): string {
@@ -126,413 +122,435 @@ function digest(seed: string): string {
   return `sha256:${value}`;
 }
 
-function runId(seed: string): string {
-  return `rr-${digest(seed).slice(7, 23)}`;
+function pointIds(prefix: string, key: string) {
+  const slug = key.replaceAll(/[^a-zA-Z0-9]+/g, "-").replaceAll(/^-|-$/g, "");
+  return {
+    pointId: `point-${prefix}-${slug}`,
+    pointRevisionId: `snapshot-${prefix}-${slug}`,
+  };
 }
 
-const lerPoints: ExperimentPoint[] = [
-  {
-    pointId: "point-41b0d3",
-    pointRevisionId: "pointrev-108a31",
-    canonicalKey: "sharingan-d3",
-    displayName: "Sharingan / d=3",
-    status: "complete",
-    dimensions: { method: "Sharingan", distance: 3 },
+const emptyStatusCounts = (): Record<ExperimentPointStatus, number> => ({
+  complete: 0,
+  running: 0,
+  queued: 0,
+  review: 0,
+  failed: 0,
+  stale: 0,
+  planned: 0,
+});
+
+interface CanonicalLerRow {
+  method: string;
+  pTotal: number;
+  shots: number;
+  logicalErrors: number;
+  ler: number;
+  lerPerRound: number;
+  convergenceRate: number;
+  wallTime: number;
+  perShotCount?: number;
+}
+
+const canonicalLerRows: CanonicalLerRow[] = [
+  { method: "bp_osd", pTotal: 0.004, shots: 20046, logicalErrors: 1960, ler: 0.09777511723, lerPerRound: 0.00853763514, convergenceRate: 1, wallTime: 99.9 },
+  { method: "bp_osd", pTotal: 0.005, shots: 20046, logicalErrors: 6257, ler: 0.312132096179, lerPerRound: 0.030698792408, convergenceRate: 1, wallTime: 111.6 },
+  { method: "bp_osd", pTotal: 0.006, shots: 20000, logicalErrors: 12364, ler: 0.6182, lerPerRound: 0.077103511256, convergenceRate: 1, wallTime: 68.9 },
+  { method: "bp_osd", pTotal: 0.007, shots: 20046, logicalErrors: 17015, ler: 0.84879776514, lerPerRound: 0.1456617499, convergenceRate: 1, wallTime: 129.4 },
+  { method: "bp_osd", pTotal: 0.008, shots: 20046, logicalErrors: 19073, ler: 0.951461638232, lerPerRound: 0.222845988909, convergenceRate: 1, wallTime: 136.9 },
+  { method: "bp_osd", pTotal: 0.009, shots: 20046, logicalErrors: 19598, ler: 0.977651401776, lerPerRound: 0.27148663427, convergenceRate: 1, wallTime: 143.1 },
+  { method: "relay_050", pTotal: 0.004, shots: 20046, logicalErrors: 850, ler: 0.042402474309, lerPerRound: 0.003604131853, convergenceRate: 0.959942133094, wallTime: 117.3 },
+  { method: "relay_050", pTotal: 0.005, shots: 20046, logicalErrors: 4235, ler: 0.211264092587, lerPerRound: 0.019582696142, convergenceRate: 0.797166517011, wallTime: 180.7 },
+  { method: "relay_050", pTotal: 0.006, shots: 20046, logicalErrors: 10795, ler: 0.538511423725, lerPerRound: 0.062409036616, convergenceRate: 0.471764940637, wallTime: 260.7 },
+  { method: "relay_050", pTotal: 0.007, shots: 20046, logicalErrors: 16636, ler: 0.829891250125, lerPerRound: 0.137232280174, convergenceRate: 0.176843260501, wallTime: 310.8 },
+  { method: "relay_050", pTotal: 0.008, shots: 20046, logicalErrors: 19283, ler: 0.96193754365, lerPerRound: 0.238433086628, convergenceRate: 0.040307293226, wallTime: 325.8 },
+  { method: "relay_050", pTotal: 0.009, shots: 20046, logicalErrors: 19932, ler: 0.994313079916, lerPerRound: 0.350010371213, convergenceRate: 0.006235657987, wallTime: 328.8 },
+  { method: "relay_lossy_dem_050", pTotal: 0.004, shots: 80000, logicalErrors: 732, ler: 0.00915, lerPerRound: 0.000765716553, convergenceRate: 0.990725, wallTime: 6920.4 },
+  { method: "relay_lossy_dem_050", pTotal: 0.005, shots: 60000, logicalErrors: 3846, ler: 0.0641, lerPerRound: 0.005505343564, convergenceRate: 0.93465, wallTime: 21855.9 },
+  { method: "relay_lossy_dem_050", pTotal: 0.006, shots: 60000, logicalErrors: 14967, ler: 0.24945, lerPerRound: 0.023628780782, convergenceRate: 0.7476, wallTime: 41377.2 },
+  { method: "relay_lossy_dem_050", pTotal: 0.007, shots: 6000, logicalErrors: 3408, ler: 0.568, lerPerRound: 0.067554095955, convergenceRate: 0.427, wallTime: 6019.2 },
+  { method: "relay_lossy_dem_050", pTotal: 0.008, shots: 4000, logicalErrors: 3282, ler: 0.8205, lerPerRound: 0.133360051342, convergenceRate: 0.178, wallTime: 5003.4 },
+  { method: "relay_lossy_dem_050", pTotal: 0.009, shots: 4000, logicalErrors: 3774, ler: 0.9435, lerPerRound: 0.212946893682, convergenceRate: 0.0565, wallTime: 5774 },
+  { method: "relay_ours_050", pTotal: 0.004, shots: 221996, logicalErrors: 200, ler: 0.000900917134, lerPerRound: 0.000075107446, convergenceRate: 0.999995495414, wallTime: 594, perShotCount: 221492 },
+  { method: "relay_ours_050", pTotal: 0.005, shots: 20046, logicalErrors: 246, ler: 0.012271774918, lerPerRound: 0.001028445362, convergenceRate: 1, wallTime: 113.6, perShotCount: 19648 },
+  { method: "relay_ours_050", pTotal: 0.006, shots: 20046, logicalErrors: 1499, ler: 0.074778010576, lerPerRound: 0.006455869225, convergenceRate: 1, wallTime: 157.2, perShotCount: 18033 },
+  { method: "relay_ours_050", pTotal: 0.007, shots: 20046, logicalErrors: 5496, ler: 0.274169410356, lerPerRound: 0.026349841374, convergenceRate: 1, wallTime: 251.5, perShotCount: 13600 },
+  { method: "relay_ours_050", pTotal: 0.008, shots: 20046, logicalErrors: 11472, ler: 0.572283747381, lerPerRound: 0.068328137701, convergenceRate: 1, wallTime: 362.9, perShotCount: 7515 },
+  { method: "relay_ours_050", pTotal: 0.009, shots: 20046, logicalErrors: 16452, ler: 0.820712361568, lerPerRound: 0.13344553922, convergenceRate: 0.999950114736, wallTime: 452.6, perShotCount: 2894 },
+];
+
+const canonicalLerPoints: ExperimentPoint[] = canonicalLerRows.map((row) => {
+  const key = `bb144|${row.method}|${row.pTotal.toFixed(3)}`;
+  const needsReview = typeof row.perShotCount === "number";
+  return {
+    ...pointIds("canonical", key),
+    canonicalKey: key,
+    displayName: `BB144 / ${row.method} / p=${row.pTotal.toFixed(3)}`,
+    status: needsReview ? "review" : "complete",
+    dimensions: { method: row.method, p_total: row.pTotal },
     metrics: {
-      per_round_ler: reading(0.0024, 0.00211, 0.00272),
-      block_ler: reading(0.0237, 0.0218, 0.0257),
-      logical_errors: reading(240),
-      shots: reading(100000),
+      ler: reading(row.ler),
+      ler_per_round: reading(row.lerPerRound),
+      convergence_rate: reading(row.convergenceRate),
+      logical_errors: reading(row.logicalErrors),
+      shots: reading(row.shots),
+      wall_time: reading(row.wallTime),
     },
-    acceptedResultId: "result-a37e61",
-    observationCount: 100000,
+    sourceRecordId: `eval-sweep:bb144:${row.method}:p${row.pTotal.toFixed(3)}`,
+    observationCount: row.shots,
     candidateCount: 1,
-    settingDigest: digest("31a8"),
-    pointRevisionDigest: digest("c144"),
-    resultHistory: [
-      { resultId: "result-a37e61", disposition: "accepted", sourceRunIds: ["rr-14358a2f0d41e7b3"] },
-    ],
+    reviewReason: needsReview
+      ? `strict-convergence audit 标记 legacy per-shot 不完整：${row.perShotCount?.toLocaleString("en-US")}/${row.shots.toLocaleString("en-US")} 条。`
+      : undefined,
+    settingDigest: digest(`canonical-setting:${key}`),
+    pointRevisionDigest: digest(`canonical-row:${key}:b30d973e`),
     artifacts: [
-      { label: "结果 manifest", uri: "runs/rr-14358a2f0d41e7b3/outputs/experiment-result.json" },
-      { label: "执行 manifest", uri: "runs/rr-14358a2f0d41e7b3/run-manifest.yaml" },
+      { label: "Canonical CSV", uri: "exp/eval/main-sweep/results/eval_sweep_combined.csv" },
+      { label: "Strict convergence audit", uri: "exp/eval/main-sweep/results/strict_convergence_gap_report.csv" },
     ],
-    runs: [{ runId: "rr-14358a2f0d41e7b3", role: "primary", status: "succeeded" }],
-  },
-  {
-    pointId: "point-580bfa",
-    pointRevisionId: "pointrev-b261ec",
-    canonicalKey: "sharingan-d5",
-    displayName: "Sharingan / d=5",
-    status: "complete",
-    dimensions: { method: "Sharingan", distance: 5 },
-    metrics: {
-      per_round_ler: reading(0.00082, 0.00066, 0.00101),
-      block_ler: reading(0.0081, 0.0067, 0.0097),
-      logical_errors: reading(82),
-      shots: reading(100000),
-    },
-    acceptedResultId: "result-93fb40",
-    observationCount: 100000,
-    candidateCount: 1,
-    settingDigest: digest("31a8"),
-    pointRevisionDigest: digest("32be"),
-    runs: [{ runId: "rr-9859d2d7ca62784f", role: "primary", status: "succeeded" }],
-  },
-  {
-    pointId: "point-52e476",
-    pointRevisionId: "pointrev-d6156b",
-    canonicalKey: "sharingan-d7",
-    displayName: "Sharingan / d=7",
+    runs: [],
+  };
+});
+
+interface RelayRunningRow {
+  method: string;
+  pTotal: number;
+  runId: string;
+  server: string;
+  progress: number;
+  shots: number;
+  logicalErrors: number;
+}
+
+const relayRunningRows: RelayRunningRow[] = [
+  { method: "plain_pair_blind_legacy", pTotal: 0.0035, runId: "rr-172bcf3307f4259d", server: "TCLOUD71", progress: 0.0078, shots: 156, logicalErrors: 0 },
+  { method: "resolution", pTotal: 0.0035, runId: "rr-72f37056ec91ed50", server: "8802", progress: 0, shots: 60000, logicalErrors: 47 },
+  { method: "bare", pTotal: 0.004, runId: "rr-a9cbb819f0295f4b", server: "3090", progress: 0, shots: 0, logicalErrors: 0 },
+  { method: "plain_pair_blind_legacy", pTotal: 0.004, runId: "rr-6b277ae6d9b635fb", server: "TCLOUD206", progress: 0, shots: 0, logicalErrors: 0 },
+  { method: "gu_marginal_conversion", pTotal: 0.004, runId: "rr-e172e40f4c261814", server: "H100", progress: 0, shots: 0, logicalErrors: 0 },
+];
+
+const relayQueuedRows: Array<[method: string, pTotal: number, runId: string]> = [
+  ["perrin_accurate_current_dem", 0.004, "rr-01590253e18405eb"],
+  ["resolution", 0.004, "rr-0fe27a3bb4d5d801"],
+  ["bare", 0.0045, "rr-69ab03ed551b1f6d"],
+  ["plain_pair_blind_legacy", 0.0045, "rr-963d8d1a53ef0175"],
+  ["gu_marginal_conversion", 0.0045, "rr-1c52970f9d0e08f8"],
+  ["perrin_accurate_current_dem", 0.0045, "rr-747123f69d39b61a"],
+  ["resolution", 0.0045, "rr-39a97801d50a8d64"],
+  ["bare", 0.005, "rr-5e16d6f676fb8fd1"],
+  ["plain_pair_blind_legacy", 0.005, "rr-64039618ddb07330"],
+  ["gu_marginal_conversion", 0.005, "rr-cd2529f7f26ee778"],
+  ["perrin_accurate_current_dem", 0.005, "rr-f4546b4c6878552a"],
+  ["resolution", 0.005, "rr-1586259c8d051466"],
+  ["bare", 0.0055, "rr-0c418afbdcd1a2f8"],
+  ["plain_pair_blind_legacy", 0.0055, "rr-a873b3bdbaca07b8"],
+  ["gu_marginal_conversion", 0.0055, "rr-966dd860b6d86a1b"],
+  ["perrin_accurate_current_dem", 0.0055, "rr-48bf5dd280ce5801"],
+  ["resolution", 0.0055, "rr-f8363fcc4d101bd4"],
+  ["bare", 0.006, "rr-91912ea54ca1a54f"],
+  ["plain_pair_blind_legacy", 0.006, "rr-d7152eb12581f27c"],
+  ["gu_marginal_conversion", 0.006, "rr-afe80e2c96df58cc"],
+  ["perrin_accurate_current_dem", 0.006, "rr-b4ed250312bcd55e"],
+  ["resolution", 0.006, "rr-339d1fe6f5bc0f3a"],
+  ["bare", 0.0065, "rr-3297b19133852fe4"],
+  ["plain_pair_blind_legacy", 0.0065, "rr-1627181cb6dc1fb1"],
+  ["gu_marginal_conversion", 0.0065, "rr-d55a55b61db96ad7"],
+  ["perrin_accurate_current_dem", 0.0065, "rr-5003ce1ab967178e"],
+  ["resolution", 0.0065, "rr-c542e51fa633fb13"],
+];
+
+const relayRunningPoints: ExperimentPoint[] = relayRunningRows.map((row) => {
+  const key = `bb144|${row.method}|${row.pTotal.toFixed(4)}`;
+  return {
+    ...pointIds("relay100", key),
+    canonicalKey: key,
+    displayName: `BB144 / ${row.method} / p=${row.pTotal.toFixed(4)}`,
     status: "running",
-    dimensions: { method: "Sharingan", distance: 7 },
-    metrics: {},
-    observationCount: 62000,
-    candidateCount: 0,
-    settingDigest: digest("31a8"),
-    pointRevisionDigest: digest("d825"),
-    runs: [{ runId: "rr-628387ad2d88837b", role: "primary", status: "running" }],
-  },
-  {
-    pointId: "point-26cc1e",
-    pointRevisionId: "pointrev-642a00",
-    canonicalKey: "sharingan-d9",
-    displayName: "Sharingan / d=9",
-    status: "planned",
-    dimensions: { method: "Sharingan", distance: 9 },
-    metrics: {},
-    candidateCount: 0,
-    settingDigest: digest("31a8"),
-    pointRevisionDigest: digest("184b"),
-    runs: [],
-  },
-  {
-    pointId: "point-e7f8d2",
-    pointRevisionId: "pointrev-b53ea4",
-    canonicalKey: "relay-d3",
-    displayName: "Relay / d=3",
-    status: "complete",
-    dimensions: { method: "Relay", distance: 3 },
+    dimensions: { method: row.method, p_total: row.pTotal, server: row.server },
     metrics: {
-      per_round_ler: reading(0.0031, 0.00277, 0.00347),
-      block_ler: reading(0.0302, 0.0281, 0.0324),
-      logical_errors: reading(310),
-      shots: reading(100000),
+      progress: reading(row.progress),
+      shots: reading(row.shots),
+      logical_errors: reading(row.logicalErrors),
     },
-    acceptedResultId: "result-8faab1",
-    observationCount: 100000,
+    sourceRecordId: row.runId,
+    observationCount: row.shots,
     candidateCount: 1,
-    settingDigest: digest("a5d0"),
-    pointRevisionDigest: digest("6a02"),
-    runs: [{ runId: "rr-8c118ddf811cfdda", role: "primary", status: "succeeded" }],
-  },
-  {
-    pointId: "point-4ec389",
-    pointRevisionId: "pointrev-853ac3",
-    canonicalKey: "relay-d5",
-    displayName: "Relay / d=5",
-    status: "complete",
-    dimensions: { method: "Relay", distance: 5 },
-    metrics: {
-      per_round_ler: reading(0.00118, 0.00097, 0.00142),
-      block_ler: reading(0.0117, 0.0101, 0.0135),
-      logical_errors: reading(118),
-      shots: reading(100000),
-    },
-    acceptedResultId: "result-01967f",
-    observationCount: 100000,
-    candidateCount: 2,
-    settingDigest: digest("a5d0"),
-    pointRevisionDigest: digest("c9ee"),
-    resultHistory: [
-      { resultId: "result-01967f", disposition: "accepted", sourceRunIds: ["rr-e930cd493ef98738", "rr-0a30a4a38abbf215"] },
-      { resultId: "result-5e22ad", disposition: "superseded", sourceRunIds: ["rr-e930cd493ef98738"] },
-    ],
-    artifacts: [
-      { label: "结果 manifest", uri: "runs/rr-0a30a4a38abbf215/outputs/experiment-result.json" },
-    ],
-    runs: [
-      { runId: "rr-e930cd493ef98738", role: "primary", status: "succeeded" },
-      { runId: "rr-0a30a4a38abbf215", role: "continuation", status: "succeeded" },
-    ],
-  },
-  {
-    pointId: "point-ae63fe",
-    pointRevisionId: "pointrev-c8790a",
-    canonicalKey: "relay-d7",
-    displayName: "Relay / d=7",
-    status: "failed",
-    dimensions: { method: "Relay", distance: 7 },
+    settingDigest: digest(`relay100-setting:${key}`),
+    pointRevisionDigest: digest(`relay100-snapshot:${key}:202`),
+    artifacts: [{ label: "Controller snapshot", uri: "controller-snapshot:decoder_atomloss:202" }],
+    runs: [{ runId: row.runId, role: "primary", status: "running" }],
+  };
+});
+
+const relayQueuedPoints: ExperimentPoint[] = relayQueuedRows.map(([method, pTotal, queuedRunId]) => {
+  const key = `bb144|${method}|${pTotal.toFixed(4)}`;
+  return {
+    ...pointIds("relay100", key),
+    canonicalKey: key,
+    displayName: `BB144 / ${method} / p=${pTotal.toFixed(4)}`,
+    status: "queued",
+    dimensions: { method, p_total: pTotal, server: null },
     metrics: {},
-    candidateCount: 0,
-    failureReason: "结果 manifest 缺少 required metric: per_round_ler",
-    settingDigest: digest("a5d0"),
-    pointRevisionDigest: digest("a8de"),
-    runs: [{ runId: "rr-7f0501aa7357c5dc", role: "primary", status: "failed" }],
-  },
-  {
-    pointId: "point-49ec80",
-    pointRevisionId: "pointrev-2eaf64",
-    canonicalKey: "relay-d9",
-    displayName: "Relay / d=9",
-    status: "stale",
-    dimensions: { method: "Relay", distance: 9 },
-    metrics: {},
-    historicalMetrics: {
-      per_round_ler: reading(0.00037, 0.00025, 0.00052),
-      block_ler: reading(0.0037),
-      logical_errors: reading(37),
-      shots: reading(100000),
-    },
-    observationCount: 100000,
-    candidateCount: 0,
-    staleReason: "Resolution component digest changed",
-    changedComponents: ["resolution"],
-    settingDigest: digest("a5d1"),
-    pointRevisionDigest: digest("7b62"),
-    resultHistory: [
-      { resultId: "result-retained-7d1e22", disposition: "retained", sourceRunIds: ["rr-cfb84af0322e13d1"] },
-    ],
-    artifacts: [
-      { label: "历史结果 manifest", uri: "history/result-retained-7d1e22/experiment-result.json" },
-    ],
-    runs: [],
-  },
-  {
-    pointId: "point-c9a24d",
-    pointRevisionId: "pointrev-c22199",
-    canonicalKey: "baseline-d3",
-    displayName: "Baseline / d=3",
-    status: "complete",
-    dimensions: { method: "Baseline", distance: 3 },
-    metrics: {
-      per_round_ler: reading(0.0042, 0.00381, 0.00463),
-      block_ler: reading(0.0407),
-      logical_errors: reading(420),
-      shots: reading(100000),
-    },
-    acceptedResultId: "result-476fef",
-    observationCount: 100000,
+    sourceRecordId: queuedRunId,
     candidateCount: 1,
-    settingDigest: digest("47c1"),
-    pointRevisionDigest: digest("ad2e"),
-    runs: [{ runId: "rr-a696715866932e82", role: "primary", status: "succeeded" }],
-  },
+    settingDigest: digest(`relay100-setting:${key}`),
+    pointRevisionDigest: digest(`relay100-snapshot:${key}:202`),
+    artifacts: [{ label: "Controller snapshot", uri: "controller-snapshot:decoder_atomloss:202" }],
+    runs: [{ runId: queuedRunId, role: "primary", status: "queued" }],
+  };
+});
+
+interface HardwareEvidenceRow {
+  key: string;
+  displayName: string;
+  checkpoint: string;
+  fixture: string;
+  status: ExperimentPointStatus;
+  sourceRecordId: string;
+  metrics?: Record<string, MetricReading>;
+  observationCount?: number;
+  reviewReason?: string;
+  run?: ExperimentRunRef;
+  artifact: ExperimentArtifactRef;
+}
+
+const hardwareEvidenceRows: HardwareEvidenceRow[] = [
   {
-    pointId: "point-38d351",
-    pointRevisionId: "pointrev-51f8f0",
-    canonicalKey: "baseline-d5",
-    displayName: "Baseline / d=5",
+    key: "packed-reference-bb-hgp",
+    displayName: "Packed exact reference / BB144 + HGP",
+    checkpoint: "Packed reference",
+    fixture: "BB144 + HGP",
     status: "complete",
-    dimensions: { method: "Baseline", distance: 5 },
-    metrics: {
-      per_round_ler: reading(0.00191, 0.00165, 0.00220),
-      block_ler: reading(0.0189),
-      logical_errors: reading(191),
-      shots: reading(100000),
-    },
-    acceptedResultId: "result-f0daa5",
-    observationCount: 100000,
-    candidateCount: 1,
-    settingDigest: digest("47c1"),
-    pointRevisionDigest: digest("be17"),
-    runs: [{ runId: "rr-0d400d7c08497723", role: "primary", status: "succeeded" }],
+    sourceRecordId: "packed-reference-20260725",
+    metrics: { replay_cases: reading(4) },
+    observationCount: 4,
+    run: { runId: "rr-526e62d75b4460f1", role: "primary", status: "succeeded" },
+    artifact: { label: "Packed reference evidence", uri: ".trellis/tasks/07-25-sharingan-resolution-hardware-abi/evidence/bb144-packed-reference-20260725.md" },
   },
   {
-    pointId: "point-4200d7",
-    pointRevisionId: "pointrev-f04ea1",
-    canonicalKey: "baseline-d7",
-    displayName: "Baseline / d=7",
+    key: "host-baseline-bb144-shot70",
+    displayName: "16-bank host baseline / BB144 shot 70",
+    checkpoint: "Host baseline",
+    fixture: "BB144 shot 70",
     status: "complete",
-    dimensions: { method: "Baseline", distance: 7 },
-    metrics: {
-      per_round_ler: reading(0.00091, 0.00074, 0.00111),
-      block_ler: reading(0.0090),
-      logical_errors: reading(91),
-      shots: reading(100000),
-    },
-    acceptedResultId: "result-947dbd",
-    observationCount: 100000,
-    candidateCount: 1,
-    settingDigest: digest("47c1"),
-    pointRevisionDigest: digest("9d0c"),
-    runs: [{ runId: "rr-58c37b3644c71e70", role: "primary", status: "succeeded" }],
+    sourceRecordId: "host-baseline-bb144-shot70",
+    metrics: { scheduled_cycles: reading(2767), replay_cases: reading(1) },
+    observationCount: 1,
+    artifact: { label: "HLS baseline evidence", uri: ".trellis/tasks/07-25-sharingan-resolution-hardware-abi/evidence/hgp-selected-hls-baseline-20260725.md" },
   },
   {
-    pointId: "point-00b913",
-    pointRevisionId: "pointrev-3ca938",
-    canonicalKey: "baseline-d9",
-    displayName: "Baseline / d=9",
-    status: "stale",
-    dimensions: { method: "Baseline", distance: 9 },
-    metrics: {},
-    historicalMetrics: {
-      per_round_ler: reading(0.00044, 0.00031, 0.00059),
-      block_ler: reading(0.0044),
-      logical_errors: reading(44),
-      shots: reading(100000),
-    },
-    observationCount: 100000,
-    candidateCount: 0,
-    staleReason: "Resolution component digest changed",
-    changedComponents: ["resolution"],
-    settingDigest: digest("47c2"),
-    pointRevisionDigest: digest("786d"),
-    runs: [],
+    key: "host-baseline-hgp-selected",
+    displayName: "16-bank host baseline / HGP shots 17, 18",
+    checkpoint: "Host baseline",
+    fixture: "HGP selected",
+    status: "complete",
+    sourceRecordId: "host-baseline-hgp-selected",
+    metrics: { scheduled_cycles: reading(1550), replay_cases: reading(2) },
+    observationCount: 2,
+    artifact: { label: "HGP selected evidence", uri: ".trellis/tasks/07-25-sharingan-resolution-hardware-abi/evidence/hgp-selected-hls-baseline-20260725.md" },
+  },
+  {
+    key: "scan-microkernel-bb144-shot70",
+    displayName: "Scan microkernel / BB144 shot 70",
+    checkpoint: "Scan microkernel",
+    fixture: "BB144 shot 70",
+    status: "complete",
+    sourceRecordId: "scan-microkernel-bb144-shot70",
+    metrics: { raw_cycles: reading(1880), clock_ns: reading(3.58), lut: reading(198467), replay_cases: reading(1) },
+    observationCount: 1,
+    artifact: { label: "Implementation checkpoint", uri: ".trellis/tasks/07-25-sharingan-resolution-hardware-abi/implement.md" },
+  },
+  {
+    key: "full-boundary-bb144-shot70",
+    displayName: "Full boundary canary / BB144 shot 70",
+    checkpoint: "Full boundary",
+    fixture: "BB144 shot 70",
+    status: "complete",
+    sourceRecordId: "rr-f7556c7dd0a75caf",
+    metrics: { raw_cycles: reading(4812), replay_cases: reading(1) },
+    observationCount: 1,
+    run: { runId: "rr-f7556c7dd0a75caf", role: "primary", status: "succeeded" },
+    artifact: { label: "Implementation checkpoint", uri: ".trellis/tasks/07-25-sharingan-resolution-hardware-abi/implement.md" },
+  },
+  {
+    key: "candidate-materializer-bb144-shot70",
+    displayName: "Candidate materializer HLS / BB144 shot 70",
+    checkpoint: "Materializer HLS",
+    fixture: "BB144 shot 70",
+    status: "running",
+    sourceRecordId: "rr-88a2509aa800f2d7",
+    run: { runId: "rr-88a2509aa800f2d7", role: "primary", status: "running" },
+    artifact: { label: "Controller snapshot", uri: "controller-snapshot:decoder_atomloss:202" },
+  },
+  {
+    key: "canonical-materializer-bb144-shot70",
+    displayName: "Canonical materializer HLS / BB144 shot 70",
+    checkpoint: "Materializer HLS",
+    fixture: "BB144 shot 70 canonical",
+    status: "running",
+    sourceRecordId: "rr-964358966cbdaf93",
+    run: { runId: "rr-964358966cbdaf93", role: "primary", status: "running" },
+    artifact: { label: "Controller snapshot", uri: "controller-snapshot:decoder_atomloss:202" },
+  },
+  {
+    key: "i0-census-bb144",
+    displayName: "I0 capacity census / BB144 midpoint-500",
+    checkpoint: "Capacity census",
+    fixture: "BB144 midpoint-500",
+    status: "running",
+    sourceRecordId: "rr-9d1d08fa493b739d",
+    metrics: { progress: reading(0.138), sampled_shots: reading(69), resolution_invocations: reading(3) },
+    observationCount: 69,
+    run: { runId: "rr-9d1d08fa493b739d", role: "replacement", status: "running" },
+    artifact: { label: "Controller snapshot", uri: "controller-snapshot:decoder_atomloss:202" },
+  },
+  {
+    key: "i0-census-hgp-rb9-b2",
+    displayName: "I0 capacity census / HGP RB9 B2 midpoint-500",
+    checkpoint: "Capacity census",
+    fixture: "HGP RB9 B2 midpoint-500",
+    status: "running",
+    sourceRecordId: "rr-a0280cafe2e3b7ca",
+    metrics: { progress: reading(0.41), sampled_shots: reading(205), resolution_invocations: reading(14) },
+    observationCount: 205,
+    run: { runId: "rr-a0280cafe2e3b7ca", role: "primary", status: "running" },
+    artifact: { label: "Controller snapshot", uri: "controller-snapshot:decoder_atomloss:202" },
+  },
+  {
+    key: "packed-rom-u200-bb70",
+    displayName: "Packed-ROM U200 HLS / BB70",
+    checkpoint: "U200 HLS",
+    fixture: "BB70 packed ROM",
+    status: "running",
+    sourceRecordId: "rr-dc5d592764edd011",
+    reviewReason: "Controller 权威状态仍为 running；该快照同时记录 remote runtime 缺失，observation 为 unknown，不能推断为失败或完成。",
+    run: { runId: "rr-dc5d592764edd011", role: "primary", status: "running" },
+    artifact: { label: "Controller snapshot", uri: "controller-snapshot:decoder_atomloss:202" },
   },
 ];
 
-const throughputPoints: ExperimentPoint[] = [
-  ["Native", 1, "complete", 152, 18.4],
-  ["Native", 4, "complete", 534, 24.1],
-  ["Native", 16, "running", undefined, undefined],
-  ["Native", 64, "planned", undefined, undefined],
-  ["Fused", 1, "complete", 186, 16.7],
-  ["Fused", 4, "complete", 668, 21.6],
-  ["Fused", 16, "complete", 1814, 44.2],
-  ["Fused", 64, "failed", undefined, undefined],
-].map(([engine, batch, status, throughput, latency], index) => {
-  const pointStatus = status as ExperimentPointStatus;
-  const complete = pointStatus === "complete";
-  const metrics: Record<string, MetricReading> = complete
-    ? {
-        samples_per_second: reading(Number(throughput)),
-        p95_latency_ms: reading(Number(latency)),
-      }
-    : {};
-  return {
-    pointId: `point-throughput-${index + 1}`,
-    pointRevisionId: `pointrev-throughput-${index + 1}`,
-    canonicalKey: `${String(engine).toLowerCase()}-batch-${batch}`,
-    displayName: `${engine} / batch=${batch}`,
-    status: pointStatus,
-    dimensions: { engine: String(engine), batch_size: Number(batch) },
-    metrics,
-    acceptedResultId: complete ? `result-throughput-${index + 1}` : undefined,
-    observationCount: complete ? 500 : undefined,
-    candidateCount: complete ? 1 : 0,
-    failureReason: pointStatus === "failed" ? "运行在同步输出前失败" : undefined,
-    settingDigest: digest(`t${index}`),
-    pointRevisionDigest: digest(`p${index}`),
-    runs:
-      pointStatus === "running"
-        ? [{ runId: "rr-40e67f346cc2cf39", role: "primary" as const, status: "running" as const }]
-        : pointStatus === "failed"
-          ? [{ runId: "rr-1c2651a1b9fa8af0", role: "primary" as const, status: "failed" as const }]
-          : complete
-            ? [{ runId: runId(`throughput-${index}`), role: "primary" as const, status: "succeeded" as const }]
-            : [],
-  };
-});
+const hardwareEvidencePoints: ExperimentPoint[] = hardwareEvidenceRows.map((row) => ({
+  ...pointIds("hardware", row.key),
+  canonicalKey: row.key,
+  displayName: row.displayName,
+  status: row.status,
+  dimensions: { checkpoint: row.checkpoint, fixture: row.fixture },
+  metrics: row.metrics ?? {},
+  sourceRecordId: row.sourceRecordId,
+  observationCount: row.observationCount,
+  candidateCount: 1,
+  reviewReason: row.reviewReason,
+  settingDigest: digest(`hardware-setting:${row.key}`),
+  pointRevisionDigest: digest(`hardware-snapshot:${row.key}:202`),
+  artifacts: [row.artifact],
+  runs: row.run ? [row.run] : [],
+}));
 
-const compilerPoints: ExperimentPoint[] = [
-  ["clang", "O2", "complete", 42.7],
-  ["clang", "O3", "review", 46.1],
-  ["gcc", "O2", "complete", 51.8],
-  ["gcc", "O3", "queued", undefined],
-].map(([toolchain, level, status, duration], index) => {
-  const pointStatus = status as ExperimentPointStatus;
-  const hasMetric = typeof duration === "number";
-  const metrics: Record<string, MetricReading> = hasMetric
-    ? { build_seconds: reading(Number(duration)) }
-    : {};
-  return {
-    pointId: `point-compiler-${index + 1}`,
-    pointRevisionId: `pointrev-compiler-${index + 1}`,
-    canonicalKey: `${toolchain}-${String(level).toLowerCase()}`,
-    displayName: `${toolchain} / ${level}`,
-    status: pointStatus,
-    dimensions: { toolchain: String(toolchain), optimization: String(level) },
-    metrics,
-    acceptedResultId: pointStatus === "complete" ? `result-compiler-${index + 1}` : undefined,
-    observationCount: hasMetric ? 20 : undefined,
-    candidateCount: pointStatus === "review" ? 1 : pointStatus === "complete" ? 1 : 0,
-    settingDigest: digest(`c${index}`),
-    pointRevisionDigest: digest(`r${index}`),
-    runs:
-      pointStatus === "queued"
-        ? [{ runId: "rr-af67bf25f699380a", role: "primary" as const, status: "queued" as const }]
-        : hasMetric
-          ? [{ runId: runId(`compiler-${index}`), role: "primary" as const, status: "succeeded" as const }]
-          : [],
-  };
-});
+const canonicalCounts = emptyStatusCounts();
+canonicalCounts.complete = 219;
+canonicalCounts.review = 69;
+
+const relayCounts = emptyStatusCounts();
+relayCounts.running = 11;
+relayCounts.queued = 204;
+
+const hardwareCounts = emptyStatusCounts();
+hardwareCounts.complete = 5;
+hardwareCounts.running = 5;
 
 export const experimentDemoStudies: ExperimentStudy[] = [
   {
-    studyId: "study-59c18a",
-    canonicalKey: "ler-main-sweep",
-    displayName: "LER / Main sweep",
-    description: "当前设计中的 decoder、distance 与 accepted LER 结果。",
-    activeRevisionId: "design-8d19c4e8",
-    previousRevisionId: "design-4a2b13dc",
-    planDigest: digest("lerplan"),
-    eventCursor: 1842,
-    refreshedAt: "2026-07-26T10:42:18Z",
-    dimensions: { method: "Method", distance: "Distance" },
+    studyId: "decoder-canonical-ler",
+    canonicalKey: "section-6-canonical-ler",
+    displayName: "§6 Canonical LER sweep",
+    description: "主实验 288/288 个 canonical 行已存在；69 个 relay_ours_050 点仍被 strict-convergence audit 标记为需补证。下表展示 BB144 的 24 点切片。",
+    mode: "project-snapshot",
+    activeRevisionId: "snapshot-20260727-canonical",
+    planDigest: "sha256:b30d973eb2bc31802961a697712eef49fcc2cfc906f9da84a5356238353f3aec",
+    eventCursor: 202,
+    refreshedAt: experimentDemoProject.snapshotAt,
+    dimensions: { method: "Method", p_total: "p_total" },
     metrics: [
-      { key: "per_round_ler", label: "Per-round LER", shortLabel: "LER / round", unit: "1/round", format: "scientific", scale: "log" },
-      { key: "block_ler", label: "Block LER", shortLabel: "Block LER", format: "percent", scale: "log" },
+      { key: "ler", label: "Logical error rate", shortLabel: "LER", format: "scientific", scale: "log" },
+      { key: "ler_per_round", label: "LER per round", shortLabel: "LER / round", unit: "1/round", format: "scientific", scale: "log" },
+      { key: "convergence_rate", label: "Convergence rate", shortLabel: "Convergence", format: "percent", scale: "linear" },
       { key: "logical_errors", label: "Logical errors", shortLabel: "Errors", format: "integer", scale: "linear" },
       { key: "shots", label: "Shots", shortLabel: "Shots", format: "integer", scale: "linear" },
+      { key: "wall_time", label: "Wall time", shortLabel: "Wall time", unit: "s", format: "duration", scale: "linear" },
     ],
-    primaryMetric: "per_round_ler",
+    primaryMetric: "ler",
     presentation: {
-      xDimension: "distance",
+      xDimension: "p_total",
       seriesDimension: "method",
       rowDimension: "method",
-      columnDimension: "distance",
+      columnDimension: "p_total",
     },
-    impact: { unchanged: 9, new: 1, stale: 2, archived: 1 },
-    points: lerPoints,
+    impact: { unchanged: 0, new: 0, stale: 0, archived: 0 },
+    points: canonicalLerPoints,
+    pointCount: 288,
+    statusCounts: canonicalCounts,
   },
   {
-    studyId: "study-77b226",
-    canonicalKey: "throughput-batch-sweep",
-    displayName: "Throughput / Batch sweep",
-    description: "不同执行引擎与 batch size 的 accepted throughput。",
-    activeRevisionId: "design-c91a778e",
-    previousRevisionId: "design-bb908f42",
-    planDigest: digest("throughputplan"),
-    eventCursor: 1831,
-    refreshedAt: "2026-07-26T10:39:02Z",
-    dimensions: { engine: "Engine", batch_size: "Batch size" },
+    studyId: "decoder-relay100-active",
+    canonicalKey: "relay100-main-sweep-20260727",
+    displayName: "Relay-100 main sweep",
+    description: "Controller 序列 202：全任务 11 running、2 registered、202 queued；registered 在摘要中计入待调度。下表展示 BB144 的 5 个运行中与 27 个排队点。",
+    mode: "project-snapshot",
+    activeRevisionId: "controller-sequence-202",
+    planDigest: digest("relay100-main-sweep-20260727:controller-sequence-202"),
+    eventCursor: 202,
+    refreshedAt: experimentDemoProject.snapshotAt,
+    dimensions: { method: "Method", p_total: "p_total", server: "Server" },
     metrics: [
-      { key: "samples_per_second", label: "Samples per second", shortLabel: "samples/s", unit: "samples/s", format: "integer", scale: "linear" },
-      { key: "p95_latency_ms", label: "P95 latency", shortLabel: "P95", unit: "ms", format: "decimal", scale: "linear" },
+      { key: "progress", label: "Controller progress", shortLabel: "Progress", format: "percent", scale: "linear" },
+      { key: "shots", label: "Cumulative shots", shortLabel: "Shots", format: "integer", scale: "linear" },
+      { key: "logical_errors", label: "Logical errors", shortLabel: "Errors", format: "integer", scale: "linear" },
     ],
-    primaryMetric: "samples_per_second",
+    primaryMetric: "progress",
     presentation: {
-      xDimension: "batch_size",
-      seriesDimension: "engine",
-      rowDimension: "engine",
-      columnDimension: "batch_size",
+      xDimension: "p_total",
+      seriesDimension: "method",
+      rowDimension: "method",
+      columnDimension: "p_total",
     },
-    impact: { unchanged: 7, new: 1, stale: 0, archived: 0 },
-    points: throughputPoints,
+    impact: { unchanged: 0, new: 0, stale: 0, archived: 0 },
+    points: [...relayRunningPoints, ...relayQueuedPoints],
+    pointCount: 215,
+    statusCounts: relayCounts,
   },
   {
-    studyId: "study-d83e11",
-    canonicalKey: "compiler-optimization-matrix",
-    displayName: "Compiler / Optimization matrix",
-    description: "Toolchain 与 optimization level 的构建时间验证。",
-    activeRevisionId: "design-5c4a03b7",
-    previousRevisionId: "design-e13cf859",
-    planDigest: digest("compilerplan"),
-    eventCursor: 1816,
-    refreshedAt: "2026-07-26T10:31:47Z",
-    dimensions: { toolchain: "Toolchain", optimization: "Optimization" },
+    studyId: "decoder-resolution-hardware",
+    canonicalKey: "07-25-sharingan-resolution-hardware-abi",
+    displayName: "Resolution hardware verification",
+    description: "已记录 5 组 supporting evidence，并映射 Controller 中 5 个权威 active run；它们不等同于完整 RTL fixture matrix 或 production acceptance。",
+    mode: "project-snapshot",
+    activeRevisionId: "snapshot-20260727-hardware",
+    planDigest: digest("sharingan-resolution-hardware-abi:20260727"),
+    eventCursor: 202,
+    refreshedAt: experimentDemoProject.snapshotAt,
+    dimensions: { checkpoint: "Checkpoint", fixture: "Fixture" },
     metrics: [
-      { key: "build_seconds", label: "Build duration", shortLabel: "Duration", unit: "s", format: "duration", scale: "linear" },
+      { key: "raw_cycles", label: "Raw RTL cycles", shortLabel: "Raw cycles", unit: "cycles", format: "integer", scale: "linear" },
+      { key: "scheduled_cycles", label: "Scheduled issue cycles", shortLabel: "Scheduled", unit: "cycles", format: "integer", scale: "linear" },
+      { key: "clock_ns", label: "Estimated clock", shortLabel: "Clock", unit: "ns", format: "decimal", scale: "linear" },
+      { key: "lut", label: "Estimated LUT", shortLabel: "LUT", format: "integer", scale: "linear" },
+      { key: "progress", label: "Controller progress", shortLabel: "Progress", format: "percent", scale: "linear" },
+      { key: "sampled_shots", label: "Sampled shots", shortLabel: "Shots", format: "integer", scale: "linear" },
+      { key: "resolution_invocations", label: "Resolution invocations", shortLabel: "Invoked", format: "integer", scale: "linear" },
+      { key: "replay_cases", label: "Validated replay cases", shortLabel: "Replays", format: "integer", scale: "linear" },
     ],
-    primaryMetric: "build_seconds",
+    primaryMetric: "raw_cycles",
     presentation: {
-      xDimension: "optimization",
-      seriesDimension: "toolchain",
-      rowDimension: "toolchain",
-      columnDimension: "optimization",
+      xDimension: "checkpoint",
+      seriesDimension: "fixture",
+      rowDimension: "checkpoint",
+      columnDimension: "fixture",
     },
-    impact: { unchanged: 4, new: 0, stale: 0, archived: 0 },
-    points: compilerPoints,
+    impact: { unchanged: 0, new: 0, stale: 0, archived: 0 },
+    points: hardwareEvidencePoints,
+    pointCount: 10,
+    statusCounts: hardwareCounts,
   },
 ];
 
@@ -561,15 +579,7 @@ export function pointStatusCounts(
   study: ExperimentStudy,
 ): Record<ExperimentPointStatus, number> {
   if (study.statusCounts) return { ...study.statusCounts };
-  const counts: Record<ExperimentPointStatus, number> = {
-    complete: 0,
-    running: 0,
-    queued: 0,
-    review: 0,
-    failed: 0,
-    stale: 0,
-    planned: 0,
-  };
+  const counts = emptyStatusCounts();
   for (const point of study.points) counts[point.status] += 1;
   return counts;
 }
