@@ -202,15 +202,13 @@ export default function App() {
         return refreshed ? { kind: "queue", value: refreshed } : null;
       }
       if (current?.kind === "queue-batch") {
-        const selected = new Set(current.value.map((entry) => entry.job.run_id));
-        const refreshed = (document?.snapshot?.queue ?? []).filter(
-          (entry) => (
-            selected.has(entry.job.run_id)
-            && entry.state.status === "queued"
-            && !entry.state.placement_update
-            && typeof entry.state.revision === "number"
-          ),
+        const entriesByRunId = new Map(
+          (document?.snapshot?.queue ?? []).map((entry) => [entry.job.run_id, entry]),
         );
+        const refreshed = current.value.flatMap((entry) => {
+          const replacement = entriesByRunId.get(entry.job.run_id);
+          return replacement?.state.status === "queued" ? [replacement] : [];
+        });
         return refreshed.length ? { kind: "queue-batch", value: refreshed } : null;
       }
       return current;

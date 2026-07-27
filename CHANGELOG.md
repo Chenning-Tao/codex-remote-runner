@@ -5,6 +5,13 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+### Fixed
+
+- Kept live queue snapshots from re-enabling an in-flight batch server update and
+  coalesced duplicate batch requests so they cannot race on preparation revisions.
+- Reported batch preparation as completed work against a stable submitted total,
+  instead of presenting a shrinking remaining count as a new preparation estimate.
+
 ## 0.3.6 - 2026-07-27
 
 ### Changed

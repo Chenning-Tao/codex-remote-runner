@@ -7,7 +7,7 @@ from pathlib import Path
 from starlette.testclient import TestClient
 
 from remote_runner._internal.queue_control import QueuePreparationError
-from remote_runner.web_app import DashboardProbe, create_app
+from remote_runner.web_app import DashboardProbe, InFlightBatchUpdates, create_app
 
 
 def arguments() -> argparse.Namespace:
@@ -26,6 +26,40 @@ def static_root(tmp_path: Path) -> Path:
         "<!doctype html><title>Remote Runner</title>", encoding="utf-8"
     )
     return root
+
+
+def test_identical_in_flight_batch_updates_share_one_operation() -> None:
+    updates = InFlightBatchUpdates()
+    key = (
+        (("rr-0123456789abcdef", 3), ("rr-fedcba9876543210", 8)),
+        ("compute-a", "compute-b"),
+    )
+    calls = 0
+
+    async def exercise() -> None:
+        nonlocal calls
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def operation() -> tuple[list[str], list[dict[str, str]]]:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return ["rr-0123456789abcdef"], []
+
+        first = asyncio.create_task(updates.run(key, operation))
+        await started.wait()
+        second = asyncio.create_task(updates.run(key, operation))
+        await asyncio.sleep(0)
+        release.set()
+
+        assert await first == (["rr-0123456789abcdef"], [])
+        assert await second == (["rr-0123456789abcdef"], [])
+
+    asyncio.run(exercise())
+
+    assert calls == 1
 
 
 def test_dashboard_probe_publishes_successful_snapshot() -> None:
@@ -554,9 +588,7 @@ def test_web_batch_queue_update_rejects_duplicate_runs(tmp_path: Path) -> None:
         )
 
     assert response.status_code == 400
-    assert response.json() == {
-        "error": "batch queue update contains duplicate runs"
-    }
+    assert response.json() == {"error": "batch queue update contains duplicate runs"}
 
 
 def test_web_queue_update_reports_conflict_and_refreshes_snapshot(

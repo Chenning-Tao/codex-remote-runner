@@ -101,6 +101,12 @@ these external standards and design-system references:
 - A batch write preserves each task's independent revision guard and preparation
   lifecycle. Partial completion keeps failed tasks selected and reports their
   controller errors instead of presenting the batch as atomic.
+- A pending batch keeps its original task set and draft server selection stable
+  across live snapshots. Identical in-flight submissions share one backend update
+  so preparation reservations cannot race each other.
+- Pending preparation keeps the submitted task total stable and reports completed
+  preparation work against its initial total. Once preparation reaches that total,
+  the status distinguishes final queue application from additional preparation.
 - Server selection lists the task's prepared servers plus compatible configured
   project servers. Compatibility respects project enablement, minimum cores,
   testing-pool membership, testing slots, and portable-output requirements.
