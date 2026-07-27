@@ -1187,6 +1187,7 @@ def update_queued_job(
         ]
         updated_job = dict(job)
         changed = has_active_reservation
+        ordering_changed = False
 
         if eligible_servers is not None:
             if not isinstance(eligible_servers, list) or not eligible_servers:
@@ -1233,6 +1234,7 @@ def update_queued_job(
                 + 1024
             )
             changed = True
+            ordering_changed = True
 
         if queue_priority is not None and queue_priority != job["queue_priority"]:
             updated_job["queue_priority"] = queue_priority
@@ -1251,6 +1253,7 @@ def update_queued_job(
                 + 1024
             )
             changed = True
+            ordering_changed = True
 
         jobs_to_write: dict[str, dict[str, Any]] = {}
         if move is not None:
@@ -1299,6 +1302,7 @@ def update_queued_job(
                 moved_neighbor = {**neighbor, "queue_position": target_position}
                 jobs_to_write[str(moved_neighbor["run_id"])] = moved_neighbor
                 changed = True
+                ordering_changed = True
 
         if not changed:
             return {"changed": False, "job": job, "state": state}
@@ -1313,21 +1317,33 @@ def update_queued_job(
 
         updated_at = utc_now()
         updated_state = state
-        # Invalidate any dispatcher selection made from the previous ordering.
-        for candidate, candidate_state in queued_rows:
+        states_by_run_id = {
+            str(candidate["run_id"]): candidate_state
+            for candidate, candidate_state in queued_rows
+        }
+        # Ordering changes invalidate selections across the queue. Placement-only
+        # edits invalidate just the changed record; otherwise a sequential batch
+        # invalidates its own remaining expected revisions after its first update.
+        state_run_ids = (
+            [str(candidate["run_id"]) for candidate, _state in queued_rows]
+            if ordering_changed
+            else list(jobs_to_write)
+        )
+        for changed_run_id in state_run_ids:
+            candidate_state = states_by_run_id[changed_run_id]
             bumped = {
                 **candidate_state,
                 "revision": int(candidate_state["revision"]) + 1,
                 "updated_at": updated_at,
             }
-            if candidate["run_id"] == validated_run_id and has_active_reservation:
+            if changed_run_id == validated_run_id and has_active_reservation:
                 bumped.pop("placement_update", None)
-            _validate_state(bumped, str(candidate["run_id"]))
+            _validate_state(bumped, changed_run_id)
             write_yaml(
-                _queue_entry_dir(paths, str(candidate["run_id"])) / "state.yaml",
+                _queue_entry_dir(paths, changed_run_id) / "state.yaml",
                 bumped,
             )
-            if candidate["run_id"] == validated_run_id:
+            if changed_run_id == validated_run_id:
                 updated_state = bumped
 
         return {"changed": True, "job": updated_job, "state": updated_state}
