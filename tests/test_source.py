@@ -117,3 +117,50 @@ def test_explicit_server_failure_never_falls_back(tmp_path: Path) -> None:
             targets=[DeploymentTarget("archive", str(tmp_path / "missing.git"))],
             explicit_server="archive",
         )
+
+
+def test_remote_preparation_uses_managed_ssh_for_push_and_verification(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    revision = "a" * 40
+    ref = f"refs/remote-runner/example/{revision}"
+    calls: list[list[str]] = []
+
+    def runner(
+        args: list[str], *, cwd: Path | None = None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if "--show-toplevel" in args:
+            stdout = str(source)
+        elif "HEAD^{commit}" in args:
+            stdout = revision
+        elif "status" in args:
+            stdout = ""
+        elif "ls-remote" in args:
+            stdout = f"{revision}\t{ref}"
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    result = prepare_revision(
+        source,
+        project_id="example",
+        targets=[DeploymentTarget("compute-a", "compute-a:/srv/repo.git")],
+        timeout=17,
+        runner=runner,
+    )
+
+    network_calls = [args for args in calls if "push" in args or "ls-remote" in args]
+    assert len(network_calls) == 2
+    for args in network_calls:
+        assert args[:2] == ["git", "-c"]
+        ssh_command = args[2]
+        assert ssh_command.startswith("core.sshCommand=ssh ")
+        assert "BatchMode=yes" in ssh_command
+        assert "ConnectTimeout=17" in ssh_command
+        assert "ControlMaster=auto" in ssh_command
+        assert "ControlPersist=60" in ssh_command
+        assert "ControlPath=~/.ssh/remote-runner-%C" in ssh_command
+    assert result.prepared_servers == ("compute-a",)

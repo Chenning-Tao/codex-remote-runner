@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+from .remote_shell import ssh_connection_options
 
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -118,6 +121,11 @@ def runner_ref(project_id: str, revision: str) -> str:
     return f"refs/remote-runner/{project_id}/{revision}"
 
 
+def _git_with_managed_ssh(timeout: int) -> list[str]:
+    ssh_command = shlex.join(["ssh", *ssh_connection_options(timeout)])
+    return ["git", "-c", f"core.sshCommand={ssh_command}"]
+
+
 def prepare_revision(
     source_repo: Path,
     *,
@@ -162,7 +170,7 @@ def prepare_revision(
             _checked(
                 runner,
                 [
-                    "git",
+                    *_git_with_managed_ssh(timeout),
                     "-C",
                     str(source_repo),
                     "push",
@@ -174,7 +182,13 @@ def prepare_revision(
             )
             listed = _checked(
                 runner,
-                ["git", "ls-remote", "--exit-code", target.remote_url, ref],
+                [
+                    *_git_with_managed_ssh(timeout),
+                    "ls-remote",
+                    "--exit-code",
+                    target.remote_url,
+                    ref,
+                ],
                 timeout=timeout,
             )
             fields = listed.split()
