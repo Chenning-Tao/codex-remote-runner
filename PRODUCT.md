@@ -73,6 +73,9 @@ lifecycle operations across a project-owned server pool.
 - Server details expose controller-wide standard and test slot limits. Queue
   details can switch queued work between those lanes. Capacity changes are
   revision-guarded, admission-only, and never preempt running work.
+- Server details can pause or resume controller-wide dispatch admission for one
+  server. Pausing requires explicit confirmation, never stops existing work,
+  and refreshes authoritative drain state before the UI reports completion.
 - Desktop web behavior is the acceptance target for the first queue-control
   increment. Queue-control layout and ergonomics on narrow/mobile viewports are
   explicitly outside this increment's acceptance scope.

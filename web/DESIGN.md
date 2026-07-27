@@ -81,6 +81,13 @@ these external standards and design-system references:
   pointer click.
 - Stop requires an explicit in-panel confirmation, disables controls while the
   request is pending, and never assumes success before the controller responds.
+- Server details expose controller-wide pause and resume actions. Pausing uses
+  an inline confirmation that states existing work continues; both actions
+  disable conflicting controls and refresh authoritative drain state before the
+  panel changes status.
+- Transient success notices may dismiss automatically after a readable delay and
+  remain manually dismissible. Partial-failure and failure notices persist until
+  the user closes them or a later action replaces them.
 - Live updates use server-sent events. Reconnection is automatic and announced
   without blocking use of the last snapshot.
 - Motion respects `prefers-reduced-motion`.

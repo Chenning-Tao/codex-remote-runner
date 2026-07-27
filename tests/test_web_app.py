@@ -526,6 +526,84 @@ def test_web_capacity_update_requires_revision_and_refreshes_snapshot(
     assert server["capacity_revision"] == 3
 
 
+def test_web_server_drain_and_resume_require_confirmation_and_refresh_snapshot(
+    tmp_path: Path,
+) -> None:
+    snapshots = iter(
+        (
+            {
+                "servers": [{"name": "compute-a"}],
+                "queue": [],
+                "server_drains": {"scope": "controller", "servers": {}},
+            },
+            {
+                "servers": [{"name": "compute-a"}],
+                "queue": [],
+                "server_drains": {
+                    "scope": "controller",
+                    "servers": {"compute-a": {"requested_by_project": "example"}},
+                },
+            },
+            {
+                "servers": [{"name": "compute-a"}],
+                "queue": [],
+                "server_drains": {"scope": "controller", "servers": {}},
+            },
+        )
+    )
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: next(snapshots),
+    )
+    asyncio.run(probe.probe_once())
+    calls: list[tuple[str, bool]] = []
+
+    def drain_query(
+        _args: argparse.Namespace,
+        server: str,
+        drained: bool,
+    ) -> dict[str, object]:
+        calls.append((server, drained))
+        return {"changed": True, "server": server, "drained": drained}
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        server_drain_query=drain_query,
+    )
+    request = {"server": "compute-a", "confirm": True}
+
+    with TestClient(app) as client:
+        rejected = client.post("/api/servers/compute-a/drain", json=request)
+        assert rejected.status_code == 403
+        invalid_confirmation = client.post(
+            "/api/servers/compute-a/drain",
+            headers={"x-remote-runner-action": "drain-server"},
+            json={"server": "compute-a", "confirm": False},
+        )
+        assert invalid_confirmation.status_code == 400
+        drained = client.post(
+            "/api/servers/compute-a/drain",
+            headers={"x-remote-runner-action": "drain-server"},
+            json=request,
+        )
+        resumed = client.post(
+            "/api/servers/compute-a/resume",
+            headers={"x-remote-runner-action": "resume-server"},
+            json=request,
+        )
+
+    assert drained.status_code == 200
+    assert drained.json()["status"] == "drained"
+    assert resumed.status_code == 200
+    assert resumed.json()["status"] == "resumed"
+    assert calls == [("compute-a", True), ("compute-a", False)]
+    assert probe.document()["snapshot"]["server_drains"]["servers"] == {}
+
+
 def test_web_batch_queue_update_reports_partial_results_and_refreshes_snapshot(
     tmp_path: Path,
 ) -> None:
