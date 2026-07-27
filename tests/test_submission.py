@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 from pathlib import Path
 
@@ -35,6 +36,48 @@ def config(tmp_path: Path) -> Path:
         },
     )
     return path
+
+
+def test_experiment_binding_template_is_finalized_for_exact_run(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "binding.json"
+    path.write_text(
+        json.dumps(
+            {
+                "kind": "run_binding",
+                "schema_version": 1,
+                "targets": [
+                    {
+                        "study_id": "study-0123456789abcdef",
+                        "origin_design_revision_id": "design-0123456789abcdef",
+                        "plan_digest": "sha256:" + "1" * 64,
+                        "point_id": "point-0123456789abcdef",
+                        "point_revision_id": "pointrev-0123456789abcdef",
+                        "point_revision_digest": "sha256:" + "2" * 64,
+                        "setting_digest": "sha256:" + "3" * 64,
+                        "result_group_id": "primary",
+                        "contribution_role": "primary",
+                    }
+                ],
+                "expects_result_manifest": False,
+                "metadata": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    binding = submission._finalize_experiment_binding(
+        path,
+        run_id="rr-0123456789abcdef",
+        source_revision="a" * 40,
+    )
+
+    assert binding is not None
+    assert binding["binding_id"].startswith("binding-")
+    assert binding["run_id"] == "rr-0123456789abcdef"
+    assert binding["source_revision"] == "a" * 40
+    assert binding["binding_digest"].startswith("sha256:")
 
 
 @pytest.mark.parametrize("override_name", [None, "task-repo"])

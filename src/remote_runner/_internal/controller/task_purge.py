@@ -18,6 +18,7 @@ from ..execution_registry import (
 )
 from ..stopping import stop as stop_execution
 from ..task_purge import purge_remote_run_artifacts, purge_remote_worktree
+from .experiments import experiment_purge_blockers
 from .purge_common import (
     load_purge_inventory,
     output_overlap_blockers,
@@ -105,6 +106,15 @@ def _current_inventory(paths: Any, task_id: str) -> dict[str, Any]:
         )
 
     blockers.extend(output_overlap_blockers(records, jobs_by_id, current))
+    try:
+        blockers.extend(experiment_purge_blockers(paths, selected_ids))
+    except (OSError, RuntimeError, ValueError) as exc:
+        blockers.append(
+            {
+                "run_id": "experiment-registry",
+                "error": f"experiment provenance could not be verified: {exc}",
+            }
+        )
 
     identities = sorted(
         {str(job["task_id"]) for job, _state in jobs_by_id.values()}

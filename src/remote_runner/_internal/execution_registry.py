@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .output_sync import enqueue_succeeded_output, is_configured
+from .experiment_contracts import normalize_run_binding
 from .output_paths import validate_resolved_output
 from .result_metadata import (
     LEGACY_RESULT_INTENT,
@@ -440,6 +441,14 @@ def validate_current_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("manifest source_revision must be a full Git SHA")
         if manifest.get("expected_revision") != source_revision:
             raise ValueError("manifest expected_revision must equal source_revision")
+    raw_experiment_binding = manifest.get("experiment_binding")
+    if raw_experiment_binding is not None:
+        experiment_binding = normalize_run_binding(raw_experiment_binding)
+        if experiment_binding["run_id"] != run_id:
+            raise ValueError("manifest experiment binding run_id mismatch")
+        if experiment_binding["source_revision"] != source_revision:
+            raise ValueError("manifest experiment binding source_revision mismatch")
+        manifest["experiment_binding"] = experiment_binding
     prepared_servers = manifest.get("prepared_servers")
     if prepared_servers is not None:
         if (

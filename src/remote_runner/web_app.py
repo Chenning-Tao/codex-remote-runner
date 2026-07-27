@@ -27,6 +27,8 @@ from ._internal.execution_registry import (
     resolve_project_config,
     validate_current_run_id,
 )
+from ._internal.experiment_client import request_query as request_experiment_query
+from ._internal.experiment_contracts import MAX_CONTRACT_BYTES
 from ._internal.queue_control import QueuePreparationError, request_queue_update
 from ._internal.stopping import request_stop
 
@@ -40,6 +42,10 @@ QueueUpdateQuery = Callable[[argparse.Namespace, str, dict[str, Any]], dict[str,
 CapacityUpdateQuery = Callable[
     [argparse.Namespace, str, dict[str, Any]], dict[str, Any]
 ]
+BatchUpdateKey = tuple[tuple[tuple[str, int], ...], tuple[str, ...]]
+BatchUpdateResult = tuple[list[str], list[dict[str, str]]]
+BatchUpdateOperation = Callable[[], Awaitable[BatchUpdateResult]]
+ExperimentQuery = Callable[[argparse.Namespace, dict[str, Any]], dict[str, Any]]
 
 
 def _concise_controller_error(exc: Exception) -> str:
@@ -185,6 +191,32 @@ class DashboardProbe:
             return self.document()
 
 
+class InFlightBatchUpdates:
+    def __init__(self) -> None:
+        self._tasks: dict[BatchUpdateKey, asyncio.Task[BatchUpdateResult]] = {}
+
+    async def run(
+        self,
+        key: BatchUpdateKey,
+        operation: BatchUpdateOperation,
+    ) -> BatchUpdateResult:
+        task = self._tasks.get(key)
+        if task is None:
+
+            async def execute() -> BatchUpdateResult:
+                return await operation()
+
+            task = asyncio.create_task(execute(), name="queue-batch-update")
+            self._tasks[key] = task
+
+            def discard(completed: asyncio.Task[BatchUpdateResult]) -> None:
+                if self._tasks.get(key) is completed:
+                    del self._tasks[key]
+
+            task.add_done_callback(discard)
+        return await asyncio.shield(task)
+
+
 class SecurityHeadersMiddleware:
     def __init__(self, app: Callable[..., Awaitable[None]]) -> None:
         self.app = app
@@ -225,11 +257,13 @@ def create_app(
     stop_query: StopQuery = request_stop,
     queue_update_query: QueueUpdateQuery = request_queue_update,
     capacity_update_query: CapacityUpdateQuery = request_capacity_update,
+    experiment_query: ExperimentQuery = request_experiment_query,
 ) -> Starlette:
     if not (static_root / "index.html").is_file():
         raise RuntimeError(
             f"web assets are unavailable at {static_root}; rebuild the web frontend"
         )
+    in_flight_batch_updates = InFlightBatchUpdates()
 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
@@ -246,6 +280,76 @@ def create_app(
             probe.document(),
             headers={"Cache-Control": "no-store"},
         )
+
+    async def experiment_query_endpoint(request: Request) -> Response:
+        content_type = (
+            request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        )
+        if content_type != "application/json":
+            return JSONResponse(
+                {"error": "experiment query must use application/json"},
+                status_code=415,
+            )
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > MAX_CONTRACT_BYTES:
+                    return JSONResponse(
+                        {"error": "experiment_query_too_large"}, status_code=413
+                    )
+            except ValueError:
+                return JSONResponse(
+                    {"error": "invalid content-length"}, status_code=400
+                )
+        try:
+            body = await request.body()
+            if len(body) > MAX_CONTRACT_BYTES:
+                return JSONResponse(
+                    {"error": "experiment_query_too_large"}, status_code=413
+                )
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"error": "experiment query must be a JSON object"}, status_code=400
+            )
+        query_args = argparse.Namespace(**vars(probe.args))
+        try:
+            result = await asyncio.to_thread(
+                experiment_query,
+                query_args,
+                payload,
+            )
+        except FileNotFoundError as exc:
+            return JSONResponse(
+                {"error": "experiment_not_found", "detail": str(exc)},
+                status_code=404,
+                headers={"Cache-Control": "no-store"},
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": "invalid_experiment_query", "detail": str(exc)},
+                status_code=400,
+                headers={"Cache-Control": "no-store"},
+            )
+        except (OSError, RuntimeError) as exc:
+            detail = _concise_controller_error(exc)
+            if "does not exist" in detail:
+                status_code = 404
+                error = "experiment_not_found"
+            elif "cursor expired" in detail or "revision conflict" in detail:
+                status_code = 409
+                error = "experiment_query_conflict"
+            else:
+                status_code = 502
+                error = "experiment_query_failed"
+            return JSONResponse(
+                {"error": error, "detail": detail},
+                status_code=status_code,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
     async def stop_endpoint(request: Request) -> Response:
         if request.headers.get("x-remote-runner-action") != "stop":
@@ -427,7 +531,9 @@ def create_app(
             or not isinstance(eligible_servers, list)
             or not eligible_servers
             or len(eligible_servers) > 100
-            or any(not isinstance(server, str) or not server for server in eligible_servers)
+            or any(
+                not isinstance(server, str) or not server for server in eligible_servers
+            )
             or len(set(eligible_servers)) != len(eligible_servers)
         ):
             return JSONResponse(
@@ -460,44 +566,49 @@ def create_app(
                 status_code=400,
             )
 
-        update_args = argparse.Namespace(**vars(probe.args))
-        succeeded: list[str] = []
-        failed: list[dict[str, str]] = []
-        for run_id, expected_revision in normalized_updates:
-            try:
-                await asyncio.to_thread(
-                    queue_update_query,
-                    update_args,
-                    run_id,
-                    {
-                        "expected_revision": expected_revision,
-                        "eligible_servers": eligible_servers,
-                    },
-                )
-                succeeded.append(run_id)
-            except QueuePreparationError as exc:
-                failed.append(
-                    {
-                        "run_id": run_id,
-                        "error": "queue_preparation_failed",
-                        "detail": str(exc),
-                    }
-                )
-            except (OSError, RuntimeError, ValueError) as exc:
-                detail = _concise_controller_error(exc)
-                if detail.startswith("queued run does not exist:"):
-                    code = "queue_not_found"
-                elif detail == "queued state revision conflict" or detail.endswith(
-                    "placement update in progress"
-                ):
-                    code = "queue_conflict"
-                elif detail.endswith(", not editable"):
-                    code = "queue_not_editable"
-                else:
-                    code = "invalid_queue_update"
-                failed.append({"run_id": run_id, "error": code, "detail": detail})
+        async def apply_updates() -> BatchUpdateResult:
+            update_args = argparse.Namespace(**vars(probe.args))
+            succeeded: list[str] = []
+            failed: list[dict[str, str]] = []
+            for run_id, expected_revision in normalized_updates:
+                try:
+                    await asyncio.to_thread(
+                        queue_update_query,
+                        update_args,
+                        run_id,
+                        {
+                            "expected_revision": expected_revision,
+                            "eligible_servers": eligible_servers,
+                        },
+                    )
+                    succeeded.append(run_id)
+                except QueuePreparationError as exc:
+                    failed.append(
+                        {
+                            "run_id": run_id,
+                            "error": "queue_preparation_failed",
+                            "detail": str(exc),
+                        }
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    detail = _concise_controller_error(exc)
+                    if detail.startswith("queued run does not exist:"):
+                        code = "queue_not_found"
+                    elif detail == "queued state revision conflict" or detail.endswith(
+                        "placement update in progress"
+                    ):
+                        code = "queue_conflict"
+                    elif detail.endswith(", not editable"):
+                        code = "queue_not_editable"
+                    else:
+                        code = "invalid_queue_update"
+                    failed.append({"run_id": run_id, "error": code, "detail": detail})
 
-        await probe.probe_once()
+            await probe.probe_once()
+            return succeeded, failed
+
+        batch_key = (tuple(normalized_updates), tuple(eligible_servers))
+        succeeded, failed = await in_flight_batch_updates.run(batch_key, apply_updates)
         status = "updated" if not failed else "partial" if succeeded else "failed"
         return JSONResponse(
             {"status": status, "succeeded": succeeded, "failed": failed},
@@ -541,11 +652,15 @@ def create_app(
                 {"error": "capacity update request is invalid"}, status_code=400
             )
         snapshot = probe.document().get("snapshot")
-        known_servers = {
-            item.get("name")
-            for item in snapshot.get("servers", [])
-            if isinstance(snapshot, dict) and isinstance(item, dict)
-        } if isinstance(snapshot, dict) else set()
+        known_servers = (
+            {
+                item.get("name")
+                for item in snapshot.get("servers", [])
+                if isinstance(snapshot, dict) and isinstance(item, dict)
+            }
+            if isinstance(snapshot, dict)
+            else set()
+        )
         if server not in known_servers:
             return JSONResponse({"error": "capacity_not_found"}, status_code=404)
         controller_payload = dict(payload)
@@ -609,6 +724,11 @@ def create_app(
         routes=[
             Route("/api/snapshot", snapshot_endpoint),
             Route("/api/events", events_endpoint),
+            Route(
+                "/api/experiments/query",
+                experiment_query_endpoint,
+                methods=["POST"],
+            ),
             Route("/api/runs/{run_id:str}/stop", stop_endpoint, methods=["POST"]),
             Route(
                 "/api/queue/{run_id:str}",

@@ -7,7 +7,7 @@ from pathlib import Path
 from starlette.testclient import TestClient
 
 from remote_runner._internal.queue_control import QueuePreparationError
-from remote_runner.web_app import DashboardProbe, create_app
+from remote_runner.web_app import DashboardProbe, InFlightBatchUpdates, create_app
 
 
 def arguments() -> argparse.Namespace:
@@ -26,6 +26,40 @@ def static_root(tmp_path: Path) -> Path:
         "<!doctype html><title>Remote Runner</title>", encoding="utf-8"
     )
     return root
+
+
+def test_identical_in_flight_batch_updates_share_one_operation() -> None:
+    updates = InFlightBatchUpdates()
+    key = (
+        (("rr-0123456789abcdef", 3), ("rr-fedcba9876543210", 8)),
+        ("compute-a", "compute-b"),
+    )
+    calls = 0
+
+    async def exercise() -> None:
+        nonlocal calls
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def operation() -> tuple[list[str], list[dict[str, str]]]:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return ["rr-0123456789abcdef"], []
+
+        first = asyncio.create_task(updates.run(key, operation))
+        await started.wait()
+        second = asyncio.create_task(updates.run(key, operation))
+        await asyncio.sleep(0)
+        release.set()
+
+        assert await first == (["rr-0123456789abcdef"], [])
+        assert await second == (["rr-0123456789abcdef"], [])
+
+    asyncio.run(exercise())
+
+    assert calls == 1
 
 
 def test_dashboard_probe_publishes_successful_snapshot() -> None:
@@ -112,6 +146,62 @@ def test_web_app_requires_built_assets(tmp_path: Path) -> None:
         assert "web assets are unavailable" in str(exc)
     else:
         raise AssertionError("missing web assets should prevent startup")
+
+
+def test_web_experiment_query_is_bounded_and_forwarded(tmp_path: Path) -> None:
+    probe = DashboardProbe(arguments(), project_id="example", interval=30)
+    calls: list[tuple[argparse.Namespace, dict[str, object]]] = []
+
+    def experiment_query(
+        args: argparse.Namespace,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        calls.append((args, payload))
+        return {
+            "schema_version": 1,
+            "project_id": "example",
+            "registry_epoch": "epoch-1",
+            "event_cursor": 0,
+            "active_design_revision_id": None,
+            "items": [],
+            "next_cursor": None,
+            "has_more": False,
+        }
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        experiment_query=experiment_query,
+    )
+    query = {
+        "kind": "experiment_query",
+        "schema_version": 1,
+        "operation": "study_list",
+    }
+
+    with TestClient(app) as client:
+        wrong_type = client.post(
+            "/api/experiments/query",
+            content="{}",
+            headers={"content-type": "text/plain"},
+        )
+        assert wrong_type.status_code == 415
+
+        invalid = client.post(
+            "/api/experiments/query",
+            content="[]",
+            headers={"content-type": "application/json"},
+        )
+        assert invalid.status_code == 400
+
+        response = client.post("/api/experiments/query", json=query)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["items"] == []
+    assert calls[0][0].timeout == 8
+    assert calls[0][1] == query
 
 
 def test_web_stop_requires_explicit_confirmation_and_refreshes_snapshot(
@@ -554,9 +644,7 @@ def test_web_batch_queue_update_rejects_duplicate_runs(tmp_path: Path) -> None:
         )
 
     assert response.status_code == 400
-    assert response.json() == {
-        "error": "batch queue update contains duplicate runs"
-    }
+    assert response.json() == {"error": "batch queue update contains duplicate runs"}
 
 
 def test_web_queue_update_reports_conflict_and_refreshes_snapshot(

@@ -27,6 +27,7 @@ from remote_runner._internal.execution_registry import (
     update_current_state,
     write_yaml,
 )
+from experiment_fixtures import ingest_experiment_result_reference
 
 
 FAILED = "rr-0123456789abcdef"
@@ -272,6 +273,26 @@ def test_queue_only_failed_apply_removes_only_selected_record(tmp_path: Path) ->
     assert load_task_tombstone(paths, TASK) is None
     with pytest.raises(ValueError, match="cannot be reused"):
         submit_job(paths, queued_job(FAILED))
+
+
+def test_experiment_result_reference_blocks_failed_run_purge(tmp_path: Path) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, queued_job(FAILED))
+    fail_queue(paths, FAILED)
+    reference = ingest_experiment_result_reference(paths, FAILED)
+
+    result = controller_run_purge.purge_run(
+        controller_args(paths.root, apply=True, no_replacement=True)
+    )
+
+    assert result["status"] == "blocked"
+    blocker = next(
+        item for item in result["blockers"] if item["run_id"] == FAILED
+    )
+    assert blocker["result_ids"] == [reference["result_id"]]
+    assert "experiment provenance tombstone" in blocker["error"]
+    assert (paths.queue_dir / FAILED).is_dir()
+    assert load_run_tombstone(paths, FAILED) is None
 
 
 def test_failed_execution_with_matching_replacement_purges_one_run(

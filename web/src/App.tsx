@@ -24,7 +24,9 @@ import {
   SnapshotHealth,
   SummaryStrip,
 } from "./components";
+import { ExperimentsDashboard, ExperimentsDemo } from "./ExperimentsDemo";
 import { ageFrom, serverState, textMatches } from "./format";
+import { ProductNav } from "./ProductNav";
 import type {
   BatchQueueUpdateResult,
   QueueEntry,
@@ -89,7 +91,7 @@ function queueMatches(entry: QueueEntry, query: string): boolean {
   );
 }
 
-export default function App() {
+function RunsDashboard() {
   const {
     document,
     connection,
@@ -202,15 +204,13 @@ export default function App() {
         return refreshed ? { kind: "queue", value: refreshed } : null;
       }
       if (current?.kind === "queue-batch") {
-        const selected = new Set(current.value.map((entry) => entry.job.run_id));
-        const refreshed = (document?.snapshot?.queue ?? []).filter(
-          (entry) => (
-            selected.has(entry.job.run_id)
-            && entry.state.status === "queued"
-            && !entry.state.placement_update
-            && typeof entry.state.revision === "number"
-          ),
+        const entriesByRunId = new Map(
+          (document?.snapshot?.queue ?? []).map((entry) => [entry.job.run_id, entry]),
         );
+        const refreshed = current.value.flatMap((entry) => {
+          const replacement = entriesByRunId.get(entry.job.run_id);
+          return replacement?.state.status === "queued" ? [replacement] : [];
+        });
         return refreshed.length ? { kind: "queue-batch", value: refreshed } : null;
       }
       return current;
@@ -374,6 +374,8 @@ export default function App() {
                 </div>
               </header>
 
+              <ProductNav active="runs" />
+
               <div className="rr-toolbar" aria-label="仪表盘筛选">
                 <SearchInput
                   aria-label="搜索服务器、任务或运行 ID"
@@ -519,4 +521,11 @@ export default function App() {
       </Drawer>
     </div>
   );
+}
+
+export default function App() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("demo") === "experiments") return <ExperimentsDemo />;
+  if (params.get("view") === "experiments") return <ExperimentsDashboard live />;
+  return <RunsDashboard />;
 }

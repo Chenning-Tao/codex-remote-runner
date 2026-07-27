@@ -32,6 +32,17 @@ from ..scheduling import normalize_workload_class
 from ..stopping import stop as stop_execution
 from ..tmux import dispatcher_tmux_session, exact_tmux_target, resolve_tmux_executable
 from .dashboard import collect_server_snapshot, enrich_active_runs, validate_payload
+from .experiments import (
+    binding_submission_guard,
+    ingest_binding as ingest_experiment_binding,
+    ingest_completed_sync_results,
+    ingest_result as ingest_experiment_result,
+    preview_plan as preview_experiment_plan,
+    publish_plan as publish_experiment_plan,
+    query_registry as query_experiment_registry,
+    rebuild_registry as rebuild_experiment_registry,
+    record_acceptance as record_experiment_acceptance,
+)
 from .output_prune import prune_outputs
 from .run_purge import purge_run
 from .task_purge import purge_task
@@ -143,7 +154,13 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
             disable_config(paths.registry_root)
         else:
             store_config(paths.registry_root, output_sync)
-    entry = submit_job(paths, job)
+    raw_binding = job.get("experiment_binding")
+    if raw_binding is None:
+        entry = submit_job(paths, job)
+    else:
+        with binding_submission_guard(paths, raw_binding) as binding:
+            job["experiment_binding"] = binding
+            entry = submit_job(paths, job)
     stored_job, _state = load_job(paths, entry.name)
     ensure_server_capacities(paths, stored_job["prepared_servers"])
     dispatcher_started = ensure_dispatcher(
@@ -157,6 +174,67 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         "outcome": {"action": "submitted", "run_id": entry.name},
         "dispatcher_started": dispatcher_started,
     }
+
+
+def experiment_query(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    ingestion = ingest_completed_sync_results(paths)
+    result = query_experiment_registry(paths, _read_object("experiment query"))
+    result["ingestion"] = {
+        "projected": ingestion["projected"],
+        "error_count": len(ingestion["errors"]),
+        "errors": ingestion["errors"][:20],
+    }
+    return result
+
+
+def experiment_plan_preview(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    return preview_experiment_plan(paths, _read_object("experiment plan"))
+
+
+def experiment_plan_publish(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    request = _read_object("experiment plan publication")
+    if set(request) - {"plan", "request_id", "expected_impact_digest"}:
+        raise ValueError("experiment plan publication contains unknown fields")
+    if "plan" not in request or "request_id" not in request:
+        raise ValueError("experiment plan publication requires plan and request_id")
+    request_id = request["request_id"]
+    if not isinstance(request_id, str):
+        raise ValueError("experiment plan publication request_id must be a string")
+    expected_impact_digest = request.get("expected_impact_digest")
+    if expected_impact_digest is not None and not isinstance(
+        expected_impact_digest, str
+    ):
+        raise ValueError("expected_impact_digest must be a string or null")
+    return publish_experiment_plan(
+        paths,
+        request["plan"],
+        request_id=request_id,
+        expected_impact_digest=expected_impact_digest,
+    )
+
+
+def experiment_binding_ingest(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    return ingest_experiment_binding(paths, _read_object("run binding"))
+
+
+def experiment_result_ingest(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    return ingest_experiment_result(paths, _read_object("experiment result"))
+
+
+def experiment_acceptance(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    ingest_completed_sync_results(paths)
+    return record_experiment_acceptance(paths, _read_object("acceptance request"))
+
+
+def experiment_registry_rebuild(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    return rebuild_experiment_registry(paths)
 
 
 def pending_all(args: argparse.Namespace) -> dict[str, Any]:
@@ -1054,6 +1132,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval", type=int, default=60)
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("submit")
+    subparsers.add_parser("experiment-query")
+    subparsers.add_parser("experiment-plan-preview")
+    subparsers.add_parser("experiment-plan-publish")
+    subparsers.add_parser("experiment-binding-ingest")
+    subparsers.add_parser("experiment-result-ingest")
+    subparsers.add_parser("experiment-acceptance")
+    subparsers.add_parser("experiment-registry-rebuild")
     subparsers.add_parser("pending-all")
     subparsers.add_parser("extend-all")
     queued_job_parser = subparsers.add_parser("queued-job")
@@ -1113,6 +1198,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action == "submit":
             result = submit(args)
+        elif args.action == "experiment-query":
+            result = experiment_query(args)
+        elif args.action == "experiment-plan-preview":
+            result = experiment_plan_preview(args)
+        elif args.action == "experiment-plan-publish":
+            result = experiment_plan_publish(args)
+        elif args.action == "experiment-binding-ingest":
+            result = experiment_binding_ingest(args)
+        elif args.action == "experiment-result-ingest":
+            result = experiment_result_ingest(args)
+        elif args.action == "experiment-acceptance":
+            result = experiment_acceptance(args)
+        elif args.action == "experiment-registry-rebuild":
+            result = experiment_registry_rebuild(args)
         elif args.action == "pending-all":
             result = pending_all(args)
         elif args.action == "extend-all":

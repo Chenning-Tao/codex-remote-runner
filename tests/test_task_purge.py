@@ -27,6 +27,7 @@ from remote_runner._internal.execution_registry import (
     update_current_state,
     write_yaml,
 )
+from experiment_fixtures import ingest_experiment_result_reference
 
 
 RUN_ID = "rr-0123456789abcdef"
@@ -157,6 +158,25 @@ def test_queue_only_task_is_stopped_purged_and_tombstoned(tmp_path: Path) -> Non
     assert tombstone["status"] == "purged"
     with pytest.raises(ValueError, match="cannot accept new runs"):
         submit_job(paths, queued_job(run_id="rr-fedcba9876543210"))
+
+
+def test_experiment_result_reference_blocks_task_purge(tmp_path: Path) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, queued_job())
+    reference = ingest_experiment_result_reference(paths, RUN_ID)
+
+    result = controller_task_purge.purge_task(
+        purge_args(paths.root, apply=True)
+    )
+
+    assert result["status"] == "blocked"
+    blocker = next(
+        item for item in result["blockers"] if item["run_id"] == RUN_ID
+    )
+    assert blocker["result_ids"] == [reference["result_id"]]
+    assert "experiment provenance tombstone" in blocker["error"]
+    assert (paths.queue_dir / RUN_ID).is_dir()
+    assert load_task_tombstone(paths, "task-1") is None
 
 
 def test_tombstone_closes_dispatch_race(tmp_path: Path) -> None:

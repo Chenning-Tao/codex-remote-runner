@@ -31,7 +31,7 @@ import {
   CircleStop,
   WifiOff,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ageFrom,
   dateTime,
@@ -608,6 +608,12 @@ export function DetailPanel({
   const [queueError, setQueueError] = useState<string | null>(null);
   const [draftBatchServers, setDraftBatchServers] = useState<string[]>([]);
   const [savingBatch, setSavingBatch] = useState(false);
+  const savingBatchRef = useRef(false);
+  const [activeBatchRequest, setActiveBatchRequest] = useState<{
+    entryCount: number;
+    preparationTotals: Record<string, number>;
+    servers: string[];
+  } | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
   const selectedServer = selection.kind === "server" ? selection.value : null;
   const [draftStandardSlots, setDraftStandardSlots] = useState(1);
@@ -668,6 +674,25 @@ export function DetailPanel({
   const batchRequiresPreparation = draftBatchServers.some(
     (server) => (batchPreparationCounts.get(server) ?? 0) > 0,
   );
+  const activeBatchPreparationTotal = activeBatchRequest
+    ? activeBatchRequest.servers.reduce(
+      (total, server) => total + (activeBatchRequest.preparationTotals[server] ?? 0),
+      0,
+    )
+    : 0;
+  const activeBatchPreparationRemaining = activeBatchRequest
+    ? activeBatchRequest.servers.reduce(
+      (total, server) => total + Math.min(
+        activeBatchRequest.preparationTotals[server] ?? 0,
+        batchPreparationCounts.get(server) ?? 0,
+      ),
+      0,
+    )
+    : 0;
+  const activeBatchPreparationCompleted = Math.max(
+    0,
+    activeBatchPreparationTotal - activeBatchPreparationRemaining,
+  );
   const batchPlacementUpdating = batchEntries.some(
     (entry) => Boolean(entry.state.placement_update),
   );
@@ -688,14 +713,14 @@ export function DetailPanel({
   }, [queueRunId]);
 
   useEffect(() => {
-    if (!batchEntries.length) return;
+    if (!batchEntries.length || savingBatchRef.current) return;
     const commonServers = (batchEntries[0].job.eligible_servers ?? []).filter(
       (server) => batchEntries.every(
         (entry) => (entry.job.eligible_servers ?? []).includes(server),
       ) && batchServerOptions.some((option) => option.name === server),
     );
     setDraftBatchServers(commonServers);
-    setSavingBatch(false);
+    setActiveBatchRequest(null);
     setBatchError(null);
   }, [batchRunKey, batchServerOptionKey]);
 
@@ -762,7 +787,7 @@ export function DetailPanel({
   }
 
   async function saveBatchServerSettings() {
-    if (savingBatch || !draftBatchServers.length) return;
+    if (savingBatchRef.current || !draftBatchServers.length) return;
     const updates: BatchQueueUpdateItem[] = [];
     for (const entry of batchEntries) {
       const runId = entry.job.run_id;
@@ -773,6 +798,17 @@ export function DetailPanel({
       }
       updates.push({ run_id: runId, expected_revision: revision });
     }
+    setActiveBatchRequest({
+      entryCount: updates.length,
+      preparationTotals: Object.fromEntries(
+        draftBatchServers.map((server) => [
+          server,
+          batchPreparationCounts.get(server) ?? 0,
+        ]),
+      ),
+      servers: [...draftBatchServers],
+    });
+    savingBatchRef.current = true;
     setSavingBatch(true);
     setBatchError(null);
     try {
@@ -780,6 +816,8 @@ export function DetailPanel({
       onBatchResult(result);
       onClose();
     } catch (error: unknown) {
+      savingBatchRef.current = false;
+      setActiveBatchRequest(null);
       setBatchError(error instanceof Error ? error.message : "批量设置服务器失败");
       setSavingBatch(false);
     }
@@ -997,7 +1035,7 @@ export function DetailPanel({
       </>
     );
   } else {
-    title = `${batchEntries.length} 项排队任务`;
+    title = `${activeBatchRequest?.entryCount ?? batchEntries.length} 项排队任务`;
     kind = "批量设置服务器";
     body = (
       <section className="rr-queue-editor" aria-labelledby="rr-batch-server-editor-title">
@@ -1010,6 +1048,11 @@ export function DetailPanel({
           <legend>支持的服务器</legend>
           {batchServerOptions.length ? batchServerOptions.map((server) => {
             const preparationCount = batchPreparationCounts.get(server.name) ?? 0;
+            const preparationTotal = activeBatchRequest?.preparationTotals[server.name] ?? 0;
+            const preparationCompleted = Math.max(
+              0,
+              preparationTotal - Math.min(preparationTotal, preparationCount),
+            );
             return (
               <Checkbox
                 key={server.name}
@@ -1017,7 +1060,15 @@ export function DetailPanel({
                 label={(
                   <span className="rr-server-option-label">
                     <span>{server.name}</span>
-                    {preparationCount > 0 && <small>需准备 {preparationCount} 项</small>}
+                    {savingBatch && preparationTotal > 0
+                      ? (
+                        <small>
+                          {preparationCompleted === preparationTotal
+                            ? "准备完成"
+                            : `已准备 ${preparationCompleted} / ${preparationTotal}`}
+                        </small>
+                      )
+                      : preparationCount > 0 && <small>需准备 {preparationCount} 项</small>}
                   </span>
                 )}
                 isChecked={draftBatchServers.includes(server.name)}
@@ -1043,7 +1094,11 @@ export function DetailPanel({
           onClick={saveBatchServerSettings}
         >
           {savingBatch
-            ? batchRequiresPreparation ? "正在准备并应用…" : "正在批量应用…"
+            ? activeBatchPreparationTotal > 0
+              ? activeBatchPreparationRemaining > 0
+                ? `正在准备 ${activeBatchPreparationCompleted} / ${activeBatchPreparationTotal}…`
+                : "准备完成，正在应用…"
+              : "正在批量应用…"
             : batchRequiresPreparation ? "准备并应用到全部" : "应用到全部"}
         </Button>
       </section>

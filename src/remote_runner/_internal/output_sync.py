@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 from . import output_sync_remote
+from .experiment_contracts import normalize_run_binding
 from .result_metadata import (
     LEGACY_RESULT_INTENT,
     normalize_result_intent,
@@ -286,7 +287,7 @@ def _intent_from_manifest(
     revision = manifest.get("source_revision") or manifest.get("expected_revision")
     if not isinstance(revision, str) or not revision:
         revision = "unknown"
-    return {
+    intent = {
         "schema_version": INTENT_SCHEMA,
         "run_id": run_id,
         "source_server": str(manifest["server"]),
@@ -306,6 +307,13 @@ def _intent_from_manifest(
         "succeeded_at": succeeded_at,
         "state_revision": state_revision,
     }
+    raw_binding = manifest.get("experiment_binding")
+    if raw_binding is not None:
+        binding = normalize_run_binding(raw_binding)
+        if binding["run_id"] != run_id or binding["source_revision"] != revision:
+            raise ValueError("output-sync experiment binding identity mismatch")
+        intent["experiment_binding"] = binding
+    return intent
 
 
 def enqueue_succeeded_output(
@@ -360,6 +368,12 @@ def validate_intent(raw: Any) -> dict[str, Any]:
     )
     if not isinstance(raw.get("output_metadata"), dict):
         raise ValueError("output-sync intent output_metadata must be a mapping")
+    raw_binding = raw.get("experiment_binding")
+    if raw_binding is not None:
+        binding = normalize_run_binding(raw_binding)
+        if binding["run_id"] != run_id or binding["source_revision"] != raw["revision"]:
+            raise ValueError("output-sync intent experiment binding identity mismatch")
+        raw["experiment_binding"] = binding
     state_revision = raw.get("state_revision")
     if isinstance(state_revision, bool) or not isinstance(state_revision, int) or state_revision < 1:
         raise ValueError("output-sync intent state_revision must be positive")
@@ -466,6 +480,8 @@ def invoke_target(
         "output_metadata": intent["output_metadata"],
         "succeeded_at": intent["succeeded_at"],
     }
+    if intent.get("experiment_binding") is not None:
+        payload["experiment_binding"] = intent["experiment_binding"]
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).decode("ascii")

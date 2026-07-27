@@ -298,6 +298,10 @@ under its lock, staged records are destroyed, and the tombstone becomes permanen
 Transport ambiguity reports `attention_required`; retry the same command rather
 than claiming completion.
 
+A task containing any run referenced by an ingested experiment result is blocked
+before its purge tombstone is created. Keep the task until experiment-aware
+provenance tombstones can preserve the result's immutable run evidence.
+
 Remote worktrees are revision caches, not inherently task-owned. Purge removes a
 worktree only when no retained queue or execution references it and while holding a
 server dispatch lease. Shared or unprovable worktrees remain and are reported.
@@ -343,6 +347,10 @@ provenance digests, and replacement/no-replacement decision. It stays outside
 normal monitoring, prevents run-ID reuse, and prevents an individually named
 replacement from later being purged. Successful task siblings, shared
 worktrees, and all Git refs remain.
+
+A failed run referenced by an ingested experiment result is not currently
+purgeable, even when the result has not been accepted. The preview and apply paths
+fail closed until experiment-aware provenance tombstones are available.
 
 Transport ambiguity returns `attention_required`; retry the exact same command,
 reason, and replacement policy. Once records have been staged, an older

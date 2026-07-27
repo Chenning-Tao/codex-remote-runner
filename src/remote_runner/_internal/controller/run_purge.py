@@ -19,6 +19,7 @@ from ..execution_registry import (
     write_yaml,
 )
 from ..task_purge import purge_remote_run_artifacts, purge_remote_worktree
+from .experiments import experiment_purge_blockers
 from .purge_common import (
     load_purge_inventory,
     output_overlap_blockers,
@@ -254,6 +255,15 @@ def _target_blockers(
                 "run_id": run_id,
                 "error": "run is retained as replacement provenance",
                 "dependent_run_id": dependent,
+            }
+        )
+    try:
+        blockers.extend(experiment_purge_blockers(paths, [run_id]))
+    except (OSError, RuntimeError, ValueError) as exc:
+        blockers.append(
+            {
+                "run_id": run_id,
+                "error": f"experiment provenance could not be verified: {exc}",
             }
         )
     return blockers

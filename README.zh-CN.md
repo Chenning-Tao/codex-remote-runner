@@ -13,6 +13,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 - 在远程 detached worktree 中准备并运行精确的 Git revision。
 - 支持前台实时等待和事件驱动的 Codex 任务历史回报。
 - 提供可交互的 Textual 和本地网页控制面板，并支持确认后停止任务。
+- 提供由控制器持有、包含冻结 binding 与已验证结果的实验注册表。
 - 提供明确的停止、清理、彻底删除、服务器排空和输出归档流程。
 
 ```text
@@ -42,7 +43,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.3.6'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.4.0'
 remote-runner --help
 ```
 
@@ -89,6 +90,33 @@ Standard/Test 并发任务数，也可以在排队任务详情中切换任务类
 任务；将槽位设为 `0` 会暂停该类型的新任务。
 
 该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示与 TUI 相同的 controller snapshot。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置。详情栏可以停止一个精确的排队中或运行中任务，也可以修改排队任务的优先级和可用服务器；队列表格还可以跨页勾选多个任务，将同一组兼容服务器批量应用到这些任务。如果新选择的兼容服务器尚未准备，Web 进程会先为任务的精确 revision 完成准备，再启用该服务器。队列写操作使用各任务自己的 controller revision 和有时限的准备租约，旧快照修改或已经进入调度的任务会被拒绝；批量操作会明确报告部分失败并保留失败项。
+
+## 实验注册表
+
+网页中的“实验”分区展示由控制器持有的已发布通用实验设计、精确 point
+revision、冻结的 run binding、经过输出同步验证的结构化结果，以及显式
+acceptance。网页保持只读并通过有界查询读取控制器；结果不会按时间戳选择，
+真实空注册表也不会回退到合成 Demo。
+
+打开 `?demo=experiments` 可以在没有 Controller 的情况下查看内置的
+`decoder_atomloss` 项目快照。它只是用于检查面板的静态测试数据，不会写入
+Controller；正常“实验”视图仍只读取当前项目配置的 Controller 注册表。
+
+```bash
+remote-runner experiment plan preview \
+  --project-config /path/to/.remote-runner.yaml \
+  --file experiment-plan.json
+
+remote-runner experiment query \
+  --project-config /path/to/.remote-runner.yaml \
+  --file experiment-query.json
+```
+
+使用 `remote-runner run --experiment-binding binding.json` 可以为精确 run ID 和
+Git revision 生成并冻结 binding。新 producer 在同步输出中写入
+`experiment_result`；结果满足资格条件后仍需显式 acceptance 才会成为当前正式
+结果。契约、权威边界和后续加固项见
+[实现计划](docs/plans/experiment-registry-results-dashboard.md)。
 
 ## 运行
 

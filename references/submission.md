@@ -6,6 +6,7 @@ flow.
 ## Contents
 
 - [Result Intent And Tags](#result-intent-and-tags)
+- [Experiment Plans, Bindings, And Results](#experiment-plans-bindings-and-results)
 - [Source And Preparation](#source-and-preparation)
 - [Resources And Placement](#resources-and-placement)
 - [Output Identity](#output-identity)
@@ -33,6 +34,77 @@ a tag; keep that decision in `--result-intent` so monitoring can filter it.
 Historical records without explicit intent are reported as `unclassified`.
 Do not infer or bulk-reclassify them from labels, commands, paths, lifecycle
 status, or output presence.
+
+## Experiment Plans, Bindings, And Results
+
+The public JSON contract names are `experiment_plan`, `run_binding`,
+`experiment_result`, and `experiment_query`; compatibility is carried by the
+numeric `schema_version` field rather than a version suffix in `kind`.
+
+Preview a generic plan before publishing it:
+
+```bash
+remote-runner experiment plan preview \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --file /absolute/private/path/experiment-plan.json
+```
+
+Review the returned impact classification. Publish the same normalized content
+with a new durable request identity and, normally, the preview's `impact_digest`:
+
+```bash
+remote-runner experiment plan publish \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --file /absolute/private/path/experiment-plan.json \
+  --request-id "project-owned-stable-request-id" \
+  --impact-digest "sha256:<preview-impact-digest>"
+```
+
+Publication is atomic and does not submit, cancel, or rerun work. Reuse a request
+ID only for an exact retry. A later revision uses a new request ID and the exact
+current `expected_active_design_revision_id`; a stale active-revision pointer is
+a conflict, not permission to choose a newer record by time.
+
+Create a `run_binding` template from published study, design, point, point
+revision, plan, and setting identities. It may target several points, and one
+result may cite several bound runs. Do not encode this relationship only in task
+IDs or tags. The submission path fills absent `binding_id`, `run_id`, and
+`source_revision` fields, validates the active revision, computes the digest, and
+freezes the binding:
+
+```bash
+remote-runner run \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --source-repo /absolute/path/to/clean/task-worktree \
+  --experiment-binding /absolute/private/path/run-binding.json \
+  --output-relpath "experiments/study-key/run-output" \
+  --result-intent candidate \
+  --label "study point" \
+  --task-id "study/point" \
+  --command '"$RR_PROJECT_PYTHON" experiment.py'
+```
+
+When `expects_result_manifest` is true, the binding must name a normalized
+relative `result_manifest_relpath`, the project must configure output
+synchronization, the run must use a relative output directory, and its intent
+must be `candidate`. The producer writes a bounded `experiment_result` with
+`producer.mode: "native"` at that path. Keep aggregate metrics, confidence
+intervals, evidence counts, checks, and artifact references in the manifest;
+keep raw per-observation payloads in referenced artifacts.
+
+The output-sync worker reads the exact manifest from the verified archive,
+checks regular-file and size limits, verifies referenced artifact SHA256 values,
+and idempotently projects it into the experiment registry. Native producers must
+not call `remote-runner experiment result ingest`; direct ingestion accepts only
+explicit `producer.mode: "legacy_adapter"` imports. Never derive results or
+acceptance from commands, stdout, labels, output discovery, or timestamps.
+
+An eligible result remains a candidate until an explicit acceptance request
+updates the exact point-revision pointer with its expected current acceptance
+identity. Queries use bounded `experiment_query` documents with server-side
+filters, fields, pagination, and opaque `changed_since` cursors. See
+[the experiment registry plan](../docs/plans/experiment-registry-results-dashboard.md)
+for complete contract shapes and authority boundaries.
 
 ## Source And Preparation
 

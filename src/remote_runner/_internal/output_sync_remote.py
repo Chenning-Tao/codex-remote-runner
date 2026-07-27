@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -18,6 +19,7 @@ RUN_ID_RE = re.compile(r"^rr-[0-9a-f]{16}$")
 HOST_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 TAG_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RESULT_INTENTS = {"candidate", "supporting", "excluded", "unclassified"}
+MAX_EXPERIMENT_MANIFEST_BYTES = 1024 * 1024
 REMOTE_KIND_PROGRAM = r"""
 import json
 import sys
@@ -50,6 +52,41 @@ def _absolute_path(value: Any, field: str) -> str:
     if not path.is_absolute() or str(path) != text or ".." in path.parts:
         raise ValueError(f"{field} must be a normalized absolute POSIX path")
     return text
+
+
+def _relative_path(value: Any, field: str) -> str:
+    text = _text(value, field)
+    path = PurePosixPath(text)
+    if path.is_absolute() or str(path) != text or ".." in path.parts or text == ".":
+        raise ValueError(f"{field} must be a normalized relative POSIX path")
+    return text
+
+
+def _experiment_binding(value: Any, run_id: str, revision: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("experiment_binding must be an object")
+    binding = dict(value)
+    if binding.get("kind") != "run_binding" or binding.get("schema_version") != 1:
+        raise ValueError("unsupported experiment_binding contract")
+    if binding.get("run_id") != run_id or binding.get("source_revision") != revision:
+        raise ValueError("experiment_binding identity mismatch")
+    expects = binding.get("expects_result_manifest")
+    if not isinstance(expects, bool):
+        raise ValueError("experiment_binding expects_result_manifest must be boolean")
+    relpath = binding.get("result_manifest_relpath")
+    if expects:
+        binding["result_manifest_relpath"] = _relative_path(
+            relpath,
+            "experiment_binding.result_manifest_relpath",
+        )
+    elif relpath is not None:
+        binding["result_manifest_relpath"] = _relative_path(
+            relpath,
+            "experiment_binding.result_manifest_relpath",
+        )
+    return binding
 
 
 def _result_tags(value: Any) -> dict[str, str]:
@@ -112,6 +149,11 @@ def validate_payload(raw: Any) -> dict[str, Any]:
         raise ValueError("unsupported result_intent")
     payload["result_intent"] = result_intent
     payload["result_tags"] = _result_tags(payload.get("result_tags", {}))
+    payload["experiment_binding"] = _experiment_binding(
+        payload.get("experiment_binding"),
+        run_id,
+        str(payload["revision"]),
+    )
     return payload
 
 
@@ -296,6 +338,105 @@ def _validate_file_stage(stage: Path, source_path: str) -> None:
         )
 
 
+def _regular_file_under(root: Path, relative_path: str, field: str) -> Path:
+    relative = PurePosixPath(_relative_path(relative_path, field))
+    current = root
+    if current.is_symlink() or not current.is_dir():
+        raise ValueError(f"{field} root is not a regular directory")
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"{field} traverses a symlink")
+    if not current.is_file():
+        raise ValueError(f"{field} is not a regular file")
+    return current
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"experiment result contains invalid JSON constant: {value}")
+
+
+def _verified_experiment_result(
+    payload: dict[str, Any],
+    *,
+    archived_run_path: Path,
+    artifacts_root: Path,
+    source_kind: str,
+) -> dict[str, Any] | None:
+    binding = payload.get("experiment_binding")
+    if not isinstance(binding, dict) or binding.get("expects_result_manifest") is not True:
+        return None
+    if source_kind != "directory":
+        raise ValueError("a result-producing experiment run must synchronize a directory")
+    manifest_path = _regular_file_under(
+        archived_run_path,
+        str(binding["result_manifest_relpath"]),
+        "experiment result manifest",
+    )
+    size = manifest_path.stat().st_size
+    if size > MAX_EXPERIMENT_MANIFEST_BYTES:
+        raise ValueError("experiment result manifest exceeds the size limit")
+    try:
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8"),
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"experiment result manifest is invalid JSON: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("experiment result manifest must be a JSON object")
+    if manifest.get("kind") != "experiment_result" or manifest.get("schema_version") != 1:
+        raise ValueError("unsupported experiment result manifest contract")
+    if manifest.get("emitter_run_id") != payload["run_id"]:
+        raise ValueError("experiment result emitter_run_id mismatch")
+    results = manifest.get("results")
+    if not isinstance(results, list):
+        raise ValueError("experiment result manifest results must be a list")
+    verified_artifacts = 0
+    for result in results:
+        if not isinstance(result, dict) or not isinstance(result.get("artifacts"), list):
+            raise ValueError("experiment result artifacts must be a list")
+        for artifact in result["artifacts"]:
+            if not isinstance(artifact, dict):
+                raise ValueError("experiment result artifact must be an object")
+            artifact_run_id = artifact.get("run_id")
+            if not isinstance(artifact_run_id, str) or RUN_ID_RE.fullmatch(artifact_run_id) is None:
+                raise ValueError("experiment result artifact run_id is invalid")
+            artifact_root = (
+                archived_run_path
+                if artifact_run_id == payload["run_id"]
+                else artifacts_root / artifact_run_id
+            )
+            artifact_path = _regular_file_under(
+                artifact_root,
+                str(artifact.get("relative_path")),
+                "experiment result artifact",
+            )
+            if _sha256_file(artifact_path) != artifact.get("sha256"):
+                raise ValueError("experiment result artifact digest mismatch")
+            verified_artifacts += 1
+    canonical = json.dumps(
+        manifest,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "manifest": manifest,
+        "canonical_sha256": f"sha256:{hashlib.sha256(canonical).hexdigest()}",
+        "artifact_count": verified_artifacts,
+    }
+
+
 def sync_payload(raw: Any) -> dict[str, Any]:
     payload = validate_payload(raw)
     target_root = Path(payload["target_root"])
@@ -324,6 +465,12 @@ def sync_payload(raw: Any) -> dict[str, Any]:
             )
             if source_kind == "file":
                 _validate_file_stage(target, payload["source_path"])
+            experiment_result = _verified_experiment_result(
+                payload,
+                archived_run_path=target,
+                artifacts_root=artifacts_root,
+                source_kind=source_kind,
+            )
             disposition = "already_present_verified"
         else:
             stage.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -341,6 +488,12 @@ def sync_payload(raw: Any) -> dict[str, Any]:
             )
             if source_kind == "file":
                 _validate_file_stage(stage, payload["source_path"])
+            experiment_result = _verified_experiment_result(
+                payload,
+                archived_run_path=stage,
+                artifacts_root=artifacts_root,
+                source_kind=source_kind,
+            )
             stage.rename(target)
             _fsync_directory(artifacts_root)
             disposition = "copied_and_verified"
@@ -362,6 +515,8 @@ def sync_payload(raw: Any) -> dict[str, Any]:
             "disposition": disposition,
             "source_deletion_performed": False,
         }
+        if experiment_result is not None:
+            receipt["experiment_result"] = experiment_result
         _write_json_atomic(receipts_root / f"{payload['run_id']}.json", receipt)
         return receipt
 

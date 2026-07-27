@@ -10,6 +10,7 @@ from pathlib import Path
 from ..execution_registry import project_paths
 from ..output_sync import has_pending, load_config, process_pending_once
 from ..tmux import exact_tmux_target, output_sync_tmux_session, resolve_tmux_executable
+from .experiments import ingest_completed_sync_results
 from .registry import ControllerPaths, controller_paths
 
 
@@ -91,6 +92,7 @@ def run_worker(
     execution_paths = project_paths(paths.config_path)
     while True:
         result = process_pending_once(execution_paths, connect_timeout=timeout)
+        result["experiment_results"] = ingest_completed_sync_results(paths)
         print(json.dumps(result, sort_keys=True), flush=True)
         if once or not result.get("enabled") or int(result.get("remaining", 0)) == 0:
             return 0
