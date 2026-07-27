@@ -23,6 +23,7 @@ from ..execution_registry import (
     validate_current_run_id,
     write_yaml,
 )
+from ..experiment_contracts import normalize_run_binding
 from ..output_paths import (
     normalize_absolute_output_path,
     normalize_output_relpath,
@@ -861,6 +862,25 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("queued all-server job requires a portable relative output")
     job["output_relpath"] = output_relpath
     job["output_path"] = output_path
+    raw_binding = job.get("experiment_binding")
+    if raw_binding is None:
+        job["experiment_binding"] = None
+    else:
+        binding = normalize_run_binding(raw_binding)
+        if binding["run_id"] != job["run_id"]:
+            raise ValueError("queued experiment binding run_id mismatch")
+        if binding["source_revision"] != job["revision"]:
+            raise ValueError("queued experiment binding source_revision mismatch")
+        if binding["expects_result_manifest"]:
+            if output_relpath is None or output_sync is None:
+                raise ValueError(
+                    "result-producing experiment binding requires synchronized output"
+                )
+            if job["result_intent"] != "candidate":
+                raise ValueError(
+                    "result-producing experiment binding requires candidate result intent"
+                )
+        job["experiment_binding"] = binding
     return job
 
 

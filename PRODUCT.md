@@ -37,6 +37,9 @@ lifecycle operations across a project-owned server pool.
 - Scientific programs may use the existing progress-reporting interface, but
   they are never required to integrate with it.
 - Results may be synchronized to a configured archive target.
+- Projects may publish generic experiment designs that bind exact run revisions
+  to logical points and ingest bounded structured results from verified output
+  synchronization.
 
 ## Capabilities and Constraints
 
@@ -44,6 +47,10 @@ lifecycle operations across a project-owned server pool.
   streams the same controller snapshot used by the TUI, can stop one exact
   queued or running workload after explicit confirmation, and can modify one or
   several selected workloads while they remain queued.
+- The dashboard also has a read-only Experiments section. Its study progress,
+  result tables, curves, point matrix, and detail drawer come from bounded
+  controller queries. Only an explicit accepted-result pointer supplies an
+  official value; stale or merely recent results never fill current views.
 - Progress is optional. When a program does not report progress, the interface
   shows authoritative lifecycle state without an empty or fabricated progress
   field.

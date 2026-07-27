@@ -22,6 +22,11 @@ these external standards and design-system references:
 - The first release is single-project and loopback-only. Controller write
   actions are limited to stopping one exact run and modifying selected runs
   while each queue state is `queued`.
+- Top-level Runs and Experiments navigation is always available. Experiments is
+  read-only in the browser; plan publication and result acceptance stay at the
+  CLI/controller boundary.
+- Live Experiments views never fall back to synthetic data. The synthetic demo
+  is available only through its explicit demo URL.
 - The first viewport shows the product identity, controller health, capacity,
   active work, and queued work without marketing content.
 - Research and scheduling identifiers remain visible but visually subordinate to
@@ -60,6 +65,9 @@ these external standards and design-system references:
 - Details open in a side drawer on desktop and a full-width panel on narrow
   screens. The drawer is fixed to the viewport, scrolls internally, and overlays
   the workspace without changing the table layout.
+- Experiment results, curves, and matrix axes are driven by the published metric,
+  dimension, and presentation catalogs. Current curves include only explicitly
+  accepted results for the active point revision.
 - The queue-control increment is desktop-first. Mobile and narrow-screen layout
   for manual ordering, priority editing, and server selection has no acceptance
   criteria in this increment and must not block desktop delivery.

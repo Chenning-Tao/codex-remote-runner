@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -174,6 +175,68 @@ def test_pending_sync_is_confirmed_only_after_archive_receipt(
     run_status = output_sync.run_sync_status(paths.registry_root, RUN_ID)  # type: ignore[attr-defined]
     assert run_status["status"] == "completed"
     assert run_status["receipt"]["disposition"] == "copied_and_verified"
+
+
+def test_archive_validates_structured_experiment_result_and_artifact_digests(
+    tmp_path: Path,
+) -> None:
+    artifacts_root = tmp_path / "archive" / "artifacts"
+    archived_run = artifacts_root / RUN_ID
+    archived_run.mkdir(parents=True)
+    artifact_bytes = b'{"samples_per_second":612.5}\n'
+    (archived_run / "summary.json").write_bytes(artifact_bytes)
+    artifact_digest = f"sha256:{hashlib.sha256(artifact_bytes).hexdigest()}"
+    manifest = {
+        "kind": "experiment_result",
+        "schema_version": 1,
+        "emitter_run_id": RUN_ID,
+        "results": [
+            {
+                "artifacts": [
+                    {
+                        "run_id": RUN_ID,
+                        "relative_path": "summary.json",
+                        "sha256": artifact_digest,
+                    }
+                ]
+            }
+        ],
+    }
+    (archived_run / "experiment-result.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    payload = {
+        "run_id": RUN_ID,
+        "experiment_binding": {
+            "kind": "run_binding",
+            "schema_version": 1,
+            "run_id": RUN_ID,
+            "source_revision": "a" * 40,
+            "expects_result_manifest": True,
+            "result_manifest_relpath": "experiment-result.json",
+        },
+    }
+
+    verified = output_sync_remote._verified_experiment_result(
+        payload,
+        archived_run_path=archived_run,
+        artifacts_root=artifacts_root,
+        source_kind="directory",
+    )
+
+    assert verified is not None
+    assert verified["artifact_count"] == 1
+    assert verified["canonical_sha256"].startswith("sha256:")
+
+    (archived_run / "summary.json").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="artifact digest mismatch"):
+        output_sync_remote._verified_experiment_result(
+            payload,
+            archived_run_path=archived_run,
+            artifacts_root=artifacts_root,
+            source_kind="directory",
+        )
 
 
 def test_failed_archive_pull_remains_pending_and_retryable(

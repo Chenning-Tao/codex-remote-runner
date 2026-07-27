@@ -148,6 +148,62 @@ def test_web_app_requires_built_assets(tmp_path: Path) -> None:
         raise AssertionError("missing web assets should prevent startup")
 
 
+def test_web_experiment_query_is_bounded_and_forwarded(tmp_path: Path) -> None:
+    probe = DashboardProbe(arguments(), project_id="example", interval=30)
+    calls: list[tuple[argparse.Namespace, dict[str, object]]] = []
+
+    def experiment_query(
+        args: argparse.Namespace,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        calls.append((args, payload))
+        return {
+            "schema_version": 1,
+            "project_id": "example",
+            "registry_epoch": "epoch-1",
+            "event_cursor": 0,
+            "active_design_revision_id": None,
+            "items": [],
+            "next_cursor": None,
+            "has_more": False,
+        }
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        experiment_query=experiment_query,
+    )
+    query = {
+        "kind": "experiment_query",
+        "schema_version": 1,
+        "operation": "study_list",
+    }
+
+    with TestClient(app) as client:
+        wrong_type = client.post(
+            "/api/experiments/query",
+            content="{}",
+            headers={"content-type": "text/plain"},
+        )
+        assert wrong_type.status_code == 415
+
+        invalid = client.post(
+            "/api/experiments/query",
+            content="[]",
+            headers={"content-type": "application/json"},
+        )
+        assert invalid.status_code == 400
+
+        response = client.post("/api/experiments/query", json=query)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["items"] == []
+    assert calls[0][0].timeout == 8
+    assert calls[0][1] == query
+
+
 def test_web_stop_requires_explicit_confirmation_and_refreshes_snapshot(
     tmp_path: Path,
 ) -> None:

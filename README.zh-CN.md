@@ -90,6 +90,28 @@ Standard/Test 并发任务数，也可以在排队任务详情中切换任务类
 
 该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示与 TUI 相同的 controller snapshot。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置。详情栏可以停止一个精确的排队中或运行中任务，也可以修改排队任务的优先级和可用服务器；队列表格还可以跨页勾选多个任务，将同一组兼容服务器批量应用到这些任务。如果新选择的兼容服务器尚未准备，Web 进程会先为任务的精确 revision 完成准备，再启用该服务器。队列写操作使用各任务自己的 controller revision 和有时限的准备租约，旧快照修改或已经进入调度的任务会被拒绝；批量操作会明确报告部分失败并保留失败项。
 
+## 实验注册表
+
+网页中的“实验”分区展示已发布的通用实验设计、精确 point revision、冻结的
+run binding、经过输出同步验证的结构化结果，以及显式 acceptance。网页保持
+只读，结果不会按时间戳选择，真实空注册表也不会回退到合成 Demo。
+
+```bash
+remote-runner experiment plan preview \
+  --project-config /path/to/.remote-runner.yaml \
+  --file experiment-plan.json
+
+remote-runner experiment query \
+  --project-config /path/to/.remote-runner.yaml \
+  --file experiment-query.json
+```
+
+使用 `remote-runner run --experiment-binding binding.json` 可以为精确 run ID 和
+Git revision 生成并冻结 binding。新 producer 在同步输出中写入
+`experiment_result`；结果满足资格条件后仍需显式 acceptance 才会成为当前正式
+结果。契约、权威边界和后续加固项见
+[实现计划](docs/plans/experiment-registry-results-dashboard.md)。
+
 ## 运行
 
 Remote Runner 只接受干净且已经提交的源码 revision。下面是一个最小的前台等待任务：

@@ -13,7 +13,8 @@ work must persist, queue, remain discoverable, or support later wait and stop.
 - Read [references/configuration.md](references/configuration.md) only when
   configuring, auditing, provisioning, draining, or retiring infrastructure.
 - Read [references/submission.md](references/submission.md) when choosing source,
-  preparation reuse, placement, test lanes, priority, privacy, or output identity.
+  preparation reuse, placement, test lanes, priority, privacy, output identity,
+  or experiment plans, bindings, and structured results.
 - Read [references/lifecycle.md](references/lifecycle.md) when waiting, interpreting
   state, diagnosing transport, stopping, cleaning, purging, or synchronizing output.
 
@@ -62,6 +63,51 @@ resource, priority, privacy, or output decision.
 
 Treat a queued response as successful submission, not completed work. Continue to
 wait or establish follow-up unless the user explicitly requests detachment.
+
+## Register Experiments
+
+Use the unversioned `experiment_plan`, `run_binding`, `experiment_result`, and
+`experiment_query` contract names with their numeric `schema_version`. A
+project-specific adapter may compile domain input into these contracts, but the
+controller receives only the generic documents.
+
+Preview every plan before publication, inspect its `unchanged`, `new`, `stale`,
+and `archived` impact, then publish the exact previewed content with a durable
+request ID and the returned impact digest:
+
+```bash
+remote-runner experiment plan preview \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --file /absolute/private/path/experiment-plan.json
+
+remote-runner experiment plan publish \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --file /absolute/private/path/experiment-plan.json \
+  --request-id "stable-publish-request-id" \
+  --impact-digest "sha256:<preview-impact-digest>"
+```
+
+Reuse the same request ID only to retry the same publication. For an existing
+study, preserve its explicit `expected_active_design_revision_id`; never select a
+design or scientific result by timestamp.
+
+Pass a `run_binding` template with exact published target identities to
+`remote-runner run --experiment-binding FILE`. Leave `binding_id`, `run_id`, and
+`source_revision` absent unless they are already exact; the runner allocates or
+injects them and freezes the normalized binding into queue and run records. A
+result-producing binding requires `--result-intent candidate`, a relative output
+directory, configured output synchronization, and a normalized manifest path.
+
+New producers write one bounded `experiment_result` with `producer.mode` set to
+`"native"` at that exact path. Output synchronization verifies the manifest and
+artifact digests before controller ingestion. Do not submit native results with
+`experiment result ingest`; that direct command is reserved for named
+`legacy_adapter` producers. Eligibility does not imply acceptance, and no result
+may replace the explicit acceptance pointer without a separate acceptance action.
+
+Use bounded `experiment_query` documents for registry reads. Request only the
+needed operation, filters, fields, and page; follow opaque cursors instead of
+opening controller SQLite or scanning command text, stdout, labels, or timestamps.
 
 ## Wait And Report
 
@@ -131,6 +177,8 @@ interpreting authority, progress, output synchronization, or transport ambiguity
 
 - `remote-runner prepare`: prepare one reusable clean revision.
 - `remote-runner run`: submit durable work; add `--wait` for one foreground run.
+- `remote-runner experiment`: preview and publish plans, run bounded queries,
+  record explicit acceptance, or rebuild the experiment projection.
 - `remote-runner wait`: block on one exact run's authoritative terminal state.
 - `remote-runner wakeup`: register, inspect, or cancel a detached history follow-up.
 - `remote-runner monitor`: inspect a project, task cohort, or exact run.
