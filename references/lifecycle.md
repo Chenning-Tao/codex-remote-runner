@@ -379,8 +379,15 @@ explicit workflow.
 ## Synchronized Source Output Pruning
 
 Use `prune-outputs` to reclaim compute-server storage without discarding the
-synchronized artifact or run history. It is a dry run by default and accepts an
-optional exact `--run-id`; `--apply` performs deletion.
+synchronized artifact or run history. It is a dry run by default, accepts an
+optional exact `--run-id`, and accepts repeated `--server` filters; `--apply`
+performs deletion.
+
+When `output_sync.prune_after_sync.servers` is configured, the output-sync worker
+applies the same guarded deletion automatically after archive verification and
+experiment-result ingestion. It retries lease, transport, and eligibility failures
+without weakening the completed synchronization receipt. Servers not in the
+explicit allow-list retain their source outputs.
 
 Only current, authoritatively succeeded runs with a completed checksum-verified
 sync receipt are eligible. The receipt identity, source server, source path, and

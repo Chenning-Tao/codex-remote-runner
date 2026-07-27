@@ -1184,6 +1184,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("configure-output-sync")
     output_prune_parser = subparsers.add_parser("prune-outputs")
     output_prune_parser.add_argument("--run-id")
+    output_prune_parser.add_argument("--server", action="append")
     output_prune_parser.add_argument("--apply", action="store_true")
     drain_parser = subparsers.add_parser("drain-server")
     drain_parser.add_argument("--server", required=True)

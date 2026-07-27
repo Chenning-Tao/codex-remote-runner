@@ -14,7 +14,7 @@ from .remote_shell import remote_python_stdin_command
 
 RESULT_PREFIX = "RR_OUTPUT_PRUNE_RESULT "
 
-PRUNE_OUTPUT_PROGRAM = r'''import json
+PRUNE_OUTPUT_PROGRAM = r"""import json
 import shutil
 from pathlib import Path, PurePosixPath
 
@@ -77,7 +77,7 @@ elif output.exists():
     emit(True, "removed_file")
 else:
     emit(True, "already_absent")
-'''
+"""
 
 
 class OutputPruneOutcomeUnknown(RuntimeError):
@@ -174,6 +174,18 @@ def request_output_prune(args: argparse.Namespace) -> dict[str, Any]:
     action_args: list[str] = []
     if args.run_id is not None:
         action_args.extend(("--run-id", validate_current_run_id(args.run_id)))
+    requested_servers = getattr(args, "server", None) or ()
+    configured_sources = (
+        set() if config.output_sync is None else set(config.output_sync.source_hosts)
+    )
+    unknown_servers = sorted(set(requested_servers) - configured_sources)
+    if unknown_servers:
+        raise ValueError(
+            "output prune servers must name configured output-sync sources: "
+            + ", ".join(unknown_servers)
+        )
+    for server in requested_servers:
+        action_args.extend(("--server", server))
     if args.apply:
         action_args.append("--apply")
     return call_controller(

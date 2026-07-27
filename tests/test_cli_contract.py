@@ -104,6 +104,7 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
     assert "--project-config" in help_text("sync-outputs")
     prune_outputs_help = help_text("prune-outputs")
     assert "--run-id" in prune_outputs_help
+    assert "--server" in prune_outputs_help
     assert "--apply" in prune_outputs_help
     assert "--server-registry" in help_text("sync-pool")
     add_server_help = help_text("add-server")
@@ -191,7 +192,10 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
         "Run and follow durable remote workloads"
         == metadata["interface"]["short_description"]
     )
-    assert "foreground wait for a live Codex App report" in metadata["interface"]["default_prompt"]
+    assert (
+        "foreground wait for a live Codex App report"
+        in metadata["interface"]["default_prompt"]
+    )
     assert "output synchronization completes" in metadata["interface"]["default_prompt"]
     assert "history-only follow-up" in metadata["interface"]["default_prompt"]
 

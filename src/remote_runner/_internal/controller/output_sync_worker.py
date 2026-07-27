@@ -8,9 +8,15 @@ import time
 from pathlib import Path
 
 from ..execution_registry import project_paths
-from ..output_sync import has_pending, load_config, process_pending_once
+from ..output_sync import (
+    has_pending,
+    has_unpruned_completed_syncs,
+    load_config,
+    process_pending_once,
+)
 from ..tmux import exact_tmux_target, output_sync_tmux_session, resolve_tmux_executable
 from .experiments import ingest_completed_sync_results
+from .output_prune import prune_outputs
 from .registry import ControllerPaths, controller_paths
 
 
@@ -24,10 +30,13 @@ def ensure_output_sync_worker(
         return False
     execution_paths = project_paths(paths.config_path)
     config = load_config(execution_paths.registry_root)
-    if (
-        config is None
-        or config.paused
-        or not has_pending(execution_paths.registry_root)
+    if config is None or config.paused:
+        return False
+    if not has_pending(
+        execution_paths.registry_root
+    ) and not has_unpruned_completed_syncs(
+        execution_paths.registry_root,
+        config.prune_source_servers,
     ):
         return False
     tmux = resolve_tmux_executable()
@@ -93,10 +102,41 @@ def run_worker(
     while True:
         result = process_pending_once(execution_paths, connect_timeout=timeout)
         result["experiment_results"] = ingest_completed_sync_results(paths)
-        print(json.dumps(result, sort_keys=True), flush=True)
-        if once or not result.get("enabled") or int(result.get("remaining", 0)) == 0:
-            return 0
         config = load_config(execution_paths.registry_root)
+        if config is not None and not config.paused and config.prune_source_servers:
+            result["prune_after_sync"] = prune_outputs(
+                argparse.Namespace(
+                    controller_root=paths.root,
+                    project_id=paths.project_id,
+                    run_id=None,
+                    server=list(config.prune_source_servers),
+                    apply=True,
+                    timeout=timeout,
+                )
+            )
+        else:
+            result["prune_after_sync"] = {
+                "applied": False,
+                "servers": [],
+                "candidate_count": 0,
+                "pruned_count": 0,
+                "failed_count": 0,
+            }
+        print(json.dumps(result, sort_keys=True), flush=True)
+        prune_remaining = (
+            config is not None
+            and not config.paused
+            and has_unpruned_completed_syncs(
+                execution_paths.registry_root,
+                config.prune_source_servers,
+            )
+        )
+        if (
+            once
+            or not result.get("enabled")
+            or (int(result.get("remaining", 0)) == 0 and not prune_remaining)
+        ):
+            return 0
         delay = interval if config is None else config.retry_seconds
         time.sleep(delay)
 

@@ -34,7 +34,9 @@ def _candidate(
     if completed.get("schema_version") != 1:
         raise ValueError("unsupported completed output-sync schema")
     raw_intent = completed.get("intent")
-    intent = validate_intent(dict(raw_intent) if isinstance(raw_intent, dict) else raw_intent)
+    intent = validate_intent(
+        dict(raw_intent) if isinstance(raw_intent, dict) else raw_intent
+    )
     receipt = completed.get("receipt")
     if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
         raise ValueError("completed output-sync receipt is invalid")
@@ -93,12 +95,17 @@ def _public(candidate: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _load_current_runs(execution_paths: Any) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+def _load_current_runs(
+    execution_paths: Any,
+) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
     current: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     if not execution_paths.runs_dir.is_dir():
         return current
     for entry in execution_paths.runs_dir.iterdir():
-        if not entry.is_dir() or registry_kind(execution_paths, entry.name) != "current":
+        if (
+            not entry.is_dir()
+            or registry_kind(execution_paths, entry.name) != "current"
+        ):
             continue
         current[entry.name] = load_current_run(execution_paths, entry.name)
     return current
@@ -132,6 +139,7 @@ def prune_outputs(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("controller project config is unavailable")
     execution_paths = project_paths(paths.config_path)
     requested = args.run_id
+    requested_servers = set(getattr(args, "server", None) or ())
     completed = {
         str(item["run_id"]): item
         for item in list_completed_syncs(execution_paths.registry_root)
@@ -147,6 +155,12 @@ def prune_outputs(args: argparse.Namespace) -> dict[str, Any]:
     for run_id, record in sorted(completed.items()):
         if requested is not None and run_id != requested:
             continue
+        raw_intent = record.get("intent")
+        source_server = (
+            raw_intent.get("source_server") if isinstance(raw_intent, dict) else None
+        )
+        if requested_servers and source_server not in requested_servers:
+            continue
         try:
             run = current.get(run_id)
             if run is None:
@@ -154,7 +168,9 @@ def prune_outputs(args: argparse.Namespace) -> dict[str, Any]:
             candidate = _candidate(record, manifest=run[0], state=run[1])
         except (KeyError, TypeError, ValueError) as exc:
             if requested is not None:
-                raise ValueError(f"run is not eligible for output pruning: {exc}") from exc
+                raise ValueError(
+                    f"run is not eligible for output pruning: {exc}"
+                ) from exc
             blocked.append({"run_id": run_id, "reason": str(exc)})
             continue
         if candidate["already_pruned"]:
@@ -167,7 +183,9 @@ def prune_outputs(args: argparse.Namespace) -> dict[str, Any]:
     for candidate in candidates:
         blockers = _overlap_blockers(candidate, current, pruned_ids=pruned_ids)
         if blockers:
-            reason = "output path overlaps retained runs: " + ", ".join(sorted(blockers))
+            reason = "output path overlaps retained runs: " + ", ".join(
+                sorted(blockers)
+            )
             if requested is not None:
                 raise ValueError(reason)
             blocked.append({"run_id": str(candidate["run_id"]), "reason": reason})
@@ -177,6 +195,7 @@ def prune_outputs(args: argparse.Namespace) -> dict[str, Any]:
     if not args.apply:
         return {
             "applied": False,
+            "servers": sorted(requested_servers),
             "candidate_count": len(eligible),
             "candidates": [_public(item) for item in eligible],
             "already_pruned": already_pruned,
@@ -238,6 +257,7 @@ def prune_outputs(args: argparse.Namespace) -> dict[str, Any]:
         results.append(result)
     return {
         "applied": True,
+        "servers": sorted(requested_servers),
         "candidate_count": len(eligible),
         "pruned_count": sum(item["status"] == "pruned" for item in results),
         "failed_count": sum(item["status"] == "failed" for item in results),

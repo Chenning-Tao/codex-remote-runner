@@ -194,7 +194,9 @@ interpreting authority, progress, output synchronization, or transport ambiguity
 ## Guard Destructive Actions
 
 - Read the lifecycle reference before stop, cleanup, purge, or prune.
-- Preview cleanup, purge, and prune before adding `--apply`.
+- Preview manual cleanup, purge, and prune before adding `--apply`; configured
+  post-sync pruning is an explicit persistent policy and uses the same receipt,
+  path, overlap, and maintenance-lease guards.
 - Purge a failed run only with a named succeeded replacement or explicit
   `--no-replacement`; never infer provenance.
 - Purge a task only after the user explicitly discards that exact stored task and all
