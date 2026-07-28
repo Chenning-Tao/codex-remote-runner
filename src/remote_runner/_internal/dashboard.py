@@ -46,6 +46,7 @@ def build_server_inventory(
             "auto_select": runtime.auto_select,
             "python": runtime.python,
             "configured_cores": None,
+            "configured_memory_gb": None,
             "standard_slots": 1,
             "test_slots": 0,
             "testing_enabled": name in config.scheduling.testing_servers,
@@ -73,6 +74,11 @@ def build_server_inventory(
                     f"configured enabled flag for {name!r} must be boolean"
                 )
             cores = _positive_int(raw.get("cores"), f"configured cores for {name!r}")
+            memory_gb = raw.get("memory_gb")
+            if memory_gb is not None:
+                memory_gb = _positive_int(
+                    memory_gb, f"configured memory_gb for {name!r}"
+                )
             slots = _test_slots(raw, name)
             endpoints = [
                 {"ssh": ssh, "ssh_profile": profile}
@@ -87,6 +93,7 @@ def build_server_inventory(
         base.update(
             enabled=runtime.enabled and globally_enabled,
             configured_cores=cores,
+            configured_memory_gb=memory_gb,
             test_slots=slots,
             endpoints=endpoints,
         )

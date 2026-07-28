@@ -83,6 +83,9 @@ def validate_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "configured_cores": _optional_non_negative_int(
                     raw.get("configured_cores"), "configured_cores"
                 ),
+                "configured_memory_gb": _optional_non_negative_int(
+                    raw.get("configured_memory_gb"), "configured_memory_gb"
+                ),
                 "standard_slots": _optional_non_negative_int(
                     raw.get("standard_slots", 1), "standard_slots"
                 )
@@ -108,6 +111,7 @@ def _probe_server(server: dict[str, Any], timeout: int) -> dict[str, Any]:
             "testing_enabled",
             "output_root_configured",
             "configured_cores",
+            "configured_memory_gb",
             "standard_slots",
             "test_slots",
             "capacity_revision",

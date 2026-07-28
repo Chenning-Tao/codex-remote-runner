@@ -298,6 +298,7 @@ export function ServerTable({
         <thead>
           <tr>
             <th scope="col">服务器</th>
+            <th scope="col">硬件</th>
             <th scope="col">容量</th>
             <th scope="col">运行中的任务</th>
           </tr>
@@ -317,6 +318,16 @@ export function ServerTable({
                       <small>{serverStatus[serverState(server)]?.text ?? "未知"}{drained ? " · 暂停调度" : ""}</small>
                     </span>
                   </button>
+                </td>
+                <td>
+                  <div className="rr-hardware-cell">
+                    <strong className="rr-mono">
+                      {typeof server.configured_cores === "number" ? `${server.configured_cores} 核` : "-- 核"}
+                    </strong>
+                    <small className="rr-mono">
+                      {typeof server.configured_memory_gb === "number" ? `${server.configured_memory_gb} GB 内存` : "-- GB 内存"}
+                    </small>
+                  </div>
                 </td>
                 <td>
                   <div className="rr-resource-cell">
@@ -1033,6 +1044,7 @@ export function DetailPanel({
         <DescriptionList isHorizontal>
           <DetailGroup term="负载（1 / 5 / 15 分钟）" mono>{[server.load1, server.load5, server.load15].map((value) => typeof value === "number" ? value.toFixed(1) : "--").join(" / ")}</DetailGroup>
           <DetailGroup term="配置核心数" mono>{server.configured_cores ?? "--"}</DetailGroup>
+          <DetailGroup term="配置内存" mono>{typeof server.configured_memory_gb === "number" ? `${server.configured_memory_gb} GB` : "--"}</DetailGroup>
           <DetailGroup term="远程核心数" mono>{server.remote_cores ?? "--"}</DetailGroup>
           <DetailGroup term="Standard 槽位" mono>{server.standard_slots ?? 1}</DetailGroup>
           <DetailGroup term="Test 槽位" mono>{server.test_slots ?? 0}</DetailGroup>

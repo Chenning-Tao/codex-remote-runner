@@ -375,12 +375,13 @@ input {
 }
 
 .rr-server-table {
-  min-width: 700px;
+  min-width: 820px;
 }
 
-.rr-server-table th:nth-child(1) { width: 18%; }
-.rr-server-table th:nth-child(2) { width: 21%; }
-.rr-server-table th:nth-child(3) { width: 61%; }
+.rr-server-table th:nth-child(1) { width: 17%; }
+.rr-server-table th:nth-child(2) { width: 15%; }
+.rr-server-table th:nth-child(3) { width: 21%; }
+.rr-server-table th:nth-child(4) { width: 47%; }
 
 .rr-queue-table {
   min-width: 482px;
@@ -497,10 +498,51 @@ input {
 }
 
 .rr-server-cell small,
+.rr-hardware-cell small,
 .rr-resource-cell small {
   color: var(--rr-text-muted);
   font-size: 13px;
   line-height: 1.35;
+}
+
+.rr-hardware-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rr-hardware-cell strong {
+  color: var(--rr-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.rr-server-header-actions {
+  gap: 8px;
+}
+
+.rr-sort-control select {
+  height: 32px;
+  padding: 0 28px 0 10px;
+  color: var(--rr-text);
+  background: var(--rr-surface);
+  border: 1px solid var(--rr-border-strong);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.rr-sort-control select:focus-visible {
+  outline: 2px solid var(--rr-accent);
+  outline-offset: 1px;
+}
+
+.rr-server-header-actions .pf-v6-c-button.pf-m-plain {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 7px;
 }
 
 .rr-state-dot {

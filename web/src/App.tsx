@@ -14,7 +14,7 @@ import {
   ToggleGroupItem,
   Tooltip,
 } from "@patternfly/react-core";
-import { RefreshCw, SlidersHorizontal, X } from "lucide-react";
+import { ArrowDown, ArrowUp, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   ConnectionStatus,
@@ -38,6 +38,8 @@ import { useDashboard } from "./useDashboard";
 
 type PriorityFilter = "all" | "urgent" | "normal";
 type MobileView = "servers" | "queue";
+type ServerSort = "name" | "cores" | "memory";
+type SortDirection = "asc" | "desc";
 type QueueActionNotice = {
   variant: "success" | "danger";
   title: string;
@@ -63,6 +65,37 @@ function initialMobileView(): MobileView {
 function initialQueuePage(): number {
   const value = Number.parseInt(new URLSearchParams(window.location.search).get("page") ?? "", 10);
   return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function initialServerSort(): ServerSort {
+  const value = new URLSearchParams(window.location.search).get("server_sort");
+  return value === "cores" || value === "memory" ? value : "name";
+}
+
+function initialServerSortDirection(): SortDirection {
+  const value = new URLSearchParams(window.location.search).get("server_sort_dir");
+  return value === "asc" || value === "desc" ? value : "asc";
+}
+
+function compareOptionalNumber(left: number | null | undefined, right: number | null | undefined, direction: SortDirection): number {
+  const leftMissing = typeof left !== "number";
+  const rightMissing = typeof right !== "number";
+  if (leftMissing || rightMissing) {
+    if (leftMissing === rightMissing) return 0;
+    return leftMissing ? 1 : -1;
+  }
+  return direction === "asc" ? left - right : right - left;
+}
+
+function compareServers(left: ServerSnapshot, right: ServerSnapshot, sort: ServerSort, direction: SortDirection): number {
+  const value = sort === "cores"
+    ? compareOptionalNumber(left.configured_cores, right.configured_cores, direction)
+    : sort === "memory"
+      ? compareOptionalNumber(left.configured_memory_gb, right.configured_memory_gb, direction)
+      : direction === "asc"
+        ? left.name.localeCompare(right.name, undefined, { numeric: true })
+        : right.name.localeCompare(left.name, undefined, { numeric: true });
+  return value || left.name.localeCompare(right.name, undefined, { numeric: true });
 }
 
 function serverMatches(server: ServerSnapshot, query: string): boolean {
@@ -107,6 +140,8 @@ function RunsDashboard() {
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") ?? "");
   const [priority, setPriority] = useState<PriorityFilter>(initialPriority);
   const [mobileView, setMobileView] = useState<MobileView>(initialMobileView);
+  const [serverSort, setServerSort] = useState<ServerSort>(initialServerSort);
+  const [serverSortDirection, setServerSortDirection] = useState<SortDirection>(initialServerSortDirection);
   const [queuePage, setQueuePage] = useState(initialQueuePage);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -134,12 +169,16 @@ function RunsDashboard() {
     priority === "all" ? url.searchParams.delete("priority") : url.searchParams.set("priority", priority);
     mobileView === "servers" ? url.searchParams.delete("view") : url.searchParams.set("view", mobileView);
     queuePage === 1 ? url.searchParams.delete("page") : url.searchParams.set("page", String(queuePage));
+    serverSort === "name" ? url.searchParams.delete("server_sort") : url.searchParams.set("server_sort", serverSort);
+    serverSortDirection === "asc" ? url.searchParams.delete("server_sort_dir") : url.searchParams.set("server_sort_dir", serverSortDirection);
     window.history.replaceState(null, "", url);
-  }, [mobileView, priority, query, queuePage]);
+  }, [mobileView, priority, query, queuePage, serverSort, serverSortDirection]);
 
   const servers = useMemo(
-    () => (document?.snapshot?.servers ?? []).filter((server) => serverMatches(server, query.trim())),
-    [document, query],
+    () => (document?.snapshot?.servers ?? [])
+      .filter((server) => serverMatches(server, query.trim()))
+      .sort((left, right) => compareServers(left, right, serverSort, serverSortDirection)),
+    [document, query, serverSort, serverSortDirection],
   );
   const queue = useMemo(
     () => (document?.snapshot?.queue ?? []).filter((entry) => {
@@ -438,7 +477,34 @@ function RunsDashboard() {
                       <h2 id="servers-title">服务器</h2>
                       <p>计算资源与当前任务</p>
                     </div>
-                    <span className="rr-count rr-mono">{serverCount}</span>
+                    <div className="rr-section-header-actions rr-server-header-actions">
+                      <span className="rr-count rr-mono">{serverCount}</span>
+                      <label className="rr-sort-control">
+                        <span className="rr-visually-hidden">服务器排序方式</span>
+                        <select
+                          aria-label="服务器排序方式"
+                          value={serverSort}
+                          onChange={(event) => {
+                            const value = event.currentTarget.value as ServerSort;
+                            setServerSort(value);
+                            setServerSortDirection(value === "name" ? "asc" : "desc");
+                          }}
+                        >
+                          <option value="name">按名称</option>
+                          <option value="cores">按核心数</option>
+                          <option value="memory">按内存</option>
+                        </select>
+                      </label>
+                      <Tooltip content={serverSortDirection === "asc" ? "当前升序，点击切换为降序" : "当前降序，点击切换为升序"}>
+                        <Button
+                          variant="plain"
+                          aria-label={serverSortDirection === "asc" ? "切换为降序" : "切换为升序"}
+                          onClick={() => setServerSortDirection((value) => value === "asc" ? "desc" : "asc")}
+                        >
+                          {serverSortDirection === "asc" ? <ArrowUp aria-hidden="true" /> : <ArrowDown aria-hidden="true" />}
+                        </Button>
+                      </Tooltip>
+                    </div>
                   </header>
                   {!document ? (
                     <div className="rr-loading" aria-label="正在加载服务器"><Skeleton width="34%" /><Skeleton width="100%" /><Skeleton width="100%" /></div>

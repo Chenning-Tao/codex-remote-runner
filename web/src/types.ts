@@ -28,6 +28,7 @@ export interface ServerSnapshot {
   enabled?: boolean;
   auto_select?: boolean;
   configured_cores?: number | null;
+  configured_memory_gb?: number | null;
   remote_cores?: number | null;
   standard_slots?: number;
   test_slots?: number;

@@ -15,8 +15,8 @@ or compute server.
 
 ## Registry And Project Ownership
 
-Keep connection endpoints, configured cores, placement priority, and global
-enablement in `~/.codex/remote-servers.yaml`. Keep project execution ownership
+Keep connection endpoints, configured cores and memory, placement priority, and
+global enablement in `~/.codex/remote-servers.yaml`. Keep project execution ownership
 in one `.remote-runner.yaml`.
 
 Task-slot capacity belongs to the physical server and is shared by every project
@@ -27,9 +27,14 @@ servers:
   compute-a:
     ssh: compute-a
     cores: 256
+    memory_gb: 512
     testing:
       slots: 1
 ```
+
+`memory_gb` is optional static inventory metadata used by the web dashboard for
+display and sorting. It is not probed on each refresh and does not affect task
+scheduling.
 
 The controller initially uses one standard slot and the configured
 `testing.slots` value. The local web dashboard can then persist both values in
