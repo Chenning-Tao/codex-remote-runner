@@ -5,6 +5,25 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.5.0 - 2026-07-28
+
+### Added
+
+- Added opt-in, checksum-verified pruning of synchronized source outputs for an
+  explicit allow-list of configured servers.
+- Added confirmed dashboard controls to drain or resume individual servers.
+- Added cross-page batch updates for queued workload class and priority while
+  preserving any scheduling settings the user leaves unchanged.
+- Added explicit Web accept/reject decisions for eligible experiment candidates,
+  including candidate metrics, observations, source runs, and required reasons.
+
+### Fixed
+
+- Kept later items in a scheduling batch on the revision produced by earlier
+  lane-changing items without suppressing real concurrent-edit conflicts.
+- Reduced live experiment loading to one consistency-locked dashboard query for
+  the current 280-point design and kept existing table data visible during refreshes.
+
 ## 0.4.0 - 2026-07-27
 
 ### Added

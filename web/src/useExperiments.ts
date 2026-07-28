@@ -18,6 +18,7 @@ interface QueryResponse<T> {
   event_cursor: number;
   active_design_revision_id: string | null;
   items: T[];
+  studies?: RawStudy[];
   next_cursor: string | null;
   has_more: boolean;
 }
@@ -38,7 +39,12 @@ interface RawStudy {
   active_design_revision_id: string;
   previous_design_revision_id: string | null;
   plan_digest: string;
-  dimensions: Array<{ key: string; display_name: string }>;
+  dimensions: Array<{
+    key: string;
+    display_name: string;
+    value_type: "string" | "integer" | "number" | "boolean";
+    order: ExperimentScalar[];
+  }>;
   metrics: RawMetric[];
   presentation: {
     primary_metric: string;
@@ -51,6 +57,7 @@ interface RawStudy {
     matrix: {
       row_dimension: string;
       column_dimension: string;
+      facet_dimensions?: string[];
     };
   };
   impact: { unchanged: number; new: number; stale: number; archived: number };
@@ -67,6 +74,7 @@ interface RawPoint {
   dimensions: Record<string, ExperimentScalar>;
   status: ExperimentPointStatus;
   metrics: Record<string, MetricReading>;
+  accepted_acceptance_id?: string | null;
   accepted_result_id: string | null;
   observation_count: number | null;
   candidate_count: number;
@@ -79,6 +87,9 @@ interface RawPoint {
     eligible: boolean;
     ineligibility_reasons: string[];
     observation_count: number;
+    decision_action?: "accept" | "reject" | "revoke" | "supersede" | null;
+    metrics?: Record<string, MetricReading>;
+    source_run_ids?: string[];
   }>;
   artifacts?: Array<{
     role: string;
@@ -144,6 +155,9 @@ function adaptStudy(raw: RawStudy): ExperimentStudy {
     dimensions: Object.fromEntries(
       raw.dimensions.map((dimension) => [dimension.key, dimension.display_name]),
     ),
+    dimensionOptions: Object.fromEntries(
+      raw.dimensions.map((dimension) => [dimension.key, dimension.order ?? []]),
+    ),
     metrics: raw.metrics.map((metric) => ({
       key: metric.key,
       label: metric.display_name,
@@ -154,7 +168,13 @@ function adaptStudy(raw: RawStudy): ExperimentStudy {
       valueType: metric.value_type,
     })),
     primaryMetric: raw.presentation.primary_metric || raw.metrics[0]?.key || "",
-    presentation: { xDimension, seriesDimension, rowDimension, columnDimension },
+    presentation: {
+      xDimension,
+      seriesDimension,
+      rowDimension,
+      columnDimension,
+      facetDimensions: raw.presentation.matrix.facet_dimensions ?? [],
+    },
     impact: raw.impact,
     points: [],
     pointCount: raw.point_count,
@@ -180,15 +200,25 @@ function adaptPoint(raw: RawPoint): ExperimentPoint {
     role: runRole(run.role),
     status: runStatus(run.status),
   }));
-  const resultHistory: ExperimentResultCandidate[] | undefined = raw.result_history?.map((result) => ({
-    resultId: result.result_id,
-    disposition: result.result_id === raw.accepted_result_id
-      ? "accepted"
-      : result.eligible
-        ? "review"
-        : "retained",
-    sourceRunIds: [],
-  }));
+  const resultHistory: ExperimentResultCandidate[] | undefined = raw.result_history?.map((result) => {
+    let disposition: ExperimentResultCandidate["disposition"] = "retained";
+    if (result.decision_action === "reject") disposition = "rejected";
+    else if (result.result_id === raw.accepted_result_id) disposition = "accepted";
+    else if (
+      result.decision_action === "accept"
+      || result.decision_action === "supersede"
+      || result.decision_action === "revoke"
+    ) disposition = "superseded";
+    else if (result.eligible) disposition = "review";
+    return {
+      resultId: result.result_id,
+      disposition,
+      sourceRunIds: result.source_run_ids ?? [],
+      observationCount: result.observation_count,
+      metrics: result.metrics ?? {},
+      ineligibilityReasons: result.ineligibility_reasons,
+    };
+  });
   const artifacts: ExperimentArtifactRef[] | undefined = raw.artifacts?.map((artifact) => ({
     label: artifact.role,
     uri: `runs/${artifact.run_id}/${artifact.relative_path}`,
@@ -201,6 +231,7 @@ function adaptPoint(raw: RawPoint): ExperimentPoint {
     status: raw.status,
     dimensions: raw.dimensions,
     metrics: raw.metrics,
+    acceptedAcceptanceId: raw.accepted_acceptance_id ?? undefined,
     acceptedResultId: raw.accepted_result_id ?? undefined,
     observationCount: raw.observation_count ?? undefined,
     candidateCount: raw.candidate_count,
@@ -242,7 +273,7 @@ async function allPages<T>(payload: Record<string, unknown>): Promise<QueryRespo
   for (let page = 0; page < 1000; page += 1) {
     const response: QueryResponse<T> = await postQuery<T>({
       ...payload,
-      page: { limit: 200, cursor },
+      page: { limit: 500, cursor },
     });
     if (first === null) first = response;
     items.push(...response.items);
@@ -271,57 +302,58 @@ export function useExperiments(enabled: boolean, studyId: string | null) {
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    setState((current) => ({ ...current, loadingStudies: true, error: null }));
-    allPages<RawStudy>({ operation: "study_list" })
-      .then((response) => {
-        if (cancelled) return;
-        setState((current) => ({
-          ...current,
-          projectId: response.project_id,
-          registryEpoch: response.registry_epoch,
-          eventCursor: response.event_cursor,
-          studies: response.items.map(adaptStudy),
-          loadingStudies: false,
-        }));
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setState((current) => ({
-            ...current,
-            loadingStudies: false,
-            error: error instanceof Error ? error.message : "实验注册表请求失败",
-          }));
-        }
-      });
-    return () => { cancelled = true; };
-  }, [enabled, generation]);
-
-  useEffect(() => {
-    if (!enabled || !studyId) {
+    if (!studyId) {
       setState((current) => ({
         ...current,
         points: [],
         pointsStudyId: null,
+        loadingStudies: true,
         loadingPoints: false,
+        error: null,
       }));
-      return;
+      allPages<RawStudy>({ operation: "study_list" })
+        .then((response) => {
+          if (cancelled) return;
+          setState((current) => ({
+            ...current,
+            projectId: response.project_id,
+            registryEpoch: response.registry_epoch,
+            eventCursor: response.event_cursor,
+            studies: response.items.map(adaptStudy),
+            loadingStudies: false,
+          }));
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) {
+            setState((current) => ({
+              ...current,
+              loadingStudies: false,
+              error: error instanceof Error ? error.message : "实验注册表请求失败",
+            }));
+          }
+        });
+      return () => { cancelled = true; };
     }
-    let cancelled = false;
     setState((current) => ({
       ...current,
-      points: [],
-      pointsStudyId: null,
+      points: current.pointsStudyId === studyId ? current.points : [],
+      pointsStudyId: current.pointsStudyId === studyId ? studyId : null,
+      loadingStudies: current.studies.length === 0,
       loadingPoints: true,
       error: null,
     }));
-    allPages<RawPoint>({ operation: "point_list", study: { study_id: studyId } })
+    allPages<RawPoint>({ operation: "dashboard", study: { study_id: studyId } })
       .then((response) => {
         if (!cancelled) {
           setState((current) => ({
             ...current,
+            projectId: response.project_id,
+            registryEpoch: response.registry_epoch,
             eventCursor: response.event_cursor,
+            studies: response.studies?.map(adaptStudy) ?? current.studies,
             points: response.items.map(adaptPoint),
             pointsStudyId: studyId,
+            loadingStudies: false,
             loadingPoints: false,
           }));
         }
@@ -330,6 +362,7 @@ export function useExperiments(enabled: boolean, studyId: string | null) {
         if (!cancelled) {
           setState((current) => ({
             ...current,
+            loadingStudies: false,
             loadingPoints: false,
             error: error instanceof Error ? error.message : "实验点请求失败",
           }));
@@ -352,5 +385,51 @@ export function useExperiments(enabled: boolean, studyId: string | null) {
     return adaptPoint(response.items[0]);
   }, []);
 
-  return { ...state, refresh, loadPointDetail };
+  const decideResult = useCallback(async (
+    acceptanceId: string,
+    pointRevisionId: string,
+    resultId: string,
+    action: "accept" | "reject",
+    expectedCurrentAcceptanceId: string | null,
+    reason: string,
+  ): Promise<void> => {
+    const registryAction = action === "accept" && expectedCurrentAcceptanceId
+      ? "supersede"
+      : action;
+    const response = await fetch("/api/experiments/acceptances", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Remote-Runner-Action": "decide-experiment-result",
+      },
+      cache: "no-store",
+      body: JSON.stringify({
+        acceptance_id: acceptanceId,
+        point_revision_id: pointRevisionId,
+        result_id: resultId,
+        expected_current_acceptance_id: expectedCurrentAcceptanceId,
+        action: registryAction,
+        actor: "web-dashboard",
+        reason,
+        policy: "manual-web",
+        ...(registryAction === "supersede"
+          ? { supersedes_acceptance_id: expectedCurrentAcceptanceId }
+          : {}),
+      }),
+    });
+    if (!response.ok) {
+      let detail = `实验结果决策失败（${response.status}）`;
+      try {
+        const error: unknown = await response.json();
+        if (error && typeof error === "object" && "detail" in error && typeof error.detail === "string") {
+          detail = error.detail;
+        }
+      } catch {
+        // Keep the status fallback for a non-JSON proxy response.
+      }
+      throw new Error(detail);
+    }
+  }, []);
+
+  return { ...state, refresh, loadPointDetail, decideResult };
 }

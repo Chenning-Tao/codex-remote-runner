@@ -49,7 +49,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.4.0'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.5.0'
 remote-runner --help
 ```
 
@@ -105,18 +105,20 @@ its exact revision on a newly selected compatible server before enabling it. It
 can also switch queued work between the standard and test lanes and edit each
 server's controller-wide standard/test concurrency limits. Slot limits control
 admission only and do not rewrite worker counts or stop running work.
-Queue rows can be selected across pages to apply one compatible server set to
-several queued workloads. Queue writes use per-run controller revisions and a
-bounded preparation reservation so stale edits or work that has entered
-dispatch are rejected; batch operations report partial failures explicitly.
+Queue rows can be selected across pages to batch-change workload class, priority,
+and optionally one compatible server set. Unselected settings remain unchanged.
+Queue writes use per-run controller revisions and a bounded preparation
+reservation so stale edits or work that has entered dispatch are rejected; batch
+operations report partial failures explicitly.
 
 ## Experiment Registry
 
 The Experiments section indexes controller-owned published generic designs, exact
 point revisions, frozen run bindings, verified structured result manifests, and
-explicit acceptance decisions. The browser is read-only and uses bounded
-controller queries; it never selects a result by timestamp or falls back to
-synthetic data.
+explicit result decisions. The browser uses bounded controller queries and lets
+an operator accept or reject an eligible candidate after inspecting its metrics,
+observations, and source runs. It never selects a result by timestamp or falls
+back to synthetic data.
 
 Open `?demo=experiments` to inspect the bundled `decoder_atomloss` project
 snapshot without a Controller. This static preview is test data for the dashboard

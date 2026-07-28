@@ -1,8 +1,8 @@
 # Experiment Registry and Results Dashboard
 
 - Status: initial MVP implemented; follow-up hardening remains
-- Target: controller, CLI, output sync, and read-only web dashboard
-- Last updated: 2026-07-26
+- Target: controller, CLI, output sync, and explicit Web result decisions
+- Last updated: 2026-07-28
 
 ## 0. Implementation Snapshot
 
@@ -10,8 +10,9 @@ The initial MVP now implements the product decisions that were left open in the
 original proposal:
 
 - Contract names remain unversioned; compatibility uses `schema_version: 1`.
-- The web dashboard is read-only. Plan publication and acceptance remain explicit
-  CLI/controller writes.
+- Plan publication remains a CLI/controller write. The live Web dashboard now
+  records explicit accept/reject decisions with confirmation, reason, immutable
+  IDs, and compare-and-swap protection; the bundled snapshot remains read-only.
 - Eligible results are never accepted automatically.
 - Native results enter through a verified output-sync receipt. Direct result
   ingestion is reserved for producers declaring `legacy_adapter` mode.
@@ -610,8 +611,8 @@ that transition.
 
 ### 8.2 Acceptance records
 
-Acceptance is an append-only event with its own immutable ID. Accept, revoke,
-and supersede operations include:
+Result decisions are append-only events with their own immutable IDs. Accept,
+reject, revoke, and supersede operations include:
 
 - Exact `point_revision_id` and `result_id`.
 - `expected_current_acceptance_id` for compare-and-swap.
@@ -811,6 +812,8 @@ command or logs.
 Supported read operations should include:
 
 - `study_list` and compact `study_status`.
+- `dashboard` for one bounded point page plus the study rail in a single
+  consistency-locked read.
 - `point_list` with generic dimension and status filters.
 - Exact `point_detail`.
 - `point_history` and explicit design/point-revision scope.
@@ -837,7 +840,7 @@ Token and payload controls are server-enforced:
 
 - Compact `study_status` returns active revision metadata and aggregate counts,
   not point or run arrays.
-- List operations default to 50 records and cap at 200.
+- List operations default to 50 records and cap at 500.
 - `fields` is an allow-listed projection, not a SQL fragment.
 - Generic dimension filters are validated against the published dimension
   catalog. Domain keys such as `code` or `method` work because they are plan
@@ -871,6 +874,7 @@ remote-runner experiment point history
 remote-runner experiment impact show
 remote-runner experiment reruns list
 remote-runner experiment acceptance accept
+remote-runner experiment acceptance reject
 remote-runner experiment acceptance revoke
 remote-runner experiment registry doctor
 remote-runner experiment registry rebuild
@@ -951,7 +955,8 @@ not stream its entire point matrix on each controller probe.
 
 ### Increment 0: Freeze decisions and fixtures
 
-- Resolve the acceptance policy and MVP web write scope.
+- Acceptance policy and Web write scope are resolved: automatic acceptance stays
+  disabled, while explicit accept/reject decisions are enabled in the live view.
 - Decide whether native producers are required, rather than merely encouraged,
   to emit `experiment_result`.
 - Freeze canonical JSON/digest rules and ID formats.
@@ -1070,8 +1075,10 @@ current curve.
 
 1. **Automatic acceptance:** disabled. Only an explicit acceptance event changes
    the accepted-result head and completes a point revision.
-2. **MVP dashboard writes:** the first dashboard is read-only. Mutation stays at
-   the CLI/controller boundary with explicit IDs and compare-and-swap fields.
+2. **Dashboard result decisions:** the live dashboard may accept or reject an
+   eligible candidate using explicit IDs, a required reason, action-header
+   confirmation, and compare-and-swap fields. Other mutation stays at the
+   CLI/controller boundary.
 3. **Native producer requirement:** new producers emit `experiment_result` and
    use verified output-sync ingestion. Historical imports must declare
    `producer.mode: "legacy_adapter"` and use an explicit adapter.

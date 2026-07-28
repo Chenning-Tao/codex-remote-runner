@@ -91,6 +91,12 @@ export interface BatchQueueUpdateItem {
   expected_revision: number;
 }
 
+export interface BatchQueueUpdateChanges {
+  queue_priority?: "urgent" | "normal";
+  workload_class?: "standard" | "test";
+  eligible_servers?: string[];
+}
+
 export interface BatchQueueUpdateFailure {
   run_id: string;
   error: string;

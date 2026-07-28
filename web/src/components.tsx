@@ -24,8 +24,10 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleOff,
+  CirclePause,
   Gauge,
   LoaderCircle,
+  Play,
   Save,
   ShieldAlert,
   CircleStop,
@@ -43,6 +45,7 @@ import {
 import type {
   ActiveRun,
   BatchQueueUpdateItem,
+  BatchQueueUpdateChanges,
   BatchQueueUpdateResult,
   CapacityUpdateChanges,
   ConnectionState,
@@ -52,7 +55,7 @@ import type {
   Selection,
   ServerSnapshot,
 } from "./types";
-import { QueueUpdateError, StopRunError } from "./useDashboard";
+import { QueueUpdateError, ServerDrainError, StopRunError } from "./useDashboard";
 
 interface StatusVisual {
   text: string;
@@ -127,8 +130,12 @@ function serverSupportsWorkload(
     : server.testing_enabled === true && (server.test_slots ?? 0) > 0;
 }
 
-function taskCanUseServer(entry: QueueEntry, server: ServerSnapshot): boolean {
-  if (!serverSupportsWorkload(server, queueWorkload(entry))) return false;
+function taskCanUseServer(
+  entry: QueueEntry,
+  server: ServerSnapshot,
+  workload = queueWorkload(entry),
+): boolean {
+  if (!serverSupportsWorkload(server, workload)) return false;
   if (preparedServerNames(entry).includes(server.name)) return true;
   return entry.job.portable_output !== false
     && server.enabled !== false
@@ -562,6 +569,7 @@ export function DetailPanel({
   onBatchQueueUpdate,
   onBatchResult,
   onCapacityUpdate,
+  onServerDrainUpdate,
   availableServers,
 }: {
   selection: Selection;
@@ -574,7 +582,7 @@ export function DetailPanel({
   ) => Promise<void>;
   onBatchQueueUpdate: (
     updates: BatchQueueUpdateItem[],
-    eligibleServers: string[],
+    changes: BatchQueueUpdateChanges,
   ) => Promise<BatchQueueUpdateResult>;
   onBatchResult: (result: BatchQueueUpdateResult) => void;
   onCapacityUpdate: (
@@ -582,6 +590,7 @@ export function DetailPanel({
     expectedRevision: number,
     changes: CapacityUpdateChanges,
   ) => Promise<void>;
+  onServerDrainUpdate: (server: string, drained: boolean) => Promise<void>;
   availableServers: ServerSnapshot[];
 }) {
   let title: string;
@@ -607,6 +616,15 @@ export function DetailPanel({
   const [savingQueue, setSavingQueue] = useState(false);
   const [queueError, setQueueError] = useState<string | null>(null);
   const [draftBatchServers, setDraftBatchServers] = useState<string[]>([]);
+  const [draftBatchPriority, setDraftBatchPriority] = useState<
+    "unchanged" | "urgent" | "normal"
+  >("unchanged");
+  const [draftBatchWorkload, setDraftBatchWorkload] = useState<
+    "unchanged" | "standard" | "test"
+  >("unchanged");
+  const [draftBatchServerMode, setDraftBatchServerMode] = useState<
+    "unchanged" | "replace"
+  >("unchanged");
   const [savingBatch, setSavingBatch] = useState(false);
   const savingBatchRef = useRef(false);
   const [activeBatchRequest, setActiveBatchRequest] = useState<{
@@ -620,6 +638,9 @@ export function DetailPanel({
   const [draftTestSlots, setDraftTestSlots] = useState(0);
   const [savingCapacity, setSavingCapacity] = useState(false);
   const [capacityError, setCapacityError] = useState<string | null>(null);
+  const [confirmingDrain, setConfirmingDrain] = useState(false);
+  const [updatingDrain, setUpdatingDrain] = useState(false);
+  const [drainError, setDrainError] = useState<string | null>(null);
   const preparedServers = queueEntry?.job.supported_servers
     ?? queueEntry?.job.eligible_servers
     ?? [];
@@ -660,7 +681,11 @@ export function DetailPanel({
   };
   const batchServerOptions = availableServers.filter((server) => (
     batchEntries.length > 0
-    && batchEntries.every((entry) => taskCanUseServer(entry, server))
+    && batchEntries.every((entry) => taskCanUseServer(
+      entry,
+      server,
+      draftBatchWorkload === "unchanged" ? queueWorkload(entry) : draftBatchWorkload,
+    ))
   ));
   const batchServerOptionKey = batchServerOptions.map((server) => server.name).join("\0");
   const batchPreparationCounts = new Map(
@@ -674,6 +699,17 @@ export function DetailPanel({
   const batchRequiresPreparation = draftBatchServers.some(
     (server) => (batchPreparationCounts.get(server) ?? 0) > 0,
   );
+  const batchHasChanges = draftBatchPriority !== "unchanged"
+    || draftBatchWorkload !== "unchanged"
+    || draftBatchServerMode === "replace";
+  const batchWorkloadNeedsServers = draftBatchWorkload !== "unchanged"
+    && draftBatchServerMode === "unchanged"
+    && batchEntries.some(
+      (entry) => !(entry.job.eligible_servers ?? []).some((serverName) => {
+        const server = availableServers.find((item) => item.name === serverName);
+        return server ? serverSupportsWorkload(server, draftBatchWorkload) : false;
+      }),
+    );
   const activeBatchPreparationTotal = activeBatchRequest
     ? activeBatchRequest.servers.reduce(
       (total, server) => total + (activeBatchRequest.preparationTotals[server] ?? 0),
@@ -696,7 +732,7 @@ export function DetailPanel({
   const batchPlacementUpdating = batchEntries.some(
     (entry) => Boolean(entry.state.placement_update),
   );
-  const panelBusy = stopping || savingQueue || savingCapacity || savingBatch;
+  const panelBusy = stopping || savingQueue || savingCapacity || savingBatch || updatingDrain;
 
   useEffect(() => {
     setConfirmingStop(false);
@@ -715,14 +751,28 @@ export function DetailPanel({
   useEffect(() => {
     if (!batchEntries.length || savingBatchRef.current) return;
     const commonServers = (batchEntries[0].job.eligible_servers ?? []).filter(
-      (server) => batchEntries.every(
-        (entry) => (entry.job.eligible_servers ?? []).includes(server),
-      ) && batchServerOptions.some((option) => option.name === server),
+      (server) => batchEntries.every((entry) => (
+        (entry.job.eligible_servers ?? []).includes(server)
+        && availableServers.some(
+          (option) => option.name === server && taskCanUseServer(entry, option),
+        )
+      )),
     );
     setDraftBatchServers(commonServers);
+    setDraftBatchPriority("unchanged");
+    setDraftBatchWorkload("unchanged");
+    setDraftBatchServerMode("unchanged");
     setActiveBatchRequest(null);
     setBatchError(null);
-  }, [batchRunKey, batchServerOptionKey]);
+  }, [batchRunKey]);
+
+  useEffect(() => {
+    if (savingBatchRef.current) return;
+    const available = new Set(batchServerOptions.map((server) => server.name));
+    setDraftBatchServers((current) => (
+      current.filter((server) => available.has(server))
+    ));
+  }, [batchServerOptionKey]);
 
   useEffect(() => {
     setDraftStandardSlots(selectedServer?.standard_slots ?? 1);
@@ -730,6 +780,12 @@ export function DetailPanel({
     setSavingCapacity(false);
     setCapacityError(null);
   }, [selectedServer?.name, selectedServer?.capacity_revision]);
+
+  useEffect(() => {
+    setConfirmingDrain(false);
+    setUpdatingDrain(false);
+    setDrainError(null);
+  }, [selectedServer?.name, selection.kind === "server" ? selection.drained : false]);
 
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
@@ -786,8 +842,13 @@ export function DetailPanel({
     }
   }
 
-  async function saveBatchServerSettings() {
-    if (savingBatchRef.current || !draftBatchServers.length) return;
+  async function saveBatchQueueSettings() {
+    if (
+      savingBatchRef.current
+      || !batchHasChanges
+      || batchWorkloadNeedsServers
+      || (draftBatchServerMode === "replace" && !draftBatchServers.length)
+    ) return;
     const updates: BatchQueueUpdateItem[] = [];
     for (const entry of batchEntries) {
       const runId = entry.job.run_id;
@@ -798,27 +859,37 @@ export function DetailPanel({
       }
       updates.push({ run_id: runId, expected_revision: revision });
     }
+    const changes: BatchQueueUpdateChanges = {};
+    if (draftBatchPriority !== "unchanged") {
+      changes.queue_priority = draftBatchPriority;
+    }
+    if (draftBatchWorkload !== "unchanged") {
+      changes.workload_class = draftBatchWorkload;
+    }
+    if (draftBatchServerMode === "replace") {
+      changes.eligible_servers = draftBatchServers;
+    }
     setActiveBatchRequest({
       entryCount: updates.length,
       preparationTotals: Object.fromEntries(
-        draftBatchServers.map((server) => [
+        (changes.eligible_servers ?? []).map((server) => [
           server,
           batchPreparationCounts.get(server) ?? 0,
         ]),
       ),
-      servers: [...draftBatchServers],
+      servers: [...(changes.eligible_servers ?? [])],
     });
     savingBatchRef.current = true;
     setSavingBatch(true);
     setBatchError(null);
     try {
-      const result = await onBatchQueueUpdate(updates, draftBatchServers);
+      const result = await onBatchQueueUpdate(updates, changes);
       onBatchResult(result);
       onClose();
     } catch (error: unknown) {
       savingBatchRef.current = false;
       setActiveBatchRequest(null);
-      setBatchError(error instanceof Error ? error.message : "批量设置服务器失败");
+      setBatchError(error instanceof Error ? error.message : "批量修改调度设置失败");
       setSavingBatch(false);
     }
   }
@@ -840,6 +911,24 @@ export function DetailPanel({
     }
   }
 
+  async function updateServerDrain(drained: boolean) {
+    if (!selectedServer || updatingDrain) return;
+    setUpdatingDrain(true);
+    setDrainError(null);
+    try {
+      await onServerDrainUpdate(selectedServer.name, drained);
+      setConfirmingDrain(false);
+      setUpdatingDrain(false);
+    } catch (error: unknown) {
+      if (error instanceof ServerDrainError && error.code === "server_not_found") {
+        onClose();
+        return;
+      }
+      setDrainError(error instanceof Error ? error.message : "修改服务器调度状态失败");
+      setUpdatingDrain(false);
+    }
+  }
+
   if (selection.kind === "server") {
     const server = selection.value;
     title = server.name;
@@ -847,6 +936,52 @@ export function DetailPanel({
     body = (
       <>
         <div className="rr-detail-status"><ServerStatus server={server} drained={selection.drained} /></div>
+        <section className="rr-scheduling-editor" aria-labelledby="rr-scheduling-editor-title">
+          <h3 id="rr-scheduling-editor-title">调度控制</h3>
+          <p>
+            {selection.drained
+              ? "已暂停所有项目向这台服务器分配新任务；现有任务不受影响。"
+              : "允许控制器从所有项目向这台服务器分配新任务。"}
+          </p>
+          {drainError && <div className="rr-stop-error" role="alert">{drainError}</div>}
+          {selection.drained ? (
+            <Button
+              variant="primary"
+              icon={updatingDrain ? <LoaderCircle className="rr-spin" /> : <Play />}
+              isDisabled={panelBusy}
+              onClick={() => updateServerDrain(false)}
+            >
+              {updatingDrain ? "正在恢复…" : "恢复调度"}
+            </Button>
+          ) : confirmingDrain ? (
+            <div className="rr-scheduling-confirm" role="group" aria-label="确认暂停服务器调度">
+              <strong>确认暂停所有项目的新任务调度？</strong>
+              <span>已在运行的任务会继续执行。</span>
+              <div>
+                <Button
+                  variant="danger"
+                  icon={updatingDrain ? <LoaderCircle className="rr-spin" /> : <CirclePause />}
+                  isDisabled={panelBusy}
+                  onClick={() => updateServerDrain(true)}
+                >
+                  {updatingDrain ? "正在暂停…" : "确认暂停"}
+                </Button>
+                <Button variant="link" isDisabled={panelBusy} onClick={() => setConfirmingDrain(false)}>
+                  取消
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button
+              variant="secondary"
+              icon={<CirclePause />}
+              isDisabled={panelBusy}
+              onClick={() => setConfirmingDrain(true)}
+            >
+              暂停调度
+            </Button>
+          )}
+        </section>
         <section className="rr-capacity-editor" aria-labelledby="rr-capacity-editor-title">
           <h3 id="rr-capacity-editor-title">并发任务容量</h3>
           <div className="rr-capacity-fields">
@@ -889,7 +1024,7 @@ export function DetailPanel({
           <Button
             variant="primary"
             icon={savingCapacity ? <LoaderCircle className="rr-spin" /> : <Save />}
-            isDisabled={savingCapacity || typeof server.capacity_revision !== "number"}
+            isDisabled={panelBusy || typeof server.capacity_revision !== "number"}
             onClick={saveCapacitySettings}
           >
             {savingCapacity ? "正在保存…" : "保存容量"}
@@ -1036,62 +1171,137 @@ export function DetailPanel({
     );
   } else {
     title = `${activeBatchRequest?.entryCount ?? batchEntries.length} 项排队任务`;
-    kind = "批量设置服务器";
+    kind = "批量调度设置";
     body = (
       <section className="rr-queue-editor" aria-labelledby="rr-batch-server-editor-title">
-        <h3 id="rr-batch-server-editor-title">统一可用服务器</h3>
+        <h3 id="rr-batch-server-editor-title">统一调度设置</h3>
         <p className="rr-batch-editor-copy">
-          保存后，这些任务将使用同一组服务器。这里只显示满足全部任务配置要求的服务器。
-          各任务独立更新，期间可能有部分任务失败。
+          只会覆盖明确选择的设置。各任务独立更新，期间可能有部分任务失败。
         </p>
-        <fieldset className="rr-server-options">
-          <legend>支持的服务器</legend>
-          {batchServerOptions.length ? batchServerOptions.map((server) => {
-            const preparationCount = batchPreparationCounts.get(server.name) ?? 0;
-            const preparationTotal = activeBatchRequest?.preparationTotals[server.name] ?? 0;
-            const preparationCompleted = Math.max(
-              0,
-              preparationTotal - Math.min(preparationTotal, preparationCount),
-            );
-            return (
-              <Checkbox
-                key={server.name}
-                id={`queue-batch-server-${server.name}`}
-                label={(
-                  <span className="rr-server-option-label">
-                    <span>{server.name}</span>
-                    {savingBatch && preparationTotal > 0
-                      ? (
-                        <small>
-                          {preparationCompleted === preparationTotal
-                            ? "准备完成"
-                            : `已准备 ${preparationCompleted} / ${preparationTotal}`}
-                        </small>
-                      )
-                      : preparationCount > 0 && <small>需准备 {preparationCount} 项</small>}
-                  </span>
-                )}
-                isChecked={draftBatchServers.includes(server.name)}
-                isDisabled={savingBatch}
-                onChange={(_event, checked) => {
-                  setDraftBatchServers((current) => checked
-                    ? [...current, server.name]
-                    : current.filter((name) => name !== server.name));
-                }}
-              />
-            );
-          }) : (
-            <div className="rr-batch-empty" role="status">
-              没有同时满足全部所选任务要求的服务器。
-            </div>
-          )}
-        </fieldset>
+        <div className="rr-queue-editor-field">
+          <span>任务类型</span>
+          <ToggleGroup aria-label="批量任务类型">
+            <ToggleGroupItem
+              text="保持不变"
+              buttonId="queue-batch-workload-unchanged"
+              isSelected={draftBatchWorkload === "unchanged"}
+              onChange={() => setDraftBatchWorkload("unchanged")}
+            />
+            <ToggleGroupItem
+              text="Standard"
+              buttonId="queue-batch-workload-standard"
+              isSelected={draftBatchWorkload === "standard"}
+              onChange={() => setDraftBatchWorkload("standard")}
+            />
+            <ToggleGroupItem
+              text="Test"
+              buttonId="queue-batch-workload-test"
+              isSelected={draftBatchWorkload === "test"}
+              onChange={() => setDraftBatchWorkload("test")}
+            />
+          </ToggleGroup>
+        </div>
+        <div className="rr-queue-editor-field">
+          <span>优先级</span>
+          <ToggleGroup aria-label="批量任务优先级">
+            <ToggleGroupItem
+              text="保持不变"
+              buttonId="queue-batch-priority-unchanged"
+              isSelected={draftBatchPriority === "unchanged"}
+              onChange={() => setDraftBatchPriority("unchanged")}
+            />
+            <ToggleGroupItem
+              text="紧急"
+              buttonId="queue-batch-priority-urgent"
+              isSelected={draftBatchPriority === "urgent"}
+              onChange={() => setDraftBatchPriority("urgent")}
+            />
+            <ToggleGroupItem
+              text="普通"
+              buttonId="queue-batch-priority-normal"
+              isSelected={draftBatchPriority === "normal"}
+              onChange={() => setDraftBatchPriority("normal")}
+            />
+          </ToggleGroup>
+        </div>
+        <div className="rr-queue-editor-field">
+          <span>可用服务器</span>
+          <ToggleGroup aria-label="批量服务器设置方式">
+            <ToggleGroupItem
+              text="保持不变"
+              buttonId="queue-batch-servers-unchanged"
+              isSelected={draftBatchServerMode === "unchanged"}
+              onChange={() => setDraftBatchServerMode("unchanged")}
+            />
+            <ToggleGroupItem
+              text="统一设置"
+              buttonId="queue-batch-servers-replace"
+              isSelected={draftBatchServerMode === "replace"}
+              onChange={() => setDraftBatchServerMode("replace")}
+            />
+          </ToggleGroup>
+        </div>
+        {draftBatchServerMode === "replace" && (
+          <fieldset className="rr-server-options">
+            <legend>支持的服务器</legend>
+            {batchServerOptions.length ? batchServerOptions.map((server) => {
+              const preparationCount = batchPreparationCounts.get(server.name) ?? 0;
+              const preparationTotal = activeBatchRequest?.preparationTotals[server.name] ?? 0;
+              const preparationCompleted = Math.max(
+                0,
+                preparationTotal - Math.min(preparationTotal, preparationCount),
+              );
+              return (
+                <Checkbox
+                  key={server.name}
+                  id={`queue-batch-server-${server.name}`}
+                  label={(
+                    <span className="rr-server-option-label">
+                      <span>{server.name}</span>
+                      {savingBatch && preparationTotal > 0
+                        ? (
+                          <small>
+                            {preparationCompleted === preparationTotal
+                              ? "准备完成"
+                              : `已准备 ${preparationCompleted} / ${preparationTotal}`}
+                          </small>
+                        )
+                        : preparationCount > 0 && <small>需准备 {preparationCount} 项</small>}
+                    </span>
+                  )}
+                  isChecked={draftBatchServers.includes(server.name)}
+                  isDisabled={savingBatch}
+                  onChange={(_event, checked) => {
+                    setDraftBatchServers((current) => checked
+                      ? [...current, server.name]
+                      : current.filter((name) => name !== server.name));
+                  }}
+                />
+              );
+            }) : (
+              <div className="rr-batch-empty" role="status">
+                没有同时满足全部所选任务要求的服务器。
+              </div>
+            )}
+          </fieldset>
+        )}
+        {batchWorkloadNeedsServers && (
+          <div className="rr-stop-error" role="alert">
+            部分任务的当前服务器未开通目标通道，请同时统一设置可用服务器。
+          </div>
+        )}
         {batchError && <div className="rr-stop-error" role="alert">{batchError}</div>}
         <Button
           variant="primary"
           icon={savingBatch ? <LoaderCircle className="rr-spin" /> : <Save />}
-          isDisabled={savingBatch || batchPlacementUpdating || !draftBatchServers.length}
-          onClick={saveBatchServerSettings}
+          isDisabled={
+            savingBatch
+            || batchPlacementUpdating
+            || !batchHasChanges
+            || batchWorkloadNeedsServers
+            || (draftBatchServerMode === "replace" && !draftBatchServers.length)
+          }
+          onClick={saveBatchQueueSettings}
         >
           {savingBatch
             ? activeBatchPreparationTotal > 0
@@ -1099,7 +1309,9 @@ export function DetailPanel({
                 ? `正在准备 ${activeBatchPreparationCompleted} / ${activeBatchPreparationTotal}…`
                 : "准备完成，正在应用…"
               : "正在批量应用…"
-            : batchRequiresPreparation ? "准备并应用到全部" : "应用到全部"}
+            : draftBatchServerMode === "replace" && batchRequiresPreparation
+              ? "准备并应用到全部"
+              : "应用到全部"}
         </Button>
       </section>
     );

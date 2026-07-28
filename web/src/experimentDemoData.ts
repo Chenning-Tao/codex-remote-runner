@@ -1,3 +1,5 @@
+import canonicalSnapshot from "./decoderCanonicalSnapshot.json";
+
 export type ExperimentPointStatus =
   | "complete"
   | "running"
@@ -36,8 +38,11 @@ export interface ExperimentRunRef {
 
 export interface ExperimentResultCandidate {
   resultId: string;
-  disposition: "accepted" | "superseded" | "review" | "retained";
+  disposition: "accepted" | "rejected" | "superseded" | "review" | "retained";
   sourceRunIds: string[];
+  observationCount?: number;
+  metrics?: Record<string, MetricReading>;
+  ineligibilityReasons?: string[];
 }
 
 export interface ExperimentArtifactRef {
@@ -54,6 +59,7 @@ export interface ExperimentPoint {
   dimensions: Record<string, ExperimentScalar>;
   metrics: Record<string, MetricReading>;
   historicalMetrics?: Record<string, MetricReading>;
+  acceptedAcceptanceId?: string;
   acceptedResultId?: string;
   sourceRecordId?: string;
   observationCount?: number;
@@ -81,6 +87,7 @@ export interface ExperimentStudy {
   eventCursor: number;
   refreshedAt: string;
   dimensions: Record<string, string>;
+  dimensionOptions?: Record<string, ExperimentScalar[]>;
   metrics: ExperimentMetric[];
   primaryMetric: string;
   presentation: {
@@ -88,6 +95,7 @@ export interface ExperimentStudy {
     seriesDimension: string;
     rowDimension: string;
     columnDimension: string;
+    facetDimensions?: string[];
   };
   impact: {
     unchanged: number;
@@ -140,67 +148,54 @@ const emptyStatusCounts = (): Record<ExperimentPointStatus, number> => ({
   planned: 0,
 });
 
-interface CanonicalLerRow {
-  method: string;
-  pTotal: number;
-  shots: number;
-  logicalErrors: number;
-  ler: number;
-  lerPerRound: number;
-  convergenceRate: number;
-  wallTime: number;
-  perShotCount?: number;
-}
-
-const canonicalLerRows: CanonicalLerRow[] = [
-  { method: "bp_osd", pTotal: 0.004, shots: 20046, logicalErrors: 1960, ler: 0.09777511723, lerPerRound: 0.00853763514, convergenceRate: 1, wallTime: 99.9 },
-  { method: "bp_osd", pTotal: 0.005, shots: 20046, logicalErrors: 6257, ler: 0.312132096179, lerPerRound: 0.030698792408, convergenceRate: 1, wallTime: 111.6 },
-  { method: "bp_osd", pTotal: 0.006, shots: 20000, logicalErrors: 12364, ler: 0.6182, lerPerRound: 0.077103511256, convergenceRate: 1, wallTime: 68.9 },
-  { method: "bp_osd", pTotal: 0.007, shots: 20046, logicalErrors: 17015, ler: 0.84879776514, lerPerRound: 0.1456617499, convergenceRate: 1, wallTime: 129.4 },
-  { method: "bp_osd", pTotal: 0.008, shots: 20046, logicalErrors: 19073, ler: 0.951461638232, lerPerRound: 0.222845988909, convergenceRate: 1, wallTime: 136.9 },
-  { method: "bp_osd", pTotal: 0.009, shots: 20046, logicalErrors: 19598, ler: 0.977651401776, lerPerRound: 0.27148663427, convergenceRate: 1, wallTime: 143.1 },
-  { method: "relay_050", pTotal: 0.004, shots: 20046, logicalErrors: 850, ler: 0.042402474309, lerPerRound: 0.003604131853, convergenceRate: 0.959942133094, wallTime: 117.3 },
-  { method: "relay_050", pTotal: 0.005, shots: 20046, logicalErrors: 4235, ler: 0.211264092587, lerPerRound: 0.019582696142, convergenceRate: 0.797166517011, wallTime: 180.7 },
-  { method: "relay_050", pTotal: 0.006, shots: 20046, logicalErrors: 10795, ler: 0.538511423725, lerPerRound: 0.062409036616, convergenceRate: 0.471764940637, wallTime: 260.7 },
-  { method: "relay_050", pTotal: 0.007, shots: 20046, logicalErrors: 16636, ler: 0.829891250125, lerPerRound: 0.137232280174, convergenceRate: 0.176843260501, wallTime: 310.8 },
-  { method: "relay_050", pTotal: 0.008, shots: 20046, logicalErrors: 19283, ler: 0.96193754365, lerPerRound: 0.238433086628, convergenceRate: 0.040307293226, wallTime: 325.8 },
-  { method: "relay_050", pTotal: 0.009, shots: 20046, logicalErrors: 19932, ler: 0.994313079916, lerPerRound: 0.350010371213, convergenceRate: 0.006235657987, wallTime: 328.8 },
-  { method: "relay_lossy_dem_050", pTotal: 0.004, shots: 80000, logicalErrors: 732, ler: 0.00915, lerPerRound: 0.000765716553, convergenceRate: 0.990725, wallTime: 6920.4 },
-  { method: "relay_lossy_dem_050", pTotal: 0.005, shots: 60000, logicalErrors: 3846, ler: 0.0641, lerPerRound: 0.005505343564, convergenceRate: 0.93465, wallTime: 21855.9 },
-  { method: "relay_lossy_dem_050", pTotal: 0.006, shots: 60000, logicalErrors: 14967, ler: 0.24945, lerPerRound: 0.023628780782, convergenceRate: 0.7476, wallTime: 41377.2 },
-  { method: "relay_lossy_dem_050", pTotal: 0.007, shots: 6000, logicalErrors: 3408, ler: 0.568, lerPerRound: 0.067554095955, convergenceRate: 0.427, wallTime: 6019.2 },
-  { method: "relay_lossy_dem_050", pTotal: 0.008, shots: 4000, logicalErrors: 3282, ler: 0.8205, lerPerRound: 0.133360051342, convergenceRate: 0.178, wallTime: 5003.4 },
-  { method: "relay_lossy_dem_050", pTotal: 0.009, shots: 4000, logicalErrors: 3774, ler: 0.9435, lerPerRound: 0.212946893682, convergenceRate: 0.0565, wallTime: 5774 },
-  { method: "relay_ours_050", pTotal: 0.004, shots: 221996, logicalErrors: 200, ler: 0.000900917134, lerPerRound: 0.000075107446, convergenceRate: 0.999995495414, wallTime: 594, perShotCount: 221492 },
-  { method: "relay_ours_050", pTotal: 0.005, shots: 20046, logicalErrors: 246, ler: 0.012271774918, lerPerRound: 0.001028445362, convergenceRate: 1, wallTime: 113.6, perShotCount: 19648 },
-  { method: "relay_ours_050", pTotal: 0.006, shots: 20046, logicalErrors: 1499, ler: 0.074778010576, lerPerRound: 0.006455869225, convergenceRate: 1, wallTime: 157.2, perShotCount: 18033 },
-  { method: "relay_ours_050", pTotal: 0.007, shots: 20046, logicalErrors: 5496, ler: 0.274169410356, lerPerRound: 0.026349841374, convergenceRate: 1, wallTime: 251.5, perShotCount: 13600 },
-  { method: "relay_ours_050", pTotal: 0.008, shots: 20046, logicalErrors: 11472, ler: 0.572283747381, lerPerRound: 0.068328137701, convergenceRate: 1, wallTime: 362.9, perShotCount: 7515 },
-  { method: "relay_ours_050", pTotal: 0.009, shots: 20046, logicalErrors: 16452, ler: 0.820712361568, lerPerRound: 0.13344553922, convergenceRate: 0.999950114736, wallTime: 452.6, perShotCount: 2894 },
+type CanonicalLerRow = [
+  codeLabel: string,
+  method: string,
+  pTotal: number,
+  shots: number,
+  logicalErrors: number,
+  ler: number,
+  lerPerRound: number,
+  convergenceRate: number,
+  wallTime: number,
+  perShotCount: number | null,
 ];
 
-const canonicalLerPoints: ExperimentPoint[] = canonicalLerRows.map((row) => {
-  const key = `bb144|${row.method}|${row.pTotal.toFixed(3)}`;
-  const needsReview = typeof row.perShotCount === "number";
+const canonicalLerRows = canonicalSnapshot.rows as CanonicalLerRow[];
+
+const canonicalLerPoints: ExperimentPoint[] = canonicalLerRows.map(([
+  codeLabel,
+  method,
+  pTotal,
+  shots,
+  logicalErrors,
+  ler,
+  lerPerRound,
+  convergenceRate,
+  wallTime,
+  perShotCount,
+]) => {
+  const key = `${codeLabel}|${method}|${pTotal.toFixed(3)}`;
+  const needsReview = perShotCount !== null;
   return {
     ...pointIds("canonical", key),
     canonicalKey: key,
-    displayName: `BB144 / ${row.method} / p=${row.pTotal.toFixed(3)}`,
+    displayName: `${codeLabel} / ${method} / p=${pTotal.toFixed(3)}`,
     status: needsReview ? "review" : "complete",
-    dimensions: { method: row.method, p_total: row.pTotal },
+    dimensions: { code_label: codeLabel, method, p_total: pTotal },
     metrics: {
-      ler: reading(row.ler),
-      ler_per_round: reading(row.lerPerRound),
-      convergence_rate: reading(row.convergenceRate),
-      logical_errors: reading(row.logicalErrors),
-      shots: reading(row.shots),
-      wall_time: reading(row.wallTime),
+      ler: reading(ler),
+      ler_per_round: reading(lerPerRound),
+      convergence_rate: reading(convergenceRate),
+      logical_errors: reading(logicalErrors),
+      shots: reading(shots),
+      wall_time: reading(wallTime),
     },
-    sourceRecordId: `eval-sweep:bb144:${row.method}:p${row.pTotal.toFixed(3)}`,
-    observationCount: row.shots,
+    sourceRecordId: `eval-sweep:${codeLabel}:${method}:p${pTotal.toFixed(3)}`,
+    observationCount: shots,
     candidateCount: 1,
     reviewReason: needsReview
-      ? `strict-convergence audit 标记 legacy per-shot 不完整：${row.perShotCount?.toLocaleString("en-US")}/${row.shots.toLocaleString("en-US")} 条。`
+      ? `strict-convergence audit 标记 legacy per-shot 不完整：${perShotCount.toLocaleString("en-US")}/${shots.toLocaleString("en-US")} 条。`
       : undefined,
     settingDigest: digest(`canonical-setting:${key}`),
     pointRevisionDigest: digest(`canonical-row:${key}:b30d973e`),
@@ -448,8 +443,7 @@ const hardwareEvidencePoints: ExperimentPoint[] = hardwareEvidenceRows.map((row)
 }));
 
 const canonicalCounts = emptyStatusCounts();
-canonicalCounts.complete = 219;
-canonicalCounts.review = 69;
+for (const point of canonicalLerPoints) canonicalCounts[point.status] += 1;
 
 const relayCounts = emptyStatusCounts();
 relayCounts.running = 11;
@@ -464,13 +458,13 @@ export const experimentDemoStudies: ExperimentStudy[] = [
     studyId: "decoder-canonical-ler",
     canonicalKey: "section-6-canonical-ler",
     displayName: "§6 Canonical LER sweep",
-    description: "主实验 288/288 个 canonical 行已存在；69 个 relay_ours_050 点仍被 strict-convergence audit 标记为需补证。下表展示 BB144 的 24 点切片。",
+    description: "主实验 288/288 个 canonical 点已存在；可按 code 切换查看，每个 code 包含 4 个 method × 6 个 p_total。69 个 relay_ours_050 点的 legacy per-shot 证据仍需补齐。",
     mode: "project-snapshot",
     activeRevisionId: "snapshot-20260727-canonical",
     planDigest: "sha256:b30d973eb2bc31802961a697712eef49fcc2cfc906f9da84a5356238353f3aec",
     eventCursor: 202,
     refreshedAt: experimentDemoProject.snapshotAt,
-    dimensions: { method: "Method", p_total: "p_total" },
+    dimensions: { code_label: "Code", method: "Method", p_total: "p_total" },
     metrics: [
       { key: "ler", label: "Logical error rate", shortLabel: "LER", format: "scientific", scale: "log" },
       { key: "ler_per_round", label: "LER per round", shortLabel: "LER / round", unit: "1/round", format: "scientific", scale: "log" },
@@ -485,10 +479,11 @@ export const experimentDemoStudies: ExperimentStudy[] = [
       seriesDimension: "method",
       rowDimension: "method",
       columnDimension: "p_total",
+      facetDimensions: ["code_label"],
     },
     impact: { unchanged: 0, new: 0, stale: 0, archived: 0 },
     points: canonicalLerPoints,
-    pointCount: 288,
+    pointCount: canonicalLerPoints.length,
     statusCounts: canonicalCounts,
   },
   {

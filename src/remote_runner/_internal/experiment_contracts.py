@@ -16,7 +16,7 @@ MAX_POINTS = 10_000
 MAX_RESULTS = 256
 MAX_METRICS = 128
 MAX_ARTIFACTS = 128
-MAX_QUERY_LIMIT = 200
+MAX_QUERY_LIMIT = 500
 DEFAULT_QUERY_LIMIT = 50
 
 KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -108,7 +108,9 @@ def _text(
     empty: bool = False,
 ) -> str:
     if not isinstance(value, str) or (not empty and not value):
-        raise ValueError(f"{field} must be a {'string' if empty else 'non-empty string'}")
+        raise ValueError(
+            f"{field} must be a {'string' if empty else 'non-empty string'}"
+        )
     if len(value) > maximum or "\x00" in value or "\r" in value:
         raise ValueError(f"{field} is invalid or exceeds {maximum} characters")
     return value
@@ -152,7 +154,9 @@ def _metadata(value: object, field: str) -> dict[str, Any]:
 
 
 def _aliases(value: object, field: str) -> list[str]:
-    aliases = [_text(item, field, maximum=256) for item in _list(value, field, maximum=64)]
+    aliases = [
+        _text(item, field, maximum=256) for item in _list(value, field, maximum=64)
+    ]
     if len(set(aliases)) != len(aliases):
         raise ValueError(f"{field} must not contain duplicates")
     return aliases
@@ -171,7 +175,12 @@ def _scalar(value: object, field: str) -> str | int | float | bool | None:
 def _relative_path(value: object, field: str) -> str:
     text = _text(value, field, maximum=512)
     path = PurePosixPath(text)
-    if path.is_absolute() or str(path) != text or text in {"", "."} or ".." in path.parts:
+    if (
+        path.is_absolute()
+        or str(path) != text
+        or text in {"", "."}
+        or ".." in path.parts
+    ):
         raise ValueError(f"{field} must be a normalized relative POSIX path")
     return text
 
@@ -187,12 +196,15 @@ def _normalized_digest(
     return computed
 
 
-def _dimension_value(value: object, value_type: str, field: str) -> str | int | float | bool:
+def _dimension_value(
+    value: object, value_type: str, field: str
+) -> str | int | float | bool:
     normalized = _scalar(value, field)
     valid = {
         "string": isinstance(normalized, str),
         "integer": isinstance(normalized, int) and not isinstance(normalized, bool),
-        "number": isinstance(normalized, (int, float)) and not isinstance(normalized, bool),
+        "number": isinstance(normalized, (int, float))
+        and not isinstance(normalized, bool),
         "boolean": isinstance(normalized, bool),
     }[value_type]
     if not valid:
@@ -227,11 +239,15 @@ def normalize_experiment_plan(value: object) -> dict[str, Any]:
         optional={"study_id", "aliases", "description", "metadata"},
     )
     normalized_study = {
-        "study_id": _id(study.get("study_id"), "study", "study.study_id", optional=True),
+        "study_id": _id(
+            study.get("study_id"), "study", "study.study_id", optional=True
+        ),
         "canonical_key": _key(study["canonical_key"], "study.canonical_key"),
         "display_name": _text(study["display_name"], "study.display_name", maximum=256),
         "aliases": _aliases(study.get("aliases", []), "study.aliases"),
-        "description": _text(study.get("description", ""), "study.description", maximum=2048, empty=True),
+        "description": _text(
+            study.get("description", ""), "study.description", maximum=2048, empty=True
+        ),
         "metadata": _metadata(study.get("metadata", {}), "study.metadata"),
     }
 
@@ -253,7 +269,9 @@ def normalize_experiment_plan(value: object) -> dict[str, Any]:
             raise ValueError(f"unsupported dimension value_type: {value_type}")
         order = [
             _dimension_value(entry, value_type, f"dimensions[{index}].order")
-            for entry in _list(dimension.get("order", []), f"dimensions[{index}].order", maximum=512)
+            for entry in _list(
+                dimension.get("order", []), f"dimensions[{index}].order", maximum=512
+            )
         ]
         if len({canonical_json_bytes(entry) for entry in order}) != len(order):
             raise ValueError(f"dimensions[{index}].order must not contain duplicates")
@@ -261,7 +279,11 @@ def normalize_experiment_plan(value: object) -> dict[str, Any]:
         dimensions.append(
             {
                 "key": key,
-                "display_name": _text(dimension["display_name"], f"dimensions[{index}].display_name", maximum=256),
+                "display_name": _text(
+                    dimension["display_name"],
+                    f"dimensions[{index}].display_name",
+                    maximum=256,
+                ),
                 "value_type": value_type,
                 "order": order,
             }
@@ -269,16 +291,32 @@ def normalize_experiment_plan(value: object) -> dict[str, Any]:
 
     components: list[dict[str, Any]] = []
     component_digests: dict[str, str] = {}
-    for index, item in enumerate(_list(raw["setting_components"], "setting_components", maximum=256)):
+    for index, item in enumerate(
+        _list(raw["setting_components"], "setting_components", maximum=256)
+    ):
         component = _object(item, f"setting_components[{index}]")
-        _keys(component, f"setting_components[{index}]", required={"key", "digest"}, optional={"metadata"})
+        _keys(
+            component,
+            f"setting_components[{index}]",
+            required={"key", "digest"},
+            optional={"metadata"},
+        )
         key = _key(component["key"], f"setting_components[{index}].key")
         if key in component_digests:
             raise ValueError(f"duplicate setting component key: {key}")
         digest = _digest(component["digest"], f"setting_components[{index}].digest")
         assert digest is not None
         component_digests[key] = digest
-        components.append({"key": key, "digest": digest, "metadata": _metadata(component.get("metadata", {}), f"setting_components[{index}].metadata")})
+        components.append(
+            {
+                "key": key,
+                "digest": digest,
+                "metadata": _metadata(
+                    component.get("metadata", {}),
+                    f"setting_components[{index}].metadata",
+                ),
+            }
+        )
 
     metrics: list[dict[str, Any]] = []
     metric_keys: set[str] = set()
@@ -300,10 +338,20 @@ def normalize_experiment_plan(value: object) -> dict[str, Any]:
         metrics.append(
             {
                 "key": key,
-                "display_name": _text(metric["display_name"], f"metrics[{index}].display_name", maximum=256),
+                "display_name": _text(
+                    metric["display_name"],
+                    f"metrics[{index}].display_name",
+                    maximum=256,
+                ),
                 "value_type": value_type,
-                "unit": None if metric.get("unit") is None else _text(metric["unit"], f"metrics[{index}].unit", maximum=64),
-                "default_format": _text(metric.get("default_format", "decimal"), f"metrics[{index}].default_format", maximum=32),
+                "unit": None
+                if metric.get("unit") is None
+                else _text(metric["unit"], f"metrics[{index}].unit", maximum=64),
+                "default_format": _text(
+                    metric.get("default_format", "decimal"),
+                    f"metrics[{index}].default_format",
+                    maximum=32,
+                ),
             }
         )
 
@@ -332,16 +380,22 @@ def normalize_experiment_plan(value: object) -> dict[str, Any]:
         if canonical_key in point_keys:
             raise ValueError(f"duplicate point canonical_key: {canonical_key}")
         point_keys.add(canonical_key)
-        point_id = _id(point.get("point_id"), "point", f"points[{index}].point_id", optional=True)
+        point_id = _id(
+            point.get("point_id"), "point", f"points[{index}].point_id", optional=True
+        )
         if point_id is not None:
             if point_id in point_ids:
                 raise ValueError(f"duplicate point id: {point_id}")
             point_ids.add(point_id)
         dimensions_value = _object(point["dimensions"], f"points[{index}].dimensions")
         if set(dimensions_value) != set(dimension_types):
-            raise ValueError(f"points[{index}].dimensions must exactly match the dimension catalog")
+            raise ValueError(
+                f"points[{index}].dimensions must exactly match the dimension catalog"
+            )
         normalized_dimensions = {
-            key: _dimension_value(dimensions_value[key], value_type, f"points[{index}].dimensions.{key}")
+            key: _dimension_value(
+                dimensions_value[key], value_type, f"points[{index}].dimensions.{key}"
+            )
             for key, value_type in dimension_types.items()
         }
         parameters = _object(point.get("parameters", {}), f"points[{index}].parameters")
@@ -349,44 +403,87 @@ def normalize_experiment_plan(value: object) -> dict[str, Any]:
             raise ValueError(f"points[{index}].parameters exceeds the size limit")
         dependencies = [
             _key(entry, f"points[{index}].setting_dependencies")
-            for entry in _list(point.get("setting_dependencies", []), f"points[{index}].setting_dependencies", maximum=256)
+            for entry in _list(
+                point.get("setting_dependencies", []),
+                f"points[{index}].setting_dependencies",
+                maximum=256,
+            )
         ]
         if len(set(dependencies)) != len(dependencies):
-            raise ValueError(f"points[{index}].setting_dependencies must not contain duplicates")
+            raise ValueError(
+                f"points[{index}].setting_dependencies must not contain duplicates"
+            )
         unknown_dependencies = set(dependencies) - set(component_digests)
         if unknown_dependencies:
-            raise ValueError(f"points[{index}] references unknown setting components: {', '.join(sorted(unknown_dependencies))}")
+            raise ValueError(
+                f"points[{index}] references unknown setting components: {', '.join(sorted(unknown_dependencies))}"
+            )
         setting_payload = {
             "parameters": parameters,
-            "components": [{"key": key, "digest": component_digests[key]} for key in sorted(dependencies)],
+            "components": [
+                {"key": key, "digest": component_digests[key]}
+                for key in sorted(dependencies)
+            ],
         }
-        setting_digest = _normalized_digest(point.get("setting_digest"), setting_payload, f"points[{index}].setting_digest")
-        requirements = _object(point.get("result_requirements", {}), f"points[{index}].result_requirements")
+        setting_digest = _normalized_digest(
+            point.get("setting_digest"),
+            setting_payload,
+            f"points[{index}].setting_digest",
+        )
+        requirements = _object(
+            point.get("result_requirements", {}), f"points[{index}].result_requirements"
+        )
         _keys(
             requirements,
             f"points[{index}].result_requirements",
             required=set(),
-            optional={"required_metrics", "minimum_observations", "required_artifact_roles", "required_checks"},
+            optional={
+                "required_metrics",
+                "minimum_observations",
+                "required_artifact_roles",
+                "required_checks",
+            },
         )
         required_metrics = [
             _key(entry, f"points[{index}].result_requirements.required_metrics")
-            for entry in _list(requirements.get("required_metrics", []), f"points[{index}].result_requirements.required_metrics", maximum=MAX_METRICS)
+            for entry in _list(
+                requirements.get("required_metrics", []),
+                f"points[{index}].result_requirements.required_metrics",
+                maximum=MAX_METRICS,
+            )
         ]
         if set(required_metrics) - metric_keys:
             raise ValueError(f"points[{index}] requires unknown metrics")
         minimum_observations = requirements.get("minimum_observations", 0)
-        if isinstance(minimum_observations, bool) or not isinstance(minimum_observations, int) or minimum_observations < 0:
-            raise ValueError(f"points[{index}].result_requirements.minimum_observations must be non-negative")
+        if (
+            isinstance(minimum_observations, bool)
+            or not isinstance(minimum_observations, int)
+            or minimum_observations < 0
+        ):
+            raise ValueError(
+                f"points[{index}].result_requirements.minimum_observations must be non-negative"
+            )
         normalized_requirements = {
             "required_metrics": required_metrics,
             "minimum_observations": minimum_observations,
             "required_artifact_roles": [
-                _key(entry, f"points[{index}].result_requirements.required_artifact_roles")
-                for entry in _list(requirements.get("required_artifact_roles", []), f"points[{index}].result_requirements.required_artifact_roles", maximum=MAX_ARTIFACTS)
+                _key(
+                    entry,
+                    f"points[{index}].result_requirements.required_artifact_roles",
+                )
+                for entry in _list(
+                    requirements.get("required_artifact_roles", []),
+                    f"points[{index}].result_requirements.required_artifact_roles",
+                    maximum=MAX_ARTIFACTS,
+                )
             ],
             "required_checks": [
                 _key(entry, f"points[{index}].result_requirements.required_checks")
-                for entry in _list(requirements.get("required_checks", []), f"points[{index}].result_requirements.required_checks", maximum=128)
+                for entry in _list(
+                    requirements.get("required_checks", []),
+                    f"points[{index}].result_requirements.required_checks",
+                    maximum=128,
+                )
             ],
         }
         revision_payload = {
@@ -395,26 +492,46 @@ def normalize_experiment_plan(value: object) -> dict[str, Any]:
             "setting_digest": setting_digest,
             "result_requirements": normalized_requirements,
         }
-        revision_digest = _normalized_digest(point.get("point_revision_digest"), revision_payload, f"points[{index}].point_revision_digest")
+        revision_digest = _normalized_digest(
+            point.get("point_revision_digest"),
+            revision_payload,
+            f"points[{index}].point_revision_digest",
+        )
         points.append(
             {
                 "point_id": point_id,
-                "reuse_point_revision_id": _id(point.get("reuse_point_revision_id"), "pointrev", f"points[{index}].reuse_point_revision_id", optional=True),
+                "reuse_point_revision_id": _id(
+                    point.get("reuse_point_revision_id"),
+                    "pointrev",
+                    f"points[{index}].reuse_point_revision_id",
+                    optional=True,
+                ),
                 "canonical_key": canonical_key,
-                "display_name": _text(point["display_name"], f"points[{index}].display_name", maximum=256),
-                "aliases": _aliases(point.get("aliases", []), f"points[{index}].aliases"),
+                "display_name": _text(
+                    point["display_name"], f"points[{index}].display_name", maximum=256
+                ),
+                "aliases": _aliases(
+                    point.get("aliases", []), f"points[{index}].aliases"
+                ),
                 "dimensions": normalized_dimensions,
                 "parameters": parameters,
                 "setting_dependencies": dependencies,
                 "setting_digest": setting_digest,
                 "result_requirements": normalized_requirements,
                 "point_revision_digest": revision_digest,
-                "metadata": _metadata(point.get("metadata", {}), f"points[{index}].metadata"),
+                "metadata": _metadata(
+                    point.get("metadata", {}), f"points[{index}].metadata"
+                ),
             }
         )
 
     presentation = _object(raw["presentation"], "presentation")
-    _keys(presentation, "presentation", required={"primary_metric"}, optional={"results", "curves", "matrix"})
+    _keys(
+        presentation,
+        "presentation",
+        required={"primary_metric"},
+        optional={"results", "curves", "matrix"},
+    )
     primary_metric = _key(presentation["primary_metric"], "presentation.primary_metric")
     if primary_metric not in metric_keys:
         raise ValueError("presentation.primary_metric is not declared")
@@ -427,7 +544,12 @@ def normalize_experiment_plan(value: object) -> dict[str, Any]:
         "kind": "experiment_plan",
         "schema_version": EXPERIMENT_SCHEMA_VERSION,
         "study": normalized_study,
-        "expected_active_design_revision_id": _id(raw.get("expected_active_design_revision_id"), "design", "expected_active_design_revision_id", optional=True),
+        "expected_active_design_revision_id": _id(
+            raw.get("expected_active_design_revision_id"),
+            "design",
+            "expected_active_design_revision_id",
+            optional=True,
+        ),
         "dimensions": dimensions,
         "setting_components": components,
         "metrics": metrics,
@@ -440,7 +562,9 @@ def normalize_experiment_plan(value: object) -> dict[str, Any]:
     for point in digest_payload["points"]:
         point.pop("point_id")
         point.pop("reuse_point_revision_id")
-    normalized["plan_digest"] = _normalized_digest(raw.get("plan_digest"), digest_payload, "plan_digest")
+    normalized["plan_digest"] = _normalized_digest(
+        raw.get("plan_digest"), digest_payload, "plan_digest"
+    )
     return normalized
 
 
@@ -491,14 +615,35 @@ def normalize_run_binding(value: object) -> dict[str, Any]:
             raise ValueError(f"targets[{index}].contribution_role is invalid")
         targets.append(
             {
-                "study_id": _id(target["study_id"], "study", f"targets[{index}].study_id"),
-                "origin_design_revision_id": _id(target["origin_design_revision_id"], "design", f"targets[{index}].origin_design_revision_id"),
-                "plan_digest": _digest(target["plan_digest"], f"targets[{index}].plan_digest"),
-                "point_id": _id(target["point_id"], "point", f"targets[{index}].point_id"),
-                "point_revision_id": _id(target["point_revision_id"], "pointrev", f"targets[{index}].point_revision_id"),
-                "point_revision_digest": _digest(target["point_revision_digest"], f"targets[{index}].point_revision_digest"),
-                "setting_digest": _digest(target["setting_digest"], f"targets[{index}].setting_digest"),
-                "result_group_id": _key(target["result_group_id"], f"targets[{index}].result_group_id"),
+                "study_id": _id(
+                    target["study_id"], "study", f"targets[{index}].study_id"
+                ),
+                "origin_design_revision_id": _id(
+                    target["origin_design_revision_id"],
+                    "design",
+                    f"targets[{index}].origin_design_revision_id",
+                ),
+                "plan_digest": _digest(
+                    target["plan_digest"], f"targets[{index}].plan_digest"
+                ),
+                "point_id": _id(
+                    target["point_id"], "point", f"targets[{index}].point_id"
+                ),
+                "point_revision_id": _id(
+                    target["point_revision_id"],
+                    "pointrev",
+                    f"targets[{index}].point_revision_id",
+                ),
+                "point_revision_digest": _digest(
+                    target["point_revision_digest"],
+                    f"targets[{index}].point_revision_digest",
+                ),
+                "setting_digest": _digest(
+                    target["setting_digest"], f"targets[{index}].setting_digest"
+                ),
+                "result_group_id": _key(
+                    target["result_group_id"], f"targets[{index}].result_group_id"
+                ),
                 "contribution_role": role,
             }
         )
@@ -509,7 +654,9 @@ def normalize_run_binding(value: object) -> dict[str, Any]:
         raise ValueError("expects_result_manifest must be boolean")
     relpath = raw.get("result_manifest_relpath")
     if expects and relpath is None:
-        raise ValueError("result_manifest_relpath is required when a result manifest is expected")
+        raise ValueError(
+            "result_manifest_relpath is required when a result manifest is expected"
+        )
     normalized = {
         "kind": "run_binding",
         "schema_version": EXPERIMENT_SCHEMA_VERSION,
@@ -517,11 +664,15 @@ def normalize_run_binding(value: object) -> dict[str, Any]:
         "run_id": run_id,
         "source_revision": revision,
         "targets": targets,
-        "result_manifest_relpath": None if relpath is None else _relative_path(relpath, "result_manifest_relpath"),
+        "result_manifest_relpath": None
+        if relpath is None
+        else _relative_path(relpath, "result_manifest_relpath"),
         "expects_result_manifest": expects,
         "metadata": _metadata(raw.get("metadata", {}), "metadata"),
     }
-    normalized["binding_digest"] = _normalized_digest(raw.get("binding_digest"), normalized, "binding_digest")
+    normalized["binding_digest"] = _normalized_digest(
+        raw.get("binding_digest"), normalized, "binding_digest"
+    )
     return normalized
 
 
@@ -579,9 +730,20 @@ def normalize_experiment_result(value: object) -> dict[str, Any]:
             raise ValueError(f"duplicate result id: {result_id}")
         result_ids.add(result_id)
         contributions: list[dict[str, Any]] = []
-        for contribution_index, entry in enumerate(_list(result["contributions"], f"results[{index}].contributions", maximum=256)):
-            contribution = _object(entry, f"results[{index}].contributions[{contribution_index}]")
-            _keys(contribution, "contribution", required={"run_id", "binding_id", "binding_digest", "role"}, optional={"replaces_run_id"})
+        for contribution_index, entry in enumerate(
+            _list(
+                result["contributions"], f"results[{index}].contributions", maximum=256
+            )
+        ):
+            contribution = _object(
+                entry, f"results[{index}].contributions[{contribution_index}]"
+            )
+            _keys(
+                contribution,
+                "contribution",
+                required={"run_id", "binding_id", "binding_digest", "role"},
+                optional={"replaces_run_id"},
+            )
             contribution_run_id = _text(contribution["run_id"], "contribution.run_id")
             if RUN_ID_RE.fullmatch(contribution_run_id) is None:
                 raise ValueError("contribution run_id is invalid")
@@ -589,13 +751,19 @@ def normalize_experiment_result(value: object) -> dict[str, Any]:
             if role not in {"primary", "continuation", "replacement", "aggregation"}:
                 raise ValueError("contribution role is invalid")
             replaces = contribution.get("replaces_run_id")
-            if replaces is not None and (not isinstance(replaces, str) or RUN_ID_RE.fullmatch(replaces) is None):
+            if replaces is not None and (
+                not isinstance(replaces, str) or RUN_ID_RE.fullmatch(replaces) is None
+            ):
                 raise ValueError("contribution replaces_run_id is invalid")
             contributions.append(
                 {
                     "run_id": contribution_run_id,
-                    "binding_id": _id(contribution["binding_id"], "binding", "contribution.binding_id"),
-                    "binding_digest": _digest(contribution["binding_digest"], "contribution.binding_digest"),
+                    "binding_id": _id(
+                        contribution["binding_id"], "binding", "contribution.binding_id"
+                    ),
+                    "binding_digest": _digest(
+                        contribution["binding_digest"], "contribution.binding_digest"
+                    ),
                     "role": role,
                     "replaces_run_id": replaces,
                 }
@@ -604,9 +772,16 @@ def normalize_experiment_result(value: object) -> dict[str, Any]:
             raise ValueError(f"results[{index}].contributions must not be empty")
         normalized_metrics: list[dict[str, Any]] = []
         seen_metrics: set[str] = set()
-        for metric_index, entry in enumerate(_list(result["metrics"], f"results[{index}].metrics", maximum=MAX_METRICS)):
+        for metric_index, entry in enumerate(
+            _list(result["metrics"], f"results[{index}].metrics", maximum=MAX_METRICS)
+        ):
             metric = _object(entry, f"results[{index}].metrics[{metric_index}]")
-            _keys(metric, "result metric", required={"key", "value"}, optional={"interval"})
+            _keys(
+                metric,
+                "result metric",
+                required={"key", "value"},
+                optional={"interval"},
+            )
             key = _key(metric["key"], "result metric key")
             if key in seen_metrics:
                 raise ValueError(f"duplicate result metric key: {key}")
@@ -616,41 +791,81 @@ def normalize_experiment_result(value: object) -> dict[str, Any]:
             normalized_interval = None
             if interval is not None:
                 interval_value = _object(interval, "result metric interval")
-                _keys(interval_value, "result metric interval", required={"lower", "upper", "level", "method"})
+                _keys(
+                    interval_value,
+                    "result metric interval",
+                    required={"lower", "upper", "level", "method"},
+                )
                 lower = _scalar(interval_value["lower"], "interval.lower")
                 upper = _scalar(interval_value["upper"], "interval.upper")
                 level = _scalar(interval_value["level"], "interval.level")
-                if not all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in (lower, upper, level)):
+                if not all(
+                    isinstance(item, (int, float)) and not isinstance(item, bool)
+                    for item in (lower, upper, level)
+                ):
                     raise ValueError("metric interval values must be numeric")
                 numeric_lower = cast(int | float, lower)
                 numeric_upper = cast(int | float, upper)
                 numeric_level = cast(int | float, level)
-                if float(numeric_lower) > float(numeric_upper) or not 0 < float(numeric_level) <= 1:
+                if (
+                    float(numeric_lower) > float(numeric_upper)
+                    or not 0 < float(numeric_level) <= 1
+                ):
                     raise ValueError("metric interval bounds or level are invalid")
-                normalized_interval = {"lower": lower, "upper": upper, "level": level, "method": _text(interval_value["method"], "interval.method", maximum=128)}
-            normalized_metrics.append({"key": key, "value": value_scalar, "interval": normalized_interval})
+                normalized_interval = {
+                    "lower": lower,
+                    "upper": upper,
+                    "level": level,
+                    "method": _text(
+                        interval_value["method"], "interval.method", maximum=128
+                    ),
+                }
+            normalized_metrics.append(
+                {"key": key, "value": value_scalar, "interval": normalized_interval}
+            )
         evidence = _object(result["evidence"], f"results[{index}].evidence")
         _keys(evidence, "evidence", required={"observation_count"}, optional={"checks"})
         observation_count = evidence["observation_count"]
-        if isinstance(observation_count, bool) or not isinstance(observation_count, int) or observation_count < 0:
+        if (
+            isinstance(observation_count, bool)
+            or not isinstance(observation_count, int)
+            or observation_count < 0
+        ):
             raise ValueError("evidence.observation_count must be non-negative")
         artifacts: list[dict[str, Any]] = []
-        for artifact_index, entry in enumerate(_list(result["artifacts"], f"results[{index}].artifacts", maximum=MAX_ARTIFACTS)):
+        for artifact_index, entry in enumerate(
+            _list(
+                result["artifacts"],
+                f"results[{index}].artifacts",
+                maximum=MAX_ARTIFACTS,
+            )
+        ):
             artifact = _object(entry, f"results[{index}].artifacts[{artifact_index}]")
-            _keys(artifact, "result artifact", required={"run_id", "role", "relative_path", "sha256", "media_type"}, optional={"size"})
+            _keys(
+                artifact,
+                "result artifact",
+                required={"run_id", "role", "relative_path", "sha256", "media_type"},
+                optional={"size"},
+            )
             artifact_run_id = _text(artifact["run_id"], "artifact.run_id")
             if RUN_ID_RE.fullmatch(artifact_run_id) is None:
                 raise ValueError("artifact run_id is invalid")
             size = artifact.get("size")
-            if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size < 0):
+            if size is not None and (
+                isinstance(size, bool) or not isinstance(size, int) or size < 0
+            ):
                 raise ValueError("artifact size must be non-negative")
             artifacts.append(
                 {
                     "run_id": artifact_run_id,
                     "role": _key(artifact["role"], "artifact.role"),
-                    "relative_path": _relative_path(artifact["relative_path"], "artifact.relative_path"),
+                    "relative_path": _relative_path(
+                        artifact["relative_path"], "artifact.relative_path"
+                    ),
                     "sha256": _digest(artifact["sha256"], "artifact.sha256"),
-                    "media_type": _text(artifact["media_type"], "artifact.media_type", maximum=128),
+                    "media_type": _text(
+                        artifact["media_type"], "artifact.media_type", maximum=128
+                    ),
                     "size": size,
                 }
             )
@@ -658,18 +873,35 @@ def normalize_experiment_result(value: object) -> dict[str, Any]:
             {
                 "result_id": result_id,
                 "study_id": _id(result["study_id"], "study", "result.study_id"),
-                "origin_design_revision_id": _id(result["origin_design_revision_id"], "design", "result.origin_design_revision_id"),
+                "origin_design_revision_id": _id(
+                    result["origin_design_revision_id"],
+                    "design",
+                    "result.origin_design_revision_id",
+                ),
                 "plan_digest": _digest(result["plan_digest"], "result.plan_digest"),
                 "point_id": _id(result["point_id"], "point", "result.point_id"),
-                "point_revision_id": _id(result["point_revision_id"], "pointrev", "result.point_revision_id"),
-                "point_revision_digest": _digest(result["point_revision_digest"], "result.point_revision_digest"),
-                "setting_digest": _digest(result["setting_digest"], "result.setting_digest"),
-                "result_group_id": _key(result["result_group_id"], "result.result_group_id"),
+                "point_revision_id": _id(
+                    result["point_revision_id"], "pointrev", "result.point_revision_id"
+                ),
+                "point_revision_digest": _digest(
+                    result["point_revision_digest"], "result.point_revision_digest"
+                ),
+                "setting_digest": _digest(
+                    result["setting_digest"], "result.setting_digest"
+                ),
+                "result_group_id": _key(
+                    result["result_group_id"], "result.result_group_id"
+                ),
                 "contributions": contributions,
                 "metrics": normalized_metrics,
                 "evidence": {
                     "observation_count": observation_count,
-                    "checks": [_key(entry, "evidence.checks") for entry in _list(evidence.get("checks", []), "evidence.checks", maximum=128)],
+                    "checks": [
+                        _key(entry, "evidence.checks")
+                        for entry in _list(
+                            evidence.get("checks", []), "evidence.checks", maximum=128
+                        )
+                    ],
                 },
                 "artifacts": artifacts,
                 "metadata": _metadata(result.get("metadata", {}), "result.metadata"),
@@ -689,7 +921,9 @@ def normalize_experiment_result(value: object) -> dict[str, Any]:
         },
         "results": normalized_results,
     }
-    normalized["manifest_digest"] = _normalized_digest(raw.get("manifest_digest"), normalized, "manifest_digest")
+    normalized["manifest_digest"] = _normalized_digest(
+        raw.get("manifest_digest"), normalized, "manifest_digest"
+    )
     return normalized
 
 
@@ -699,44 +933,109 @@ def normalize_experiment_query(value: object) -> dict[str, Any]:
         raw,
         "experiment_query",
         required={"kind", "schema_version", "operation"},
-        optional={"study", "point", "revision_scope", "filters", "fields", "changed_since", "page"},
+        optional={
+            "study",
+            "point",
+            "revision_scope",
+            "filters",
+            "fields",
+            "changed_since",
+            "page",
+        },
     )
     operation = _text(raw["operation"], "operation")
-    if operation not in {"study_list", "study_status", "point_list", "point_detail", "point_history", "rerun_list"}:
+    if operation not in {
+        "dashboard",
+        "study_list",
+        "study_status",
+        "point_list",
+        "point_detail",
+        "point_history",
+        "rerun_list",
+    }:
         raise ValueError(f"unsupported experiment query operation: {operation}")
     study = _object(raw.get("study", {}), "study")
     _keys(study, "study", required=set(), optional={"study_id", "canonical_key"})
     study_id = _id(study.get("study_id"), "study", "study.study_id", optional=True)
-    canonical_key = None if study.get("canonical_key") is None else _key(study["canonical_key"], "study.canonical_key")
+    canonical_key = (
+        None
+        if study.get("canonical_key") is None
+        else _key(study["canonical_key"], "study.canonical_key")
+    )
     if study_id is not None and canonical_key is not None:
         raise ValueError("study query may use study_id or canonical_key, not both")
     if operation not in {"study_list"} and study_id is None and canonical_key is None:
         raise ValueError(f"{operation} requires a study selector")
     point = _object(raw.get("point", {}), "point")
-    _keys(point, "point", required=set(), optional={"point_id", "point_revision_id", "canonical_key"})
+    _keys(
+        point,
+        "point",
+        required=set(),
+        optional={"point_id", "point_revision_id", "canonical_key"},
+    )
     point_id = _id(point.get("point_id"), "point", "point.point_id", optional=True)
-    point_revision_id = _id(point.get("point_revision_id"), "pointrev", "point.point_revision_id", optional=True)
-    point_key = None if point.get("canonical_key") is None else _key(point["canonical_key"], "point.canonical_key")
-    if operation in {"point_detail", "point_history"} and sum(item is not None for item in (point_id, point_revision_id, point_key)) != 1:
+    point_revision_id = _id(
+        point.get("point_revision_id"),
+        "pointrev",
+        "point.point_revision_id",
+        optional=True,
+    )
+    point_key = (
+        None
+        if point.get("canonical_key") is None
+        else _key(point["canonical_key"], "point.canonical_key")
+    )
+    if (
+        operation in {"point_detail", "point_history"}
+        and sum(item is not None for item in (point_id, point_revision_id, point_key))
+        != 1
+    ):
         raise ValueError(f"{operation} requires exactly one point selector")
     filters = _object(raw.get("filters", {}), "filters")
-    _keys(filters, "filters", required=set(), optional={"status", "dimensions", "canonical_key_prefix"})
-    statuses = [_text(item, "filters.status", maximum=32) for item in _list(filters.get("status", []), "filters.status", maximum=16)]
-    allowed_statuses = {"complete", "running", "queued", "review", "failed", "stale", "planned", "archived"}
+    _keys(
+        filters,
+        "filters",
+        required=set(),
+        optional={"status", "dimensions", "canonical_key_prefix"},
+    )
+    statuses = [
+        _text(item, "filters.status", maximum=32)
+        for item in _list(filters.get("status", []), "filters.status", maximum=16)
+    ]
+    allowed_statuses = {
+        "complete",
+        "running",
+        "queued",
+        "review",
+        "failed",
+        "stale",
+        "planned",
+        "archived",
+    }
     if set(statuses) - allowed_statuses:
         raise ValueError("filters.status contains an unsupported status")
     dimensions_filter = _object(filters.get("dimensions", {}), "filters.dimensions")
     normalized_dimensions_filter = {
-        _key(key, "filters.dimensions key"): [_scalar(entry, f"filters.dimensions.{key}") for entry in _list(entries, f"filters.dimensions.{key}", maximum=256)]
+        _key(key, "filters.dimensions key"): [
+            _scalar(entry, f"filters.dimensions.{key}")
+            for entry in _list(entries, f"filters.dimensions.{key}", maximum=256)
+        ]
         for key, entries in dimensions_filter.items()
     }
-    fields = [_key(item, "fields") for item in _list(raw.get("fields", []), "fields", maximum=64)]
+    fields = [
+        _key(item, "fields")
+        for item in _list(raw.get("fields", []), "fields", maximum=64)
+    ]
     if len(set(fields)) != len(fields):
         raise ValueError("fields must not contain duplicates")
-    revision_scope = _object(raw.get("revision_scope", {"active": True}), "revision_scope")
+    revision_scope = _object(
+        raw.get("revision_scope", {"active": True}), "revision_scope"
+    )
     _keys(revision_scope, "revision_scope", required={"active"})
     if revision_scope["active"] is not True:
-        raise ValueError("only the active experiment revision scope is currently supported")
+        raise ValueError(
+            "only the active experiment revision scope is currently supported"
+        )
     changed_since = raw.get("changed_since")
     if changed_since is not None and (
         isinstance(changed_since, bool)
@@ -747,7 +1046,11 @@ def normalize_experiment_query(value: object) -> dict[str, Any]:
     page = _object(raw.get("page", {}), "page")
     _keys(page, "page", required=set(), optional={"limit", "cursor"})
     limit = page.get("limit", DEFAULT_QUERY_LIMIT)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_LIMIT:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= MAX_QUERY_LIMIT
+    ):
         raise ValueError(f"page.limit must be between 1 and {MAX_QUERY_LIMIT}")
     cursor = page.get("cursor")
     if cursor is not None:
@@ -757,12 +1060,18 @@ def normalize_experiment_query(value: object) -> dict[str, Any]:
         "schema_version": EXPERIMENT_SCHEMA_VERSION,
         "operation": operation,
         "study": {"study_id": study_id, "canonical_key": canonical_key},
-        "point": {"point_id": point_id, "point_revision_id": point_revision_id, "canonical_key": point_key},
+        "point": {
+            "point_id": point_id,
+            "point_revision_id": point_revision_id,
+            "canonical_key": point_key,
+        },
         "revision_scope": revision_scope,
         "filters": {
             "status": statuses,
             "dimensions": normalized_dimensions_filter,
-            "canonical_key_prefix": None if filters.get("canonical_key_prefix") is None else _key(filters["canonical_key_prefix"], "filters.canonical_key_prefix"),
+            "canonical_key_prefix": None
+            if filters.get("canonical_key_prefix") is None
+            else _key(filters["canonical_key_prefix"], "filters.canonical_key_prefix"),
         },
         "fields": fields,
         "changed_since": changed_since,
@@ -775,20 +1084,45 @@ def normalize_acceptance_request(value: object) -> dict[str, Any]:
     _keys(
         raw,
         "acceptance request",
-        required={"point_revision_id", "result_id", "action", "actor", "reason", "policy"},
-        optional={"acceptance_id", "expected_current_acceptance_id", "supersedes_acceptance_id"},
+        required={
+            "point_revision_id",
+            "result_id",
+            "action",
+            "actor",
+            "reason",
+            "policy",
+        },
+        optional={
+            "acceptance_id",
+            "expected_current_acceptance_id",
+            "supersedes_acceptance_id",
+        },
     )
     action = _text(raw["action"], "action")
-    if action not in {"accept", "revoke", "supersede"}:
+    if action not in {"accept", "reject", "revoke", "supersede"}:
         raise ValueError("acceptance action is invalid")
     return {
-        "acceptance_id": _id(raw.get("acceptance_id"), "acceptance", "acceptance_id", optional=True),
-        "point_revision_id": _id(raw["point_revision_id"], "pointrev", "point_revision_id"),
+        "acceptance_id": _id(
+            raw.get("acceptance_id"), "acceptance", "acceptance_id", optional=True
+        ),
+        "point_revision_id": _id(
+            raw["point_revision_id"], "pointrev", "point_revision_id"
+        ),
         "result_id": _id(raw["result_id"], "result", "result_id"),
-        "expected_current_acceptance_id": _id(raw.get("expected_current_acceptance_id"), "acceptance", "expected_current_acceptance_id", optional=True),
+        "expected_current_acceptance_id": _id(
+            raw.get("expected_current_acceptance_id"),
+            "acceptance",
+            "expected_current_acceptance_id",
+            optional=True,
+        ),
         "action": action,
         "actor": _text(raw["actor"], "actor", maximum=256),
         "reason": _text(raw["reason"], "reason", maximum=2048),
         "policy": _key(raw["policy"], "policy"),
-        "supersedes_acceptance_id": _id(raw.get("supersedes_acceptance_id"), "acceptance", "supersedes_acceptance_id", optional=True),
+        "supersedes_acceptance_id": _id(
+            raw.get("supersedes_acceptance_id"),
+            "acceptance",
+            "supersedes_acceptance_id",
+            optional=True,
+        ),
     }
