@@ -81,7 +81,7 @@ class LaunchPlan:
 
 def _sitecustomize_source(run_id: str) -> bytes:
     title = json.dumps(run_id)
-    return f'''import os
+    return f"""import os
 
 
 def _privacy_failure():
@@ -101,10 +101,10 @@ try:
         _privacy_failure()
 except BaseException:
     _privacy_failure()
-'''.encode()
+""".encode()
 
 
-SUPERVISOR_SOURCE = r'''import os
+SUPERVISOR_SOURCE = r"""import os
 import json
 import signal
 import subprocess
@@ -204,7 +204,7 @@ while group_has_other_members():
 if stopping or (runtime_dir / "stop.request").exists():
     raise SystemExit(143)
 raise SystemExit(child_exit_code)
-'''
+"""
 
 
 def _supervisor_source(run_id: str, privacy_mode: str | None) -> str:
@@ -214,7 +214,7 @@ def _supervisor_source(run_id: str, privacy_mode: str | None) -> str:
         )
     elif privacy_mode == PROCESS_TITLE_PRIVACY_MODE:
         title = json.dumps(run_id)
-        workload_exec = f'''    workload_env = os.environ.copy()
+        workload_exec = f"""    workload_env = os.environ.copy()
     workload_env["RR_PROCESS_TITLE_REQUIRED"] = "1"
     workload_env["RR_PROCESS_TITLE"] = {title}
     original_pythonpath = workload_env.get("PYTHONPATH")
@@ -225,7 +225,7 @@ def _supervisor_source(run_id: str, privacy_mode: str | None) -> str:
         "bash",
         ("remote-runner:" + run_id + "-workload", "-s"),
         workload_env,
-    )'''
+    )"""
     else:
         raise ValueError(f"unsupported privacy mode: {privacy_mode!r}")
     if SUPERVISOR_SOURCE.count("__WORKLOAD_EXEC__") != 1:
@@ -271,7 +271,7 @@ def _wrapper_source(
     supervisor_b64 = base64.b64encode(
         _supervisor_source(run_id, privacy_mode).encode()
     ).decode()
-    return f'''#!/usr/bin/env bash
+    return f"""#!/usr/bin/env bash
 set -u
 umask 077
 cd -- "${{0%/*}}" || exit 125
@@ -347,10 +347,10 @@ while kill -0 -- "-$workload_pid" 2>/dev/null; do
   sleep 0.05
 done
 exit "$workload_rc"
-'''
+"""
 
 
-REMOTE_BOOTSTRAP = r'''import base64
+REMOTE_BOOTSTRAP = r"""import base64
 import hashlib
 import json
 import os
@@ -592,10 +592,10 @@ if status is None or not owner_path.is_file() or not pgid_path.is_file():
     emit(False, "start", "tmux did not produce complete runtime state", True, status)
     raise SystemExit(2)
 emit(True, "started", None, True, status)
-'''
+"""
 
 
-SITE_CUSTOMIZE_PROBE_SOURCE = r'''import importlib.abc
+SITE_CUSTOMIZE_PROBE_SOURCE = r"""import importlib.abc
 import importlib.util
 import json
 import site
@@ -631,10 +631,10 @@ except (ImportError, ValueError):
     spec = None
 origin = None if spec is None else (getattr(spec, "origin", None) or "<discoverable>")
 print("RR_SITE_CUSTOMIZE_PROBE " + json.dumps(origin), flush=True)
-'''
+"""
 
 
-SET_PROCESS_TITLE_PROBE_SOURCE = r'''import os
+SET_PROCESS_TITLE_PROBE_SOURCE = r"""import os
 
 os.environ["SPT_NOENV"] = "1"
 import setproctitle
@@ -642,14 +642,14 @@ import setproctitle
 setproctitle.setproctitle("rr-privacy-preflight")
 if setproctitle.getproctitle() != "rr-privacy-preflight":
     raise SystemExit("setproctitle did not change the process title")
-'''
+"""
 
 
-PROCESS_TITLE_HELPER_PROBE_SOURCE = r'''from pathlib import Path
+PROCESS_TITLE_HELPER_PROBE_SOURCE = r"""from pathlib import Path
 import sitecustomize
 
 print("RR_PROCESS_TITLE_HELPER " + str(Path(sitecustomize.__file__).resolve()), flush=True)
-'''
+"""
 
 
 def _privacy_bootstrap_source() -> str:
@@ -674,7 +674,7 @@ def _privacy_bootstrap_source() -> str:
     insertion_point = "root.mkdir(mode=0o700, exist_ok=True)"
     if source.count(insertion_point) != 1:
         raise RuntimeError("remote bootstrap privacy insertion point is invalid")
-    preflight = f'''if payload.get("process_title_privacy") != {{"mode": "required"}}:
+    preflight = f"""if payload.get("process_title_privacy") != {{"mode": "required"}}:
     fail("invalid process-title privacy request", "validation")
 
 privacy_environment = os.environ.copy()
@@ -759,7 +759,7 @@ try:
 except OSError as exc:
     fail("could not stage the generated process-title privacy helper: " + str(exc))
 
-'''
+"""
     return source.replace(insertion_point, preflight + insertion_point)
 
 

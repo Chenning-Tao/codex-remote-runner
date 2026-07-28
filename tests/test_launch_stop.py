@@ -271,7 +271,9 @@ def test_wrapper_keeps_runtime_files_after_changing_workdir(tmp_path: Path) -> N
 
     assert (runtime / "status.json").is_file()
     assert (runtime / "log").is_file()
-    assert str(manifest["remote_workdir"]) in (runtime / "log").read_text(encoding="utf-8")
+    assert str(manifest["remote_workdir"]) in (runtime / "log").read_text(
+        encoding="utf-8"
+    )
     assert not (Path(str(manifest["remote_workdir"])) / "status.json").exists()
 
 
@@ -285,9 +287,12 @@ def test_launch_plan_is_normal_and_command_is_not_in_argv(tmp_path: Path) -> Non
     assert command.strip() not in argv_text
     assert "sitecustomize" not in plan.bootstrap_stdin.decode()
     assert "setproctitle" not in plan.bootstrap_stdin.decode()
-    assert "privacy" not in next(
-        asset.content.decode() for asset in plan.assets if asset.name == "run.sh"
-    ).lower()
+    assert (
+        "privacy"
+        not in next(
+            asset.content.decode() for asset in plan.assets if asset.name == "run.sh"
+        ).lower()
+    )
     assert (
         'RR_EXPERIMENT_BINDING_PATH="${runtime_dir}/experiment-binding.json"'
         not in next(
@@ -387,7 +392,9 @@ PY
         )
 
 
-def test_launch_plan_reuses_remote_runner_ssh_control_connection(tmp_path: Path) -> None:
+def test_launch_plan_reuses_remote_runner_ssh_control_connection(
+    tmp_path: Path,
+) -> None:
     _config, plan = register_local_run(tmp_path, "true\n")
 
     assert "ControlMaster=auto" in plan.bootstrap_ssh_argv
@@ -402,7 +409,9 @@ def test_launch_control_plane_uses_configured_project_python(tmp_path: Path) -> 
         "true\n",
         project_python=configured_python,
     )
-    wrapper = next(asset.content.decode() for asset in plan.assets if asset.name == "run.sh")
+    wrapper = next(
+        asset.content.decode() for asset in plan.assets if asset.name == "run.sh"
+    )
 
     assert plan.bootstrap_ssh_argv[-1] == f"{shlex.quote(configured_python)} -"
     assert f"{shlex.quote(configured_python)} -c " in wrapper
@@ -537,7 +546,9 @@ def test_wrapper_does_not_depend_on_path_python3(tmp_path: Path) -> None:
 
 def test_bootstrap_installs_private_runtime_and_starts_tmux(tmp_path: Path) -> None:
     run_id = "rr-1111222233334444"
-    _config, plan = register_local_run(tmp_path, "sleep 0.2\nprintf 'done\\n'\n", run_id=run_id)
+    _config, plan = register_local_run(
+        tmp_path, "sleep 0.2\nprintf 'done\\n'\n", run_id=run_id
+    )
     home = tmp_path / "home"
     home.mkdir()
     env = os.environ.copy()
@@ -668,7 +679,9 @@ def test_transport_timeouts_cover_connect_and_remote_work(
         observed.append(float(kwargs["timeout"]))
         stdin = kwargs["input"]
         assert isinstance(stdin, bytes)
-        prefix = "RR_STOP_RESULT" if b"RR_STOP_RESULT" in stdin else "RR_BOOTSTRAP_RESULT"
+        prefix = (
+            "RR_STOP_RESULT" if b"RR_STOP_RESULT" in stdin else "RR_BOOTSTRAP_RESULT"
+        )
         payload = (
             {"ok": True, "tmux_started": True, "status": {"state": "running"}}
             if prefix == "RR_BOOTSTRAP_RESULT"
@@ -742,7 +755,10 @@ def test_stop_main_queries_configured_controller(
     write_yaml(
         config,
         {
-            "controller": {"ssh": "controller_host", "root": "/Users/test/.remote-runner"},
+            "controller": {
+                "ssh": "controller_host",
+                "root": "/Users/test/.remote-runner",
+            },
             "source": {"local_repo": "code"},
             "remote": {
                 "compute-a": {
@@ -767,17 +783,20 @@ def test_stop_main_queries_configured_controller(
 
     monkeypatch.setattr(stopping, "call_controller", stop_controller)
 
-    assert cli.main(
-        [
-            "stop",
-            "--project-config",
-            str(config),
-            "--run-id",
-            RUN_ID,
-            "--timeout",
-            "4",
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "stop",
+                "--project-config",
+                str(config),
+                "--run-id",
+                RUN_ID,
+                "--timeout",
+                "4",
+            ]
+        )
+        == 0
+    )
 
     assert observed == {
         "action": "stop",
@@ -870,7 +889,9 @@ PY
             wrapper.wait(timeout=5)
 
 
-def test_stop_does_not_trust_terminal_status_while_group_is_alive(tmp_path: Path) -> None:
+def test_stop_does_not_trust_terminal_status_while_group_is_alive(
+    tmp_path: Path,
+) -> None:
     home = tmp_path / "home"
     _config, plan = register_local_run(tmp_path, "sleep 60\n")
     runtime = install_plan_runtime(plan, home)
@@ -982,7 +1003,9 @@ def test_stop_refuses_unowned_process_group(tmp_path: Path) -> None:
     try:
         (runtime / "pgid").write_text(f"{worker.pid}\n", encoding="utf-8")
         (runtime / "owner.json").write_text(
-            json.dumps({"run_id": RUN_ID, "pid": worker.pid + 1, "pgid": worker.pid + 1}),
+            json.dumps(
+                {"run_id": RUN_ID, "pid": worker.pid + 1, "pgid": worker.pid + 1}
+            ),
             encoding="utf-8",
         )
 
