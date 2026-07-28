@@ -294,6 +294,9 @@ def test_launch_plan_is_normal_and_command_is_not_in_argv(tmp_path: Path) -> Non
             asset.content.decode() for asset in plan.assets if asset.name == "run.sh"
         )
     )
+    assert "RR_EXPERIMENT_BINDING_SHA256=sha256:" not in next(
+        asset.content.decode() for asset in plan.assets if asset.name == "run.sh"
+    )
 
 
 def test_binding_launch_asset_is_canonical_read_only_and_visible_to_workload(
@@ -308,6 +311,7 @@ def test_binding_launch_asset_is_canonical_read_only_and_visible_to_workload(
     binding = experiment_binding(RUN_ID, revision)
     capture = tmp_path / "binding-handoff.json"
     command = f"""{sys.executable} - <<'PY'
+import hashlib
 import json
 import os
 import stat
@@ -316,6 +320,8 @@ from pathlib import Path
 binding_path = Path(os.environ["RR_EXPERIMENT_BINDING_PATH"])
 Path({str(capture)!r}).write_text(json.dumps({{
     "path": str(binding_path),
+    "declared_sha256": os.environ["RR_EXPERIMENT_BINDING_SHA256"],
+    "actual_sha256": "sha256:" + hashlib.sha256(binding_path.read_bytes()).hexdigest(),
     "content": json.loads(binding_path.read_text(encoding="utf-8")),
     "mode": stat.S_IMODE(binding_path.stat().st_mode),
 }}), encoding="utf-8")
@@ -344,6 +350,7 @@ PY
         **os.environ,
         "HOME": str(home),
         "RR_EXPERIMENT_BINDING_PATH": "poison-binding-path",
+        "RR_EXPERIMENT_BINDING_SHA256": "sha256:" + "0" * 64,
     }
     completed = subprocess.run(
         [sys.executable, "-"],
@@ -360,6 +367,8 @@ PY
         record = wait_for_json(capture)
         assert record == {
             "path": str(runtime / "experiment-binding.json"),
+            "declared_sha256": binding_asset.sha256,
+            "actual_sha256": binding_asset.sha256,
             "content": normalized,
             "mode": 0o400,
         }

@@ -300,6 +300,7 @@ def test_privacy_plan_preserves_experiment_binding_handoff(tmp_path: Path) -> No
     ]
     wrapper = plan.assets[0].content.decode()
     assert "RR_EXPERIMENT_BINDING_PATH" in wrapper
+    assert "RR_EXPERIMENT_BINDING_SHA256=sha256:" in wrapper
     assert "ALLOWED_ASSETS[EXPERIMENT_BINDING_ASSET] = 0o400" in (
         plan.bootstrap_stdin.decode()
     )

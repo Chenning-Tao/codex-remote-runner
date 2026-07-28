@@ -139,7 +139,8 @@ Use `remote-runner run --experiment-binding binding.json` to finalize and freeze
 a binding for the exact run ID and Git revision. Native result producers emit an
 `experiment_result` manifest into synchronized output. A bound workload receives
 the canonical finalized binding at the read-only path named by
-`RR_EXPERIMENT_BINDING_PATH`; unbound workloads do not receive this variable.
+`RR_EXPERIMENT_BINDING_PATH`, with its file digest in
+`RR_EXPERIMENT_BINDING_SHA256`; unbound workloads do not receive either variable.
 Eligible results still require an explicit acceptance action. See
 [the implementation plan](docs/plans/experiment-registry-results-dashboard.md)
 for contracts, authority boundaries, and remaining hardening work.

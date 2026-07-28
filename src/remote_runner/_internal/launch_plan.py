@@ -26,6 +26,7 @@ from .tmux import run_tmux_session
 
 EXPERIMENT_BINDING_ASSET = "experiment-binding.json"
 EXPERIMENT_BINDING_ENV = "RR_EXPERIMENT_BINDING_PATH"
+EXPERIMENT_BINDING_SHA256_ENV = "RR_EXPERIMENT_BINDING_SHA256"
 
 
 @dataclass(frozen=True)
@@ -242,7 +243,7 @@ def _wrapper_source(
     *,
     output_root: str | None = None,
     output_path: str | None = None,
-    experiment_binding_handoff: bool = False,
+    experiment_binding_sha256: str | None = None,
 ) -> str:
     quoted_run_id = shlex.quote(run_id)
     quoted_label_json = shlex.quote(json.dumps(label, ensure_ascii=True))
@@ -259,9 +260,12 @@ def _wrapper_source(
                 f"RR_OUTPUT_DIR={shlex.quote(str(PurePosixPath(output_path).parent))}",
             )
         )
-    if experiment_binding_handoff:
-        workload_environment.append(
-            f'{EXPERIMENT_BINDING_ENV}="${{runtime_dir}}/{EXPERIMENT_BINDING_ASSET}"'
+    if experiment_binding_sha256 is not None:
+        workload_environment.extend(
+            (
+                f'{EXPERIMENT_BINDING_ENV}="${{runtime_dir}}/{EXPERIMENT_BINDING_ASSET}"',
+                f"{EXPERIMENT_BINDING_SHA256_ENV}={shlex.quote(experiment_binding_sha256)}",
+            )
         )
     workload_prefix = " ".join(workload_environment)
     supervisor_b64 = base64.b64encode(
@@ -333,7 +337,7 @@ printf '[REMOTE_RUNNER_START] %s\n' "$started_at"
 write_status running null null || exit 125
 cd -- "$workdir" || exit 125
 
-unset RR_OUTPUT_ROOT RR_OUTPUT_PATH RR_OUTPUT_DIR {EXPERIMENT_BINDING_ENV}
+unset RR_OUTPUT_ROOT RR_OUTPUT_PATH RR_OUTPUT_DIR {EXPERIMENT_BINDING_ENV} {EXPERIMENT_BINDING_SHA256_ENV}
 {workload_prefix} {quoted_project_python} -c 'import base64,os,sys; os.setsid(); os.execv(sys.executable, ("remote-runner:" + sys.argv[1], "-c", base64.b64decode(sys.argv[3]).decode(), sys.argv[1], sys.argv[2]))' "$run_id" "$runtime_dir" {supervisor_b64!r} \
   < "${{runtime_dir}}/command.sh" &
 workload_pid=$!
@@ -838,6 +842,10 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
         if raw_experiment_binding is None
         else normalize_run_binding(raw_experiment_binding)
     )
+    binding_bytes = (
+        None if experiment_binding is None else canonical_json_bytes(experiment_binding)
+    )
+    binding_sha256 = None if binding_bytes is None else sha256_bytes(binding_bytes)
     wrapper_bytes = _wrapper_source(
         run_id,
         str(manifest["label"]),
@@ -847,19 +855,18 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
         str(manifest.get("workload_class", "standard")),
         output_root=output_root,
         output_path=output_path,
-        experiment_binding_handoff=experiment_binding is not None,
+        experiment_binding_sha256=binding_sha256,
     ).encode()
     asset_list = [
         LaunchAsset("run.sh", wrapper_bytes, sha256_bytes(wrapper_bytes), 0o700),
         LaunchAsset("command.sh", command_bytes, sha256_bytes(command_bytes), 0o600),
     ]
-    if experiment_binding is not None:
-        binding_bytes = canonical_json_bytes(experiment_binding)
+    if binding_bytes is not None and binding_sha256 is not None:
         asset_list.append(
             LaunchAsset(
                 EXPERIMENT_BINDING_ASSET,
                 binding_bytes,
-                sha256_bytes(binding_bytes),
+                binding_sha256,
                 0o400,
             )
         )
