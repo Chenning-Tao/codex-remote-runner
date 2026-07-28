@@ -49,7 +49,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.6.1'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.6.2'
 remote-runner --help
 ```
 
@@ -104,7 +104,8 @@ workload, change a queued workload's priority and eligible servers, and prepare
 its exact revision on a newly selected compatible server before enabling it. It
 can also switch queued work between the standard and test lanes and edit each
 server's controller-wide standard/test concurrency limits. Slot limits control
-admission only and do not rewrite worker counts or stop running work.
+admission only and do not rewrite worker counts or stop running work. Workload
+class changes preserve the worker policy frozen when the run was submitted.
 Queue rows can be selected across pages to batch-change workload class, priority,
 and optionally one compatible server set. Unselected settings remain unchanged.
 Queue writes use per-run controller revisions and a bounded preparation

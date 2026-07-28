@@ -480,6 +480,7 @@ def _compact_queue_item(
             "task_id",
             "result_intent",
             "workload_class",
+            "worker_policy",
             "queue_priority",
             "queue_position",
             "minimum_cores",

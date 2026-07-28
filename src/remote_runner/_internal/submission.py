@@ -21,7 +21,12 @@ from .pool import (
 )
 from .preparation_manifest import load_preparation_manifest
 from .result_metadata import normalize_result_intent, parse_result_tags
-from .scheduling import normalize_minimum_cores, normalize_workload_class
+from .scheduling import (
+    default_worker_policy,
+    normalize_minimum_cores,
+    normalize_worker_policy,
+    normalize_workload_class,
+)
 from .source import DeploymentTarget, PreparationResult, prepare_revision
 
 
@@ -201,6 +206,12 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
     workload_class = normalize_workload_class(
         getattr(args, "workload_class", "standard")
     )
+    raw_worker_policy = getattr(args, "worker_policy", None)
+    worker_policy = normalize_worker_policy(
+        default_worker_policy(workload_class)
+        if raw_worker_policy is None
+        else raw_worker_policy
+    )
     result_intent = normalize_result_intent(
         getattr(args, "result_intent", "candidate"),
         field="--result-intent",
@@ -336,6 +347,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         "result_tags": result_tags,
         "queue_priority": args.queue_priority,
         "workload_class": workload_class,
+        "worker_policy": worker_policy,
         "submitted_command": command,
         "submitted_command_sha256": sha256_bytes(command.encode("utf-8")),
         "worker_arg": config.parallelism.default_arg,
@@ -365,6 +377,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         "minimum_cores": minimum_cores,
         "server_scope": server_scope,
         "workload_class": workload_class,
+        "worker_policy": worker_policy,
         "result_intent": result_intent,
         "result_tags": result_tags,
         "experiment_binding": (

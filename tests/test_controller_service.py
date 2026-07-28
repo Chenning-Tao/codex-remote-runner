@@ -188,6 +188,7 @@ def test_edit_queued_job_switches_workload_class(tmp_path: Path, monkeypatch) ->
     )
 
     assert result["job"]["workload_class"] == "test"
+    assert result["job"]["worker_policy"] == "auto"
     assert result["state"]["revision"] == 1
 
 

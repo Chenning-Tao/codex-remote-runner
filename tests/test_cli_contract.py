@@ -64,6 +64,7 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
         "--prepared-manifest",
         "--queue-priority",
         "--workload-class",
+        "--worker-policy",
         "--result-intent",
         "--tag",
         "--min-cores",

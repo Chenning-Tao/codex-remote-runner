@@ -508,6 +508,11 @@ def load_current_run(
     return manifest, state
 
 
+def load_current_state(paths: ProjectPaths, run_id: str) -> dict[str, Any]:
+    validate_current_run_id(run_id)
+    return validate_current_state(load_yaml(current_state_path(paths, run_id)), run_id)
+
+
 def purge_current_run(paths: ProjectPaths, run_id: str) -> Path:
     validate_current_run_id(run_id)
     with run_lock(paths, run_id):

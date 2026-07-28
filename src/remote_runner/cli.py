@@ -28,7 +28,7 @@ from ._internal import (
 from ._internal.pool import DEFAULT_SERVER_REGISTRY
 from ._internal.preparation_manifest import write_preparation_manifest
 from ._internal.result_metadata import MONITOR_RESULT_INTENTS, RESULT_INTENTS
-from ._internal.scheduling import QUEUE_PRIORITIES, WORKLOAD_CLASSES
+from ._internal.scheduling import QUEUE_PRIORITIES, WORKER_POLICIES, WORKLOAD_CLASSES
 from ._revision import SOURCE_REVISION
 
 
@@ -177,6 +177,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=WORKLOAD_CLASSES,
         default="standard",
         help="submit standard exclusive work or a configured test-lane workload",
+    )
+    run_parser.add_argument(
+        "--worker-policy",
+        choices=WORKER_POLICIES,
+        help=(
+            "append the selected server's core count with the configured worker "
+            "argument (auto), or execute the submitted command unchanged (exact); "
+            "defaults to auto for standard work and exact for test work"
+        ),
     )
     run_parser.add_argument(
         "--queue-priority",

@@ -85,6 +85,7 @@ def test_submit_and_list_fifo_jobs_privately(tmp_path: Path) -> None:
     assert job["revision"] == "a" * 40
     assert job["queue_priority"] == "normal"
     assert job["workload_class"] == "standard"
+    assert job["worker_policy"] == "auto"
     assert job["result_intent"] == "candidate"
     assert job["result_tags"] == {"campaign": "test"}
     assert state["status"] == "queued"
@@ -459,6 +460,9 @@ def test_queued_job_can_switch_workload_class_and_moves_to_destination_tail(
     )
 
     assert result["job"]["workload_class"] == "test"
+    assert result["job"]["worker_policy"] == "auto"
+    loaded_test, _state = load_job(paths, "rr-fedcba9876543210")
+    assert loaded_test["worker_policy"] == "exact"
     test_lane = [
         job["run_id"]
         for job, _state in list_queued(paths)

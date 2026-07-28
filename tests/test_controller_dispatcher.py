@@ -258,6 +258,25 @@ def job(
     }
 
 
+def test_worker_resolution_is_independent_from_workload_class() -> None:
+    switched_to_test = job(workload_class="test")
+    switched_to_test["worker_policy"] = "auto"
+    switched_to_standard = job(
+        workload_class="standard",
+        command="python -m pytest tests/test_scheduler.py -q",
+    )
+    switched_to_standard["worker_policy"] = "exact"
+
+    assert controller_dispatcher._resolve_job_command(
+        switched_to_test,
+        configured_cores=256,
+    ) == ("python experiment.py --num-workers 256", 256, True)
+    assert controller_dispatcher._resolve_job_command(
+        switched_to_standard,
+        configured_cores=256,
+    ) == ("python -m pytest tests/test_scheduler.py -q", None, False)
+
+
 def test_execution_registration_preserves_minimum_cores(
     tmp_path: Path,
     monkeypatch,

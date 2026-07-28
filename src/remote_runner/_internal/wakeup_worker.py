@@ -103,12 +103,6 @@ def run_worker(
                             "processed": processed,
                             "wake_id": wake_id,
                         }
-                    latest = next(
-                        item
-                        for item in list_subscriptions(paths)
-                        if item["wake_id"] == wake_id
-                    )
-                    time.sleep(retry_delay(int(latest["delivery_attempts"])))
                     continue
                 archive_history_commit(paths, wake_id, delivery)
                 processed += 1

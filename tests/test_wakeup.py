@@ -60,11 +60,11 @@ def stub_registration(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, str]]
         "resolve_codex_executable",
         lambda _value: Path("/opt/homebrew/bin/codex"),
     )
-    monkeypatch.setattr(
-        wakeup,
-        "preflight_thread",
-        lambda executable, thread_id: preflighted.append((executable, thread_id)),
-    )
+    def preflight(executable: Path, thread_id: str) -> str:
+        preflighted.append((executable, thread_id))
+        return thread_id
+
+    monkeypatch.setattr(wakeup, "preflight_thread", preflight)
     monkeypatch.setattr(
         wakeup,
         "_initial_cohort_views",
@@ -218,6 +218,34 @@ def test_cancel_archives_the_subscription_and_removes_pending_marker(
     assert result["status"] == "cancelled"
     assert wakeup.list_subscriptions(paths) == []
     assert not paths.pending_marker.exists()
+    completed = wakeup._read_json(
+        paths.completed_dir / f"{registered['wake_id']}.json"
+    )
+    assert completed["status"] == "cancelled"
+
+
+def test_cancel_archives_a_delivering_subscription_when_worker_is_stopped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_registration(monkeypatch)
+    args = register_args(tmp_path, config(tmp_path))
+    registered = wakeup.register(args)
+    paths = wakeup.wakeup_paths(args.state_root)
+    wakeup.record_views(
+        paths,
+        registered["wake_id"],
+        [run_view(RUN_ID, "terminal", outcome="stopped")],
+    )
+    claimed = wakeup.claim_delivery(paths, registered["wake_id"])
+    assert claimed is not None and claimed["status"] == "delivering"
+
+    result = wakeup.cancel(
+        argparse.Namespace(wake_id=registered["wake_id"], state_root=args.state_root)
+    )
+
+    assert result["status"] == "cancelled"
+    assert wakeup.list_subscriptions(paths) == []
     completed = wakeup._read_json(
         paths.completed_dir / f"{registered['wake_id']}.json"
     )
@@ -561,6 +589,66 @@ def test_worker_inspects_history_before_retrying_an_ambiguous_turn_start(
     assert second["status"] == "delivery_retryable"
     assert third["status"] == "history_committed"
     assert starts == [True, False, True]
+
+
+def test_delivery_failure_is_deferred_before_other_subscriptions_are_polled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StopWorker(BaseException):
+        pass
+
+    stub_registration(monkeypatch)
+    config_path = config(tmp_path)
+    first_args = register_args(tmp_path, config_path)
+    second_args = register_args(tmp_path, config_path, run_ids=[OTHER_RUN_ID])
+    first = wakeup.register(first_args)
+    wakeup.register(second_args)
+    paths = wakeup.wakeup_paths(first_args.state_root)
+    ready = wakeup.record_views(
+        paths,
+        first["wake_id"],
+        [run_view(RUN_ID, "terminal", outcome="stopped")],
+    )
+    assert ready is not None
+    now = float(ready["delivery_not_before"]) + 1
+    monkeypatch.setattr(wakeup.time, "time", lambda: now)
+    monkeypatch.setattr(wakeup_worker.time, "time", lambda: now)
+    deliveries: list[str] = []
+    polls: list[list[str]] = []
+
+    def fail_delivery(
+        _executable: Path,
+        _thread_id: str,
+        wake_id: str,
+        _prompt: str,
+        *,
+        start_if_missing: bool,
+    ) -> dict[str, Any]:
+        deliveries.append(wake_id)
+        raise codex_app_server.AppServerError("delivery unavailable")
+
+    def stop_after_poll(
+        _paths: wakeup.WakeupPaths,
+        batch: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        polls.append([str(item["wake_id"]) for item in batch])
+        raise StopWorker
+
+    monkeypatch.setattr(wakeup_worker, "commit_wakeup_turn", fail_delivery)
+    monkeypatch.setattr(wakeup_worker, "poll_batch", stop_after_poll)
+
+    with pytest.raises(StopWorker):
+        wakeup_worker.run_worker(paths)
+
+    deferred = next(
+        item
+        for item in wakeup.list_subscriptions(paths)
+        if item["wake_id"] == first["wake_id"]
+    )
+    assert deliveries == [first["wake_id"]]
+    assert polls and first["wake_id"] not in polls[0]
+    assert deferred["delivery_not_before"] == now + 1
 
 
 def test_start_worker_detaches_the_internal_worker_command(
