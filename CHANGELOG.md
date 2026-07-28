@@ -5,6 +5,14 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.6.0 - 2026-07-28
+
+### Added
+
+- Added optional static server memory metadata to the global registry and web
+  dashboard, including dedicated hardware columns, detail-panel visibility, and
+  persistent name, core-count, or memory sorting with explicit direction.
+
 ## 0.5.0 - 2026-07-28
 
 ### Added

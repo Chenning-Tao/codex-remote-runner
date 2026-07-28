@@ -54,6 +54,7 @@ def test_build_server_inventory_includes_idle_disabled_and_misconfigured_servers
                 "compute-b": {"ssh": "compute-b", "cores": 128},
                 "compute-a": {
                     "cores": 256,
+                    "memory_gb": 512,
                     "endpoints": {"tailscale": "compute-a-ts"},
                     "endpoint_order": ["tailscale"],
                     "testing": {"slots": 2},
@@ -76,6 +77,7 @@ def test_build_server_inventory_includes_idle_disabled_and_misconfigured_servers
         "auto_select": True,
         "python": "/opt/python3",
         "configured_cores": 256,
+        "configured_memory_gb": 512,
         "standard_slots": 1,
         "test_slots": 2,
         "testing_enabled": False,
@@ -96,6 +98,7 @@ def dashboard_server(**changes: object) -> dict[str, object]:
         "auto_select": True,
         "python": "/opt/python3",
         "configured_cores": 256,
+        "configured_memory_gb": 512,
         "test_slots": 2,
         "testing_enabled": False,
         "output_root_configured": False,
@@ -142,6 +145,7 @@ def test_server_snapshot_preserves_capacity_and_enriches_known_runs(
 
     assert enriched[0]["state"] == "busy"
     assert enriched[0]["configured_cores"] == 256
+    assert enriched[0]["configured_memory_gb"] == 512
     assert enriched[0]["testing_enabled"] is False
     assert enriched[0]["output_root_configured"] is False
     assert enriched[0]["standard_runs"] == 1

@@ -2,6 +2,7 @@ servers:
   compute-a:
     ssh: compute-a
     cores: 64
+    memory_gb: 256
     enabled: true
     priority: 10
     testing:
@@ -9,5 +10,6 @@ servers:
   archive:
     ssh: archive
     cores: 16
+    memory_gb: 64
     enabled: true
     priority: 0
