@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from remote_runner import __version__
 from remote_runner._internal import release
 from remote_runner._internal.controller import release_gate
 from remote_runner._internal.controller.registry import (
@@ -226,6 +227,47 @@ def test_controller_staging_rejects_mismatched_runtime_revision(
     assert calls[1][0] == "scp"
     assert calls[1][-1].startswith("controller_host:/tmp/remote-runner-")
     assert "SOURCE_REVISION" in calls[2][-1]
+
+
+def test_controller_venv_entrypoint_survives_activation_move(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[1]
+    staging = tmp_path / ".release.staging"
+    active = tmp_path / "release"
+    interpreter = staging / "venv" / "bin" / "python"
+
+    subprocess.run(
+        ["uv", "venv", str(staging / "venv"), "--python", "3.12", "--relocatable"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(interpreter),
+            "--no-deps",
+            str(repo),
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    staging.rename(active)
+
+    completed = subprocess.run(
+        [str(active / "venv" / "bin" / "remote-runner"), "--version"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    assert completed.stdout.startswith(f"remote-runner {__version__} (")
 
 
 def staged_release(controller_root: Path, revision: str) -> Path:
