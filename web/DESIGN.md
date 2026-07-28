@@ -22,9 +22,10 @@ these external standards and design-system references:
 - The first release is single-project and loopback-only. Controller write
   actions are limited to stopping one exact run and modifying selected runs
   while each queue state is `queued`.
-- Top-level Runs and Experiments navigation is always available. Experiments is
-  read-only in the browser; plan publication and result acceptance stay at the
-  CLI/controller boundary.
+- Top-level Runs and Experiments navigation is always available. The live
+  Experiments view may accept or reject an eligible candidate after showing its
+  evidence and requiring a reason. Plan publication stays at the CLI/controller
+  boundary, and the synthetic experiment snapshot stays read-only.
 - Live Experiments views never fall back to synthetic data. The synthetic demo
   is available only through its explicit demo URL.
 - The first viewport shows the product identity, controller health, capacity,
@@ -75,6 +76,8 @@ these external standards and design-system references:
 ## Interaction Rules
 
 - Search and filters affect only the browser view, never scheduler order.
+- Experiment result decisions require an exact candidate ID, explicit action,
+  confirmation reason, and controller compare-and-swap validation.
 - Queue pagination operates on the complete active queue, uses 20 rows per page,
   and keeps the selected page in the URL.
 - Rows are keyboard reachable and open the same detail surface as a
@@ -111,12 +114,13 @@ these external standards and design-system references:
 - The detail drawer edits priority and eligible servers as one save operation.
   At least one server must remain eligible.
 - Queue checkboxes support selection across filtering and pagination. Batch
-  server editing replaces the eligible-server set on every selected task and
-  offers only servers compatible with all selected tasks.
+  editing can independently replace workload class, priority, and eligible
+  servers; every unselected setting remains unchanged. A replacement server set
+  offers only servers compatible with all selected tasks and the target class.
 - A batch write preserves each task's independent revision guard and preparation
   lifecycle. Partial completion keeps failed tasks selected and reports their
   controller errors instead of presenting the batch as atomic.
-- A pending batch keeps its original task set and draft server selection stable
+- A pending batch keeps its original task set and draft scheduling settings stable
   across live snapshots. Identical in-flight submissions share one backend update
   so preparation reservations cannot race each other.
 - Pending preparation keeps the submitted task total stable and reports completed

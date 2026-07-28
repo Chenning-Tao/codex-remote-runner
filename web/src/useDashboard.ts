@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
   BatchQueueUpdateItem,
+  BatchQueueUpdateChanges,
   BatchQueueUpdateResult,
   CapacityUpdateChanges,
   ConnectionState,
@@ -21,7 +22,7 @@ interface DashboardResult {
   ) => Promise<void>;
   updateQueueBatch: (
     updates: BatchQueueUpdateItem[],
-    eligibleServers: string[],
+    changes: BatchQueueUpdateChanges,
   ) => Promise<BatchQueueUpdateResult>;
   updateCapacity: (
     server: string,
@@ -184,7 +185,7 @@ export function useDashboard(): DashboardResult {
 
   const updateQueueBatch = useCallback(async (
     updates: BatchQueueUpdateItem[],
-    eligibleServers: string[],
+    changes: BatchQueueUpdateChanges,
   ): Promise<BatchQueueUpdateResult> => {
     const response = await fetch("/api/queue-batch", {
       method: "PATCH",
@@ -192,7 +193,7 @@ export function useDashboard(): DashboardResult {
         "Content-Type": "application/json",
         "X-Remote-Runner-Action": "update-queue-batch",
       },
-      body: JSON.stringify({ updates, eligible_servers: eligibleServers }),
+      body: JSON.stringify({ updates, ...changes }),
     });
     let payload: unknown = null;
     try {

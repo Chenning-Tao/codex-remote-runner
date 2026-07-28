@@ -22,16 +22,25 @@ from remote_runner._internal.experiment_contracts import contract_digest
 
 
 def test_contract_digest_golden_vector() -> None:
-    assert contract_digest(
-        {
-            "z": 3,
-            "a": [True, None, "value"],
-            "nested": {"b": 2, "a": 1},
-        }
-    ) == "sha256:5924ca571f38d59ea5706253d47f876d77d4ab82f81046bbf3459c2d2adf1155"
+    assert (
+        contract_digest(
+            {
+                "z": 3,
+                "a": [True, None, "value"],
+                "nested": {"b": 2, "a": 1},
+            }
+        )
+        == "sha256:5924ca571f38d59ea5706253d47f876d77d4ab82f81046bbf3459c2d2adf1155"
+    )
 
 
-def plan(*, study_id: str | None = None, point_id: str | None = None, head: str | None = None, batch: int = 4) -> dict[str, object]:
+def plan(
+    *,
+    study_id: str | None = None,
+    point_id: str | None = None,
+    head: str | None = None,
+    batch: int = 4,
+) -> dict[str, object]:
     return {
         "kind": "experiment_plan",
         "schema_version": 1,
@@ -45,14 +54,30 @@ def plan(*, study_id: str | None = None, point_id: str | None = None, head: str 
         },
         "expected_active_design_revision_id": head,
         "dimensions": [
-            {"key": "engine", "display_name": "Engine", "value_type": "string", "order": ["native"]},
-            {"key": "batch", "display_name": "Batch", "value_type": "integer", "order": [batch]},
+            {
+                "key": "engine",
+                "display_name": "Engine",
+                "value_type": "string",
+                "order": ["native"],
+            },
+            {
+                "key": "batch",
+                "display_name": "Batch",
+                "value_type": "integer",
+                "order": [batch],
+            },
         ],
         "setting_components": [
             {"key": "runtime", "digest": "sha256:" + "1" * 64, "metadata": {}},
         ],
         "metrics": [
-            {"key": "samples_per_second", "display_name": "Samples per second", "value_type": "number", "unit": "samples/s", "default_format": "integer"},
+            {
+                "key": "samples_per_second",
+                "display_name": "Samples per second",
+                "value_type": "number",
+                "unit": "samples/s",
+                "default_format": "integer",
+            },
         ],
         "points": [
             {
@@ -75,7 +100,10 @@ def plan(*, study_id: str | None = None, point_id: str | None = None, head: str 
         ],
         "presentation": {
             "primary_metric": "samples_per_second",
-            "results": {"dimensions": ["engine", "batch"], "metrics": ["samples_per_second"]},
+            "results": {
+                "dimensions": ["engine", "batch"],
+                "metrics": ["samples_per_second"],
+            },
             "curves": [
                 {
                     "key": "throughput-by-batch",
@@ -87,7 +115,11 @@ def plan(*, study_id: str | None = None, point_id: str | None = None, head: str 
                     "show_interval": True,
                 }
             ],
-            "matrix": {"row_dimension": "engine", "column_dimension": "batch", "facet_dimensions": []},
+            "matrix": {
+                "row_dimension": "engine",
+                "column_dimension": "batch",
+                "facet_dimensions": [],
+            },
         },
     }
 
@@ -114,7 +146,9 @@ def query(
     return value
 
 
-def test_experiment_registry_projects_explicit_results_and_rebuilds(tmp_path: Path) -> None:
+def test_experiment_registry_projects_explicit_results_and_rebuilds(
+    tmp_path: Path,
+) -> None:
     paths = controller_paths(tmp_path / "controller", "example")
     published = publish_plan(paths, plan(), request_id="publish-throughput")
     study_id = str(published["study_id"])
@@ -124,6 +158,17 @@ def test_experiment_registry_projects_explicit_results_and_rebuilds(tmp_path: Pa
     assert studies["items"][0]["status_counts"]["planned"] == 1
     points = query_registry(paths, query("point_list", study_id=study_id))
     point = points["items"][0]
+    assert point["accepted_acceptance_id"] is None
+    large_page_query = query("point_list", study_id=study_id)
+    large_page_query["page"] = {"limit": 500, "cursor": None}
+    assert len(query_registry(paths, large_page_query)["items"]) == 1
+    dashboard = query_registry(paths, query("dashboard", study_id=study_id))
+    assert dashboard["studies"][0]["study_id"] == study_id
+    assert dashboard["items"][0]["point_revision_id"] == point["point_revision_id"]
+    too_large_page_query = query("point_list", study_id=study_id)
+    too_large_page_query["page"] = {"limit": 501, "cursor": None}
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        query_registry(paths, too_large_page_query)
 
     binding = {
         "kind": "run_binding",
@@ -170,13 +215,24 @@ def test_experiment_registry_projects_explicit_results_and_rebuilds(tmp_path: Pa
                     {
                         "run_id": "rr-0123456789abcdef",
                         "binding_id": binding_result["binding_id"],
-                        "binding_digest": binding_result.get("binding_digest", binding.get("binding_digest")),
+                        "binding_digest": binding_result.get(
+                            "binding_digest", binding.get("binding_digest")
+                        ),
                         "role": "primary",
                         "replaces_run_id": None,
                     }
                 ],
                 "metrics": [
-                    {"key": "samples_per_second", "value": 612.5, "interval": {"lower": 600.0, "upper": 625.0, "level": 0.95, "method": "bootstrap"}},
+                    {
+                        "key": "samples_per_second",
+                        "value": 612.5,
+                        "interval": {
+                            "lower": 600.0,
+                            "upper": 625.0,
+                            "level": 0.95,
+                            "method": "bootstrap",
+                        },
+                    },
                 ],
                 "evidence": {"observation_count": 500, "checks": ["stable_clock"]},
                 "artifacts": [
@@ -196,7 +252,9 @@ def test_experiment_registry_projects_explicit_results_and_rebuilds(tmp_path: Pa
     # The normalizer computed this when the binding was ingested.
     from remote_runner._internal.experiment_contracts import normalize_run_binding
 
-    result_manifest["results"][0]["contributions"][0]["binding_digest"] = normalize_run_binding(binding)["binding_digest"]
+    result_manifest["results"][0]["contributions"][0]["binding_digest"] = (
+        normalize_run_binding(binding)["binding_digest"]
+    )
     with pytest.raises(
         ValueError,
         match="must be ingested from verified output sync",
@@ -213,7 +271,11 @@ def test_experiment_registry_projects_explicit_results_and_rebuilds(tmp_path: Pa
         },
     )
     assert ingested["results"] == [
-        {"result_id": "result-0123456789abcdef", "eligible": True, "ineligibility_reasons": []}
+        {
+            "result_id": "result-0123456789abcdef",
+            "eligible": True,
+            "ineligibility_reasons": [],
+        }
     ]
     retried_result = ingest_result(
         paths,
@@ -251,6 +313,63 @@ def test_experiment_registry_projects_explicit_results_and_rebuilds(tmp_path: Pa
 
     review = query_registry(paths, query("point_list", study_id=study_id))
     assert review["items"][0]["status"] == "review"
+    rejected = record_acceptance(
+        paths,
+        {
+            "point_revision_id": point["point_revision_id"],
+            "result_id": "result-0123456789abcdef",
+            "expected_current_acceptance_id": None,
+            "action": "reject",
+            "actor": "test-suite",
+            "reason": "fixture requires another review pass",
+            "policy": "manual",
+        },
+    )
+    assert rejected["acceptance_id"].startswith("acceptance-")
+    rejected_detail = query_registry(
+        paths,
+        query(
+            "point_detail",
+            study_id=study_id,
+            point_revision_id=point["point_revision_id"],
+        ),
+    )
+    assert rejected_detail["items"][0]["status"] == "planned"
+    assert rejected_detail["items"][0]["candidate_count"] == 0
+    assert (
+        rejected_detail["items"][0]["result_history"][0]["decision_action"] == "reject"
+    )
+    assert rejected_detail["items"][0]["result_history"][0]["metrics"] == {
+        "samples_per_second": {
+            "value": 612.5,
+            "interval": {
+                "lower": 600.0,
+                "upper": 625.0,
+                "level": 0.95,
+                "method": "bootstrap",
+            },
+        }
+    }
+    assert rejected_detail["items"][0]["result_history"][0]["source_run_ids"] == [
+        "rr-0123456789abcdef"
+    ]
+
+    rebuilt_rejection = rebuild_registry(paths)
+    assert rebuilt_rejection["event_count"] == 4
+    after_rejected_rebuild = query_registry(
+        paths,
+        query(
+            "point_detail",
+            study_id=study_id,
+            point_revision_id=point["point_revision_id"],
+        ),
+    )
+    assert after_rejected_rebuild["items"][0]["status"] == "planned"
+    assert (
+        after_rejected_rebuild["items"][0]["result_history"][0]["decision_action"]
+        == "reject"
+    )
+
     accepted = record_acceptance(
         paths,
         {
@@ -268,16 +387,35 @@ def test_experiment_registry_projects_explicit_results_and_rebuilds(tmp_path: Pa
         paths,
         ["rr-0123456789abcdef"],
     )[0]
-    assert accepted_purge_blocker["accepted_result_ids"] == [
-        "result-0123456789abcdef"
-    ]
-    complete = query_registry(paths, query("point_detail", study_id=study_id, point_revision_id=point["point_revision_id"]))
+    assert accepted_purge_blocker["accepted_result_ids"] == ["result-0123456789abcdef"]
+    complete = query_registry(
+        paths,
+        query(
+            "point_detail",
+            study_id=study_id,
+            point_revision_id=point["point_revision_id"],
+        ),
+    )
     assert complete["items"][0]["status"] == "complete"
+    assert complete["items"][0]["accepted_acceptance_id"] == accepted["acceptance_id"]
     assert complete["items"][0]["metrics"]["samples_per_second"]["value"] == 612.5
     assert complete["items"][0]["artifacts"][0]["relative_path"] == "summary.json"
+    with pytest.raises(ValueError, match="must be revoked"):
+        record_acceptance(
+            paths,
+            {
+                "point_revision_id": point["point_revision_id"],
+                "result_id": "result-0123456789abcdef",
+                "expected_current_acceptance_id": accepted["acceptance_id"],
+                "action": "reject",
+                "actor": "test-suite",
+                "reason": "incorrect action for an accepted result",
+                "policy": "manual",
+            },
+        )
 
     rebuilt = rebuild_registry(paths)
-    assert rebuilt["event_count"] == 4
+    assert rebuilt["event_count"] == 5
     after_rebuild = query_registry(paths, query("point_list", study_id=study_id))
     assert after_rebuild["items"][0]["status"] == "complete"
     assert after_rebuild["registry_epoch"] != complete["registry_epoch"]
@@ -365,7 +503,10 @@ def test_plan_publication_retry_preserves_ids_and_projection_recovers(
     recovered = query_registry(paths, query("study_list"))
 
     assert recovered["items"][0]["study_id"] == first["study_id"]
-    assert recovered["items"][0]["active_design_revision_id"] == first["design_revision_id"]
+    assert (
+        recovered["items"][0]["active_design_revision_id"]
+        == first["design_revision_id"]
+    )
 
 
 def test_plan_publication_retry_recovers_after_journal_commit(

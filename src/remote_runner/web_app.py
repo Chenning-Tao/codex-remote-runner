@@ -27,6 +27,9 @@ from ._internal.execution_registry import (
     resolve_project_config,
     validate_current_run_id,
 )
+from ._internal.experiment_client import (
+    request_acceptance as request_experiment_acceptance,
+)
 from ._internal.experiment_client import request_query as request_experiment_query
 from ._internal.experiment_contracts import MAX_CONTRACT_BYTES
 from ._internal.queue_control import QueuePreparationError, request_queue_update
@@ -44,10 +47,16 @@ CapacityUpdateQuery = Callable[
     [argparse.Namespace, str, dict[str, Any]], dict[str, Any]
 ]
 ServerDrainQuery = Callable[[argparse.Namespace, str, bool], dict[str, Any]]
-BatchUpdateKey = tuple[tuple[tuple[str, int], ...], tuple[str, ...]]
+BatchUpdateKey = tuple[
+    tuple[tuple[str, int], ...],
+    str | None,
+    str | None,
+    tuple[str, ...] | None,
+]
 BatchUpdateResult = tuple[list[str], list[dict[str, str]]]
 BatchUpdateOperation = Callable[[], Awaitable[BatchUpdateResult]]
 ExperimentQuery = Callable[[argparse.Namespace, dict[str, Any]], dict[str, Any]]
+ExperimentAcceptance = Callable[[argparse.Namespace, dict[str, Any]], dict[str, Any]]
 
 
 def _concise_controller_error(exc: Exception) -> str:
@@ -261,6 +270,7 @@ def create_app(
     capacity_update_query: CapacityUpdateQuery = request_capacity_update,
     server_drain_query: ServerDrainQuery = request_server_drain_update,
     experiment_query: ExperimentQuery = request_experiment_query,
+    experiment_acceptance: ExperimentAcceptance = request_experiment_acceptance,
 ) -> Starlette:
     if not (static_root / "index.html").is_file():
         raise RuntimeError(
@@ -347,6 +357,82 @@ def create_app(
             else:
                 status_code = 502
                 error = "experiment_query_failed"
+            return JSONResponse(
+                {"error": error, "detail": detail},
+                status_code=status_code,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    async def experiment_acceptance_endpoint(request: Request) -> Response:
+        if request.headers.get("x-remote-runner-action") != "decide-experiment-result":
+            return JSONResponse(
+                {"error": "missing experiment decision action header"},
+                status_code=403,
+            )
+        content_type = (
+            request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        )
+        if content_type != "application/json":
+            return JSONResponse(
+                {"error": "experiment decision must use application/json"},
+                status_code=415,
+            )
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > MAX_CONTRACT_BYTES:
+                    return JSONResponse(
+                        {"error": "experiment_decision_too_large"},
+                        status_code=413,
+                    )
+            except ValueError:
+                return JSONResponse(
+                    {"error": "invalid content-length"},
+                    status_code=400,
+                )
+        try:
+            body = await request.body()
+            if len(body) > MAX_CONTRACT_BYTES:
+                return JSONResponse(
+                    {"error": "experiment_decision_too_large"},
+                    status_code=413,
+                )
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"error": "experiment decision must be a JSON object"},
+                status_code=400,
+            )
+        decision_args = argparse.Namespace(**vars(probe.args))
+        try:
+            result = await asyncio.to_thread(
+                experiment_acceptance,
+                decision_args,
+                payload,
+            )
+        except FileNotFoundError as exc:
+            return JSONResponse(
+                {"error": "experiment_not_found", "detail": str(exc)},
+                status_code=404,
+                headers={"Cache-Control": "no-store"},
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {"error": "invalid_experiment_decision", "detail": str(exc)},
+                status_code=400,
+                headers={"Cache-Control": "no-store"},
+            )
+        except (OSError, RuntimeError) as exc:
+            detail = _concise_controller_error(exc)
+            status_code = 409 if "conflict" in detail else 502
+            error = (
+                "experiment_decision_conflict"
+                if status_code == 409
+                else "experiment_decision_failed"
+            )
             return JSONResponse(
                 {"error": error, "detail": detail},
                 status_code=status_code,
@@ -523,21 +609,55 @@ def create_app(
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         updates = payload.get("updates") if isinstance(payload, dict) else None
+        queue_priority = (
+            payload.get("queue_priority") if isinstance(payload, dict) else None
+        )
+        workload_class = (
+            payload.get("workload_class") if isinstance(payload, dict) else None
+        )
         eligible_servers = (
             payload.get("eligible_servers") if isinstance(payload, dict) else None
         )
+        allowed_fields = {
+            "updates",
+            "queue_priority",
+            "workload_class",
+            "eligible_servers",
+        }
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"updates", "eligible_servers"}
+            or not set(payload) <= allowed_fields
+            or "updates" not in payload
+            or len(set(payload) - {"updates"}) == 0
             or not isinstance(updates, list)
             or not 1 <= len(updates) <= 100
-            or not isinstance(eligible_servers, list)
-            or not eligible_servers
-            or len(eligible_servers) > 100
-            or any(
-                not isinstance(server, str) or not server for server in eligible_servers
+            or (
+                "queue_priority" in payload
+                and (
+                    not isinstance(queue_priority, str)
+                    or queue_priority not in {"urgent", "normal"}
+                )
             )
-            or len(set(eligible_servers)) != len(eligible_servers)
+            or (
+                "workload_class" in payload
+                and (
+                    not isinstance(workload_class, str)
+                    or workload_class not in {"standard", "test"}
+                )
+            )
+            or (
+                "eligible_servers" in payload
+                and (
+                    not isinstance(eligible_servers, list)
+                    or not eligible_servers
+                    or len(eligible_servers) > 100
+                    or any(
+                        not isinstance(server, str) or not server
+                        for server in eligible_servers
+                    )
+                    or len(set(eligible_servers)) != len(eligible_servers)
+                )
+            )
         ):
             return JSONResponse(
                 {"error": "batch queue update request is invalid"}, status_code=400
@@ -569,10 +689,48 @@ def create_app(
                 status_code=400,
             )
 
+        snapshot = probe.document().get("snapshot")
+        snapshot_entries = (
+            snapshot.get("queue", []) if isinstance(snapshot, dict) else []
+        )
+        initial_jobs = {
+            entry["job"]["run_id"]: entry["job"]
+            for entry in snapshot_entries
+            if (
+                isinstance(entry, dict)
+                and isinstance(entry.get("job"), dict)
+                and isinstance(entry["job"].get("run_id"), str)
+            )
+        }
+        ordering_change_expected = {
+            run_id: (
+                run_id not in initial_jobs
+                or (
+                    (
+                        queue_priority is not None
+                        and initial_jobs[run_id].get("queue_priority", "normal")
+                        != queue_priority
+                    )
+                    or (
+                        workload_class is not None
+                        and initial_jobs[run_id].get("workload_class", "standard")
+                        != workload_class
+                    )
+                )
+            )
+            for run_id in run_ids
+        }
+        controller_changes = {
+            key: payload[key]
+            for key in ("queue_priority", "workload_class", "eligible_servers")
+            if key in payload
+        }
+
         async def apply_updates() -> BatchUpdateResult:
             update_args = argparse.Namespace(**vars(probe.args))
             succeeded: list[str] = []
             failed: list[dict[str, str]] = []
+            ordering_revision_offset = 0
             for run_id, expected_revision in normalized_updates:
                 try:
                     await asyncio.to_thread(
@@ -580,11 +738,15 @@ def create_app(
                         update_args,
                         run_id,
                         {
-                            "expected_revision": expected_revision,
-                            "eligible_servers": eligible_servers,
+                            "expected_revision": (
+                                expected_revision + ordering_revision_offset
+                            ),
+                            **controller_changes,
                         },
                     )
                     succeeded.append(run_id)
+                    if ordering_change_expected[run_id]:
+                        ordering_revision_offset += 1
                 except QueuePreparationError as exc:
                     failed.append(
                         {
@@ -610,7 +772,12 @@ def create_app(
             await probe.probe_once()
             return succeeded, failed
 
-        batch_key = (tuple(normalized_updates), tuple(eligible_servers))
+        batch_key = (
+            tuple(normalized_updates),
+            queue_priority,
+            workload_class,
+            tuple(eligible_servers) if isinstance(eligible_servers, list) else None,
+        )
         succeeded, failed = await in_flight_batch_updates.run(batch_key, apply_updates)
         status = "updated" if not failed else "partial" if succeeded else "failed"
         return JSONResponse(
@@ -707,7 +874,9 @@ def create_app(
         drained = operation == "drain"
         expected_action = "drain-server" if drained else "resume-server"
         if operation not in {"drain", "resume"}:
-            return JSONResponse({"error": "invalid server drain operation"}, status_code=404)
+            return JSONResponse(
+                {"error": "invalid server drain operation"}, status_code=404
+            )
         if request.headers.get("x-remote-runner-action") != expected_action:
             return JSONResponse(
                 {"error": f"missing {expected_action} action header"},
@@ -807,6 +976,11 @@ def create_app(
             Route(
                 "/api/experiments/query",
                 experiment_query_endpoint,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/experiments/acceptances",
+                experiment_acceptance_endpoint,
                 methods=["POST"],
             ),
             Route("/api/runs/{run_id:str}/stop", stop_endpoint, methods=["POST"]),

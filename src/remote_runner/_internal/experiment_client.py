@@ -49,6 +49,13 @@ def request_query(
     return _call(args, "experiment-query", payload=payload)
 
 
+def request_acceptance(
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return _call(args, "experiment-acceptance", payload=payload)
+
+
 def execute(args: argparse.Namespace) -> dict[str, Any]:
     command = args.experiment_command
     if command == "query":

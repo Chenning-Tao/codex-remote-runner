@@ -32,6 +32,8 @@ def test_identical_in_flight_batch_updates_share_one_operation() -> None:
     updates = InFlightBatchUpdates()
     key = (
         (("rr-0123456789abcdef", 3), ("rr-fedcba9876543210", 8)),
+        None,
+        None,
         ("compute-a", "compute-b"),
     )
     calls = 0
@@ -202,6 +204,60 @@ def test_web_experiment_query_is_bounded_and_forwarded(tmp_path: Path) -> None:
     assert response.json()["items"] == []
     assert calls[0][0].timeout == 8
     assert calls[0][1] == query
+
+
+def test_web_experiment_decision_requires_confirmation_and_is_forwarded(
+    tmp_path: Path,
+) -> None:
+    probe = DashboardProbe(arguments(), project_id="example", interval=30)
+    calls: list[tuple[argparse.Namespace, dict[str, object]]] = []
+
+    def experiment_acceptance(
+        args: argparse.Namespace,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        calls.append((args, payload))
+        return {
+            "recorded": True,
+            "acceptance_id": "acceptance-0123456789abcdef",
+            "event_id": "experiment-event-0123456789abcdef",
+        }
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        experiment_acceptance=experiment_acceptance,
+    )
+    decision = {
+        "acceptance_id": "acceptance-fedcba9876543210",
+        "point_revision_id": "pointrev-0123456789abcdef",
+        "result_id": "result-0123456789abcdef",
+        "expected_current_acceptance_id": None,
+        "action": "reject",
+        "actor": "web-dashboard",
+        "reason": "candidate evidence is not sufficient",
+        "policy": "manual-web",
+    }
+
+    with TestClient(app) as client:
+        missing_confirmation = client.post(
+            "/api/experiments/acceptances",
+            json=decision,
+        )
+        response = client.post(
+            "/api/experiments/acceptances",
+            json=decision,
+            headers={"x-remote-runner-action": "decide-experiment-result"},
+        )
+
+    assert missing_confirmation.status_code == 403
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["recorded"] is True
+    assert len(calls) == 1
+    assert calls[0][0].timeout == 8
+    assert calls[0][1] == decision
 
 
 def test_web_stop_requires_explicit_confirmation_and_refreshes_snapshot(
@@ -723,6 +779,105 @@ def test_web_batch_queue_update_rejects_duplicate_runs(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert response.json() == {"error": "batch queue update contains duplicate runs"}
+
+
+def test_web_batch_queue_update_applies_priority_and_tracks_revision_bumps(
+    tmp_path: Path,
+) -> None:
+    run_ids = [
+        "rr-0123456789abcdef",
+        "rr-fedcba9876543210",
+        "rr-0011223344556677",
+    ]
+    revisions = [3, 8, 12]
+    priorities = ["normal", "urgent", "normal"]
+    snapshot = {
+        "servers": [],
+        "queue": [
+            {
+                "job": {"run_id": run_id, "queue_priority": priority},
+                "state": {"status": "queued", "revision": revision},
+            }
+            for run_id, revision, priority in zip(
+                run_ids, revisions, priorities, strict=True
+            )
+        ],
+    }
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: snapshot,
+    )
+    asyncio.run(probe.probe_once())
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def update_query(
+        _args: argparse.Namespace,
+        run_id: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        calls.append((run_id, payload))
+        return {"changed": True}
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        queue_update_query=update_query,
+    )
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/queue-batch",
+            headers={"x-remote-runner-action": "update-queue-batch"},
+            json={
+                "updates": [
+                    {"run_id": run_id, "expected_revision": revision}
+                    for run_id, revision in zip(run_ids, revisions, strict=True)
+                ],
+                "queue_priority": "urgent",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "updated",
+        "succeeded": run_ids,
+        "failed": [],
+    }
+    assert calls == [
+        (run_ids[0], {"expected_revision": 3, "queue_priority": "urgent"}),
+        (run_ids[1], {"expected_revision": 9, "queue_priority": "urgent"}),
+        (run_ids[2], {"expected_revision": 13, "queue_priority": "urgent"}),
+    ]
+
+
+def test_web_batch_queue_update_requires_at_least_one_setting(tmp_path: Path) -> None:
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: {"servers": [], "queue": []},
+    )
+    app = create_app(probe, static_root=static_root(tmp_path), manage_probe=False)
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/queue-batch",
+            headers={"x-remote-runner-action": "update-queue-batch"},
+            json={
+                "updates": [
+                    {
+                        "run_id": "rr-0123456789abcdef",
+                        "expected_revision": 1,
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "batch queue update request is invalid"}
 
 
 def test_web_queue_update_reports_conflict_and_refreshes_snapshot(

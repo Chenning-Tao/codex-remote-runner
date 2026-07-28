@@ -14,7 +14,7 @@ import {
   ToggleGroupItem,
   Tooltip,
 } from "@patternfly/react-core";
-import { RefreshCw, ServerCog, X } from "lucide-react";
+import { RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   ConnectionStatus,
@@ -296,7 +296,7 @@ function RunsDashboard() {
     });
   }
 
-  function openBatchServerSettings() {
+  function openBatchQueueSettings() {
     const entries = (document?.snapshot?.queue ?? []).filter(
       (entry) => entry.job.run_id && selectedRunIds.has(entry.job.run_id),
     );
@@ -309,8 +309,8 @@ function RunsDashboard() {
     if (!result.failed.length) {
       setQueueActionNotice({
         variant: "success",
-        title: "服务器已批量更新",
-        messages: [`已将服务器设置应用到 ${result.succeeded.length} 项任务。`],
+        title: "调度设置已批量更新",
+        messages: [`已将所选设置应用到 ${result.succeeded.length} 项任务。`],
       });
     } else {
       const entriesByRunId = new Map(
@@ -457,10 +457,10 @@ function RunsDashboard() {
                           <Button
                             variant="secondary"
                             size="sm"
-                            icon={<ServerCog aria-hidden="true" />}
-                            onClick={openBatchServerSettings}
+                            icon={<SlidersHorizontal aria-hidden="true" />}
+                            onClick={openBatchQueueSettings}
                           >
-                            设置服务器（{selectedRunIds.size}）
+                            批量设置（{selectedRunIds.size}）
                           </Button>
                           <Tooltip content="清除已选任务">
                             <Button
