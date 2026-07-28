@@ -36,8 +36,10 @@ from ..result_metadata import (
     normalize_result_tags,
 )
 from ..scheduling import (
+    default_worker_policy,
     normalize_minimum_cores,
     normalize_queue_priority,
+    normalize_worker_policy,
     normalize_workload_class,
     queue_priority_rank,
 )
@@ -726,6 +728,10 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
         job["workload_class"] = "standard"
     else:
         job["workload_class"] = normalize_workload_class(job["workload_class"])
+    if "worker_policy" not in job:
+        job["worker_policy"] = default_worker_policy(job["workload_class"])
+    else:
+        job["worker_policy"] = normalize_worker_policy(job["worker_policy"])
     if schema >= QUEUE_SCHEMA:
         if "result_intent" not in job or "result_tags" not in job:
             raise ValueError(
@@ -982,8 +988,13 @@ def load_job(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     entry = _queue_entry_dir(paths, run_id)
     job = _validate_job(load_yaml(entry / "job.yaml"))
-    state = _validate_state(load_yaml(entry / "state.yaml"), run_id)
+    state = load_job_state(paths, run_id)
     return job, state
+
+
+def load_job_state(paths: ControllerPaths, run_id: str) -> dict[str, Any]:
+    entry = _queue_entry_dir(paths, run_id)
+    return _validate_state(load_yaml(entry / "state.yaml"), run_id)
 
 
 def list_jobs(

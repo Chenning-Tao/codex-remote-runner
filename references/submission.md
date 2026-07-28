@@ -198,8 +198,12 @@ Passing that manifest to `run` preserves exactly the successfully prepared
 subset of the allow-list. Do not create three single-server manifests or choose
 a server in the launcher; the controller ranks the allowed candidates.
 
-Preserve an explicit configured worker argument. Otherwise the controller adds
-the selected server's full configured core count, not estimated headroom.
+Worker handling is frozen independently from the workload class. Standard
+submissions default to `--worker-policy auto`: preserve an explicit configured
+worker argument, or add the selected server's full configured core count rather
+than estimated headroom. Test submissions default to `--worker-policy exact`,
+which executes the submitted command unchanged. Override either default explicitly
+when the command contract needs the other behavior.
 
 Use `--workload-class test` only for durable development tests that should use
 the project's testing server pool even while standard work is active. Test
@@ -220,9 +224,9 @@ remote-runner run \
 ```
 
 The controller ranks candidates with available test slots using live capacity.
-Tests execute the exact submitted command without appending the project's
-default worker argument; add any desired test parallelism explicitly in the
-command.
+By default, tests execute the exact submitted command without appending the
+project's default worker argument; add any desired test parallelism explicitly
+in the command or submit with `--worker-policy auto`.
 
 Queue priority remains independent from workload class. Priority orders work
 within the standard and test lanes, while a capacity-blocked standard head never
@@ -243,7 +247,8 @@ The local web dashboard may switch an exact queued workload between `standard`
 and `test`. The update is revision-guarded, must retain at least one server with
 positive capacity in the target lane, and moves the workload to the tail of its
 destination class and priority lane. Work that has entered dispatch or started
-cannot change class.
+cannot change class. A lane switch preserves the job's frozen worker policy and
+therefore never adds or removes a worker argument by itself.
 
 ## Output Identity
 

@@ -16,8 +16,14 @@ WAKE_ID = "rrw-" + "a" * 32
 
 
 class FakeClient:
-    def __init__(self, thread: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        thread: dict[str, Any],
+        *,
+        threads: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.thread = thread
+        self.threads = threads or {str(thread["id"]): thread}
         self.initialized = False
         self.reads: list[tuple[str, bool]] = []
         self.resume_ids: list[str] = []
@@ -45,11 +51,11 @@ class FakeClient:
         include_turns: bool = True,
     ) -> dict[str, Any]:
         self.reads.append((thread_id, include_turns))
-        return self.thread
+        return self.threads[thread_id]
 
     def resume_thread(self, thread_id: str) -> dict[str, Any]:
         self.resume_ids.append(thread_id)
-        return self.thread
+        return self.threads[thread_id]
 
     def start_turn(self, thread_id: str, wake_id: str, prompt: str) -> dict[str, Any]:
         self.started.append((thread_id, wake_id, prompt))
@@ -78,15 +84,48 @@ def user_turn(status: str = "completed") -> dict[str, Any]:
 def test_preflight_reads_the_exact_thread_without_starting_a_turn() -> None:
     client = FakeClient({"id": THREAD_ID, "turns": []})
 
-    codex_app_server.preflight_thread(
+    resolved = codex_app_server.preflight_thread(
         Path("/opt/codex"),
         THREAD_ID,
         client_factory=lambda _executable: client,
     )
 
     assert client.initialized is True
+    assert resolved == THREAD_ID
     assert client.reads == [(THREAD_ID, False)]
     assert client.started == []
+
+
+def test_preflight_and_delivery_route_subagents_to_the_root_thread() -> None:
+    child_id = "019fa161-e274-7110-a7d7-3a4bad156043"
+    child = {
+        "id": child_id,
+        "parentThreadId": THREAD_ID,
+        "source": {"subAgent": {"thread_spawn": {"depth": 1}}},
+        "turns": [],
+    }
+    parent = {"id": THREAD_ID, "source": {"cli": {}}, "turns": []}
+    client = FakeClient(child, threads={child_id: child, THREAD_ID: parent})
+
+    resolved = codex_app_server.preflight_thread(
+        Path("/opt/codex"),
+        child_id,
+        client_factory=lambda _executable: client,
+    )
+    result = codex_app_server.commit_wakeup_turn(
+        Path("/opt/codex"),
+        child_id,
+        WAKE_ID,
+        "report this event",
+        client_factory=lambda _executable: client,
+    )
+
+    assert resolved == THREAD_ID
+    assert client.reads == [(child_id, False), (THREAD_ID, False)]
+    assert client.resume_ids == [child_id, THREAD_ID]
+    assert client.started == [(THREAD_ID, WAKE_ID, "report this event")]
+    assert client.waited == [(THREAD_ID, "turn-new")]
+    assert result["turn_status"] == "completed"
 
 
 def test_history_commit_starts_one_turn_and_waits_for_completion() -> None:

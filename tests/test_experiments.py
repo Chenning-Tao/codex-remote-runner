@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from experiment_fixtures import ingest_experiment_result_reference
 from remote_runner._internal.controller import experiments
 from remote_runner._internal.controller.experiments import (
     experiment_purge_blockers,
@@ -539,3 +540,187 @@ def test_plan_publication_retry_recovers_after_journal_commit(
     assert recovered["published"] is False
     studies = query_registry(paths, query("study_list"))
     assert studies["items"][0]["study_id"] == recovered["study_id"]
+
+
+def test_projection_catch_up_uses_one_connection_for_only_the_journal_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    first = publish_plan(paths, plan(), request_id="publish-first")
+    point = query_registry(
+        paths,
+        query("point_list", study_id=str(first["study_id"])),
+    )["items"][0]
+    next_plan = plan(
+        study_id=str(first["study_id"]),
+        point_id=str(point["point_id"]),
+        head=str(first["design_revision_id"]),
+        batch=8,
+    )
+    original_apply = experiments._apply_event
+    monkeypatch.setattr(
+        experiments,
+        "_apply_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated projection interruption")
+        ),
+    )
+    with pytest.raises(OSError, match="simulated projection interruption"):
+        publish_plan(paths, next_plan, request_id="publish-second")
+    monkeypatch.setattr(experiments, "_apply_event", original_apply)
+
+    connection_count = 0
+    original_connect = experiments._connect
+
+    def counted_connect(database_path: Path):
+        nonlocal connection_count
+        connection_count += 1
+        return original_connect(database_path)
+
+    monkeypatch.setattr(experiments, "_connect", counted_connect)
+    with experiments._experiment_lock(paths):
+        assert experiments._catch_up_locked(paths) == 1
+    assert connection_count == 1
+
+    connection_count = 0
+    with experiments._experiment_lock(paths):
+        assert experiments._catch_up_locked(paths) == 0
+    assert connection_count == 1
+
+
+def test_output_sync_verification_digest_ignores_source_pruning() -> None:
+    completed = {
+        "schema_version": 1,
+        "run_id": "rr-0123456789abcdef",
+        "intent": {"run_id": "rr-0123456789abcdef", "result_intent": "candidate"},
+        "receipt": {
+            "schema_version": 1,
+            "run_id": "rr-0123456789abcdef",
+            "verification": "rsync_checksum_dry_run",
+            "source_deletion_performed": False,
+        },
+        "confirmed_at": "2026-07-28T00:00:00Z",
+    }
+    before_pruning = experiments._output_sync_verification_digest(completed)
+    after_pruning = deepcopy(completed)
+    after_pruning["receipt"] = {
+        **after_pruning["receipt"],
+        "source_deletion_performed": True,
+        "source_deleted_at": "2026-07-28T00:01:00Z",
+        "source_deletion_result": {
+            "ok": True,
+            "action": "removed_directory",
+            "message": None,
+        },
+    }
+
+    assert experiments._output_sync_verification_digest(after_pruning) == before_pruning
+
+
+def test_projected_manifests_are_loaded_from_the_committed_journal(
+    tmp_path: Path,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    reference = ingest_experiment_result_reference(
+        paths,
+        "rr-0123456789abcdef",
+    )
+
+    projected = experiments._projected_manifests(paths)
+    manifest_id = reference["ingested"]["manifest_id"]
+
+    assert projected[manifest_id].manifest_digest.startswith("sha256:")
+    assert projected[manifest_id].receipt_digests == {}
+
+
+def test_completed_sync_ingestion_skips_an_already_projected_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    paths.config_path.parent.mkdir(parents=True)
+    paths.config_path.write_text("controller_registry: true\n", encoding="utf-8")
+    raw_manifest = {"verified": "manifest"}
+    normalized_manifest = {
+        "manifest_id": "result-manifest-0123456789abcdef",
+        "manifest_digest": "sha256:" + "1" * 64,
+        "emitter_run_id": "rr-0123456789abcdef",
+        "results": [
+            {
+                "artifacts": [],
+                "contributions": [{"run_id": "rr-0123456789abcdef"}],
+            }
+        ],
+    }
+    completed = {
+        "schema_version": 1,
+        "run_id": "rr-0123456789abcdef",
+        "intent": {"result_intent": "candidate"},
+        "receipt": {
+            "experiment_result": {
+                "manifest": raw_manifest,
+                "canonical_sha256": contract_digest(raw_manifest),
+                "artifact_count": 0,
+            },
+            "source_deletion_performed": True,
+        },
+    }
+    monkeypatch.setattr(experiments, "list_completed_syncs", lambda _root: [completed])
+    monkeypatch.setattr(
+        experiments,
+        "normalize_experiment_result",
+        lambda _value: normalized_manifest,
+    )
+    monkeypatch.setattr(
+        experiments,
+        "_projected_manifests",
+        lambda _paths: {
+            normalized_manifest["manifest_id"]: experiments._ProjectedManifest(
+                manifest_digest=normalized_manifest["manifest_digest"],
+                receipt_digests={
+                    "rr-0123456789abcdef": (
+                        experiments._output_sync_verification_digest(completed)
+                    )
+                },
+            )
+        },
+    )
+    monkeypatch.setattr(
+        experiments,
+        "ingest_result",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("projected manifest must not be ingested again")
+        ),
+    )
+
+    assert experiments.ingest_completed_sync_results(paths) == {
+        "projected": 0,
+        "errors": [],
+    }
+
+
+def test_experiment_read_path_uses_a_fixed_number_of_database_connections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    paths.config_path.parent.mkdir(parents=True)
+    paths.config_path.write_text("controller_registry: true\n", encoding="utf-8")
+    publish_plan(paths, plan(), request_id="publish-read-path")
+    original_connect = experiments._connect
+    connection_count = 0
+
+    def counted_connect(database_path: Path):
+        nonlocal connection_count
+        connection_count += 1
+        return original_connect(database_path)
+
+    monkeypatch.setattr(experiments, "_connect", counted_connect)
+
+    assert experiments.ingest_completed_sync_results(paths) == {
+        "projected": 0,
+        "errors": [],
+    }
+    assert query_registry(paths, query("study_list"))["items"]
+    assert connection_count == 4

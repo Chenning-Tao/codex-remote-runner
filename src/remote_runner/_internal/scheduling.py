@@ -7,6 +7,7 @@ from dataclasses import dataclass
 QUEUE_PRIORITIES = ("normal", "urgent")
 _QUEUE_PRIORITY_RANK = {name: rank for rank, name in enumerate(QUEUE_PRIORITIES)}
 WORKLOAD_CLASSES = ("standard", "test")
+WORKER_POLICIES = ("auto", "exact")
 
 
 def normalize_minimum_cores(value: object) -> int:
@@ -31,6 +32,17 @@ def normalize_workload_class(value: object) -> str:
         choices = ", ".join(WORKLOAD_CLASSES)
         raise ValueError(f"workload class must be one of: {choices}")
     return value
+
+
+def normalize_worker_policy(value: object) -> str:
+    if not isinstance(value, str) or value not in WORKER_POLICIES:
+        choices = ", ".join(WORKER_POLICIES)
+        raise ValueError(f"worker policy must be one of: {choices}")
+    return value
+
+
+def default_worker_policy(workload_class: object) -> str:
+    return "exact" if normalize_workload_class(workload_class) == "test" else "auto"
 
 
 @dataclass(frozen=True)

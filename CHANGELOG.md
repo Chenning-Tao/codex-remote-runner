@@ -5,6 +5,23 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.6.2 - 2026-07-29
+
+### Added
+
+- Added an explicit worker policy that is frozen at submission, defaults to
+  automatic core-count injection for standard work and exact execution for test
+  work, and remains unchanged when a queued run switches workload class.
+
+### Fixed
+
+- Made experiment registry catch-up incremental and transactional, skipped
+  already-projected synchronized result manifests, kept post-sync source pruning
+  out of immutable verification digests, and limited status reads to bound runs.
+- Routed sub-agent wakeup registrations to their root Codex task, deferred failed
+  deliveries without blocking other subscriptions, and allowed cancellation of a
+  stale delivering subscription after its worker exits.
+
 ## 0.6.1 - 2026-07-28
 
 ### Added

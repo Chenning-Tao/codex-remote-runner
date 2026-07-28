@@ -114,9 +114,11 @@ remote-runner wakeup register \
 ```
 
 Registration binds to `CODEX_THREAD_ID` by default, resolves and stores the absolute
-Codex executable, verifies the controller's cohort-wait protocol, verifies the target
-task through a read-only App Server request, persists the subscription under the
-private Codex home, and starts an on-demand local worker. Run registration as the
+Codex executable, verifies the controller's cohort-wait protocol, and verifies the
+target task through a read-only App Server request. Multi-agent sub-agent tasks resolve
+to their root parent task because App Server does not accept direct input for
+sub-agents. Registration then persists the subscription under the private Codex home
+and starts an on-demand local worker. Run registration as the
 last command before ending the Codex task. Use an explicit `--codex-thread-id` only
 when the caller already owns that exact task.
 
@@ -128,6 +130,9 @@ member must be terminal. A succeeded member whose output sync is `pending`,
 `completed`. A failed or stopped member does not wait for output sync. Cancelled or
 unknown sync on a succeeded member wakes as an attention condition. A terminal subset
 does not cause a busy loop while other members remain active.
+
+Delivery retries persist their next-attempt time and yield back to cohort monitoring.
+One unreachable or incompatible target therefore cannot starve unrelated subscriptions.
 
 Before contacting Codex, the worker atomically persists a minimal ready payload with
 only run ID, phase, outcome, terminal source, attention reason, etag, and output-sync

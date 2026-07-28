@@ -4,12 +4,21 @@ import pytest
 
 from remote_runner._internal.scheduling import (
     CapacityCandidate,
+    default_worker_policy,
     normalize_minimum_cores,
+    normalize_worker_policy,
     rank_candidates,
     resolve_worker_command,
     select_candidate,
     should_queue,
 )
+
+
+def test_worker_policy_defaults_are_independent_after_submission() -> None:
+    assert default_worker_policy("standard") == "auto"
+    assert default_worker_policy("test") == "exact"
+    assert normalize_worker_policy("auto") == "auto"
+    assert normalize_worker_policy("exact") == "exact"
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "256"])

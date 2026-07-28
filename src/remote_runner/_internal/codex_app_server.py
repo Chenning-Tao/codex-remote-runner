@@ -354,15 +354,53 @@ def find_wakeup_turn(thread: dict[str, Any], wake_id: str) -> dict[str, Any] | N
     return None
 
 
+def _subagent_parent_thread_id(thread: dict[str, Any]) -> str | None:
+    source = thread.get("source")
+    if not isinstance(source, dict) or not isinstance(source.get("subAgent"), dict):
+        return None
+    parent_thread_id = thread.get("parentThreadId")
+    if parent_thread_id is None:
+        raise AppServerError("Codex sub-agent thread has no parent thread")
+    return validate_thread_id(parent_thread_id)
+
+
+def _resolve_delivery_thread(
+    client: AppServerSession,
+    thread_id: str,
+    *,
+    resume: bool,
+) -> tuple[str, dict[str, Any]]:
+    current = validate_thread_id(thread_id)
+    visited: set[str] = set()
+    while True:
+        if current in visited:
+            raise AppServerError("Codex sub-agent thread hierarchy contains a cycle")
+        visited.add(current)
+        thread = (
+            client.resume_thread(current)
+            if resume
+            else client.read_thread(current, include_turns=False)
+        )
+        parent = _subagent_parent_thread_id(thread)
+        if parent is None:
+            return current, thread
+        current = parent
+
+
 def preflight_thread(
     executable: Path,
     thread_id: str,
     *,
     client_factory: AppServerFactory = AppServerClient,
-) -> None:
+) -> str:
     with client_factory(executable) as client:
         client.initialize()
-        client.read_thread(validate_thread_id(thread_id), include_turns=False)
+        resolved_thread_id, _thread = _resolve_delivery_thread(
+            client,
+            thread_id,
+            resume=False,
+        )
+        return resolved_thread_id
 
 
 def commit_wakeup_turn(
@@ -376,20 +414,24 @@ def commit_wakeup_turn(
 ) -> dict[str, Any]:
     with client_factory(executable) as client:
         client.initialize()
-        thread = client.resume_thread(validate_thread_id(thread_id))
+        resolved_thread_id, thread = _resolve_delivery_thread(
+            client,
+            thread_id,
+            resume=True,
+        )
         existing = find_wakeup_turn(thread, wake_id)
         if existing is None:
             if not start_if_missing:
                 raise WakeupTurnNotFound(
                     f"Codex thread does not yet contain wakeup {wake_id}"
                 )
-            turn = client.start_turn(thread_id, wake_id, prompt)
+            turn = client.start_turn(resolved_thread_id, wake_id, prompt)
             duplicate = False
         else:
             turn = existing
             duplicate = True
         if turn["status"] == "inProgress":
-            turn = client.wait_for_turn(thread_id, str(turn["id"]))
+            turn = client.wait_for_turn(resolved_thread_id, str(turn["id"]))
         return {
             "wake_id": wake_id,
             "turn_id": turn["id"],

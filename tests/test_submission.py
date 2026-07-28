@@ -250,6 +250,7 @@ def test_managed_run_fans_out_selected_source_and_submits_prepared_manifest(
         "purpose": "validation",
     }
     assert submitted["worker_arg"] == "--num-workers"
+    assert submitted["worker_policy"] == "auto"
     assert submitted["output_relpath"] == "validation/result.json"
     assert submitted["output_path"] is None
     prepared = submitted["prepared_servers"]
@@ -456,6 +457,7 @@ def test_test_workload_allows_configured_testing_pool_subset(
     assert result["prepared_servers"] == ["compute-d"]
     assert result["workload_class"] == "test"
     assert submitted["workload_class"] == "test"
+    assert submitted["worker_policy"] == "exact"
     assert submitted["prepared_servers"][0]["test_slots"] == 1
 
 

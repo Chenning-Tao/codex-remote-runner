@@ -682,6 +682,20 @@ def _register_execution(
     registration.register(args)
 
 
+def _resolve_job_command(
+    job: dict[str, Any],
+    *,
+    configured_cores: int,
+) -> tuple[str, int | None, bool]:
+    if job["worker_policy"] == "exact":
+        return str(job["submitted_command"]), None, False
+    return resolve_worker_command(
+        str(job["submitted_command"]),
+        worker_arg=str(job["worker_arg"]),
+        configured_cores=configured_cores,
+    )
+
+
 def _resolve_selected_output(
     job: dict[str, Any],
     server: dict[str, Any],
@@ -742,16 +756,10 @@ def _launch_dispatching_job(
             revision=str(job["revision"]),
             timeout=timeout,
         )
-        if job["workload_class"] == "test":
-            resolved_command = str(job["submitted_command"])
-            workers = None
-            defaulted = False
-        else:
-            resolved_command, workers, defaulted = resolve_worker_command(
-                str(job["submitted_command"]),
-                worker_arg=str(job["worker_arg"]),
-                configured_cores=selected_capacity.configured_cores,
-            )
+        resolved_command, workers, defaulted = _resolve_job_command(
+            job,
+            configured_cores=selected_capacity.configured_cores,
+        )
         _register_execution(
             paths,
             job,

@@ -26,9 +26,9 @@ from ..experiment_contracts import (
     normalize_experiment_result,
     normalize_run_binding,
 )
-from ..execution_registry import load_current_run, project_paths
+from ..execution_registry import load_current_run, load_current_state, project_paths
 from ..output_sync import list_completed_syncs
-from .registry import ControllerPaths, list_jobs
+from .registry import ControllerPaths, list_jobs, load_job_state
 
 
 REGISTRY_SCHEMA_VERSION = 1
@@ -119,6 +119,12 @@ class ExperimentPaths:
     database_path: Path
     backups_dir: Path
     locks_dir: Path
+
+
+@dataclass(frozen=True)
+class _ProjectedManifest:
+    manifest_digest: str
+    receipt_digests: dict[str, str]
 
 
 def experiment_paths(paths: ControllerPaths) -> ExperimentPaths:
@@ -370,37 +376,59 @@ def ensure_registry(paths: ControllerPaths) -> ExperimentPaths:
     return target
 
 
-def _journal_events(target: ExperimentPaths) -> list[dict[str, Any]]:
+def _journal_event_paths(target: ExperimentPaths) -> list[Path]:
     if not target.journal_dir.is_dir():
         return []
-    events: list[dict[str, Any]] = []
-    for path in sorted(target.journal_dir.glob("*.json")):
+    paths = sorted(target.journal_dir.glob("*.json"))
+    for path in paths:
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"experiment journal event must be a regular file: {path}")
+    return paths
+
+
+def _read_journal_event(
+    target: ExperimentPaths,
+    path: Path,
+    *,
+    expected_sequence: int,
+    previous_digest: str | None,
+) -> tuple[dict[str, Any], str]:
+    try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError(f"experiment journal event is not an object: {path}")
-        events.append(value)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"experiment journal event is invalid: {path}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"experiment journal event is not an object: {path}")
+    if value.get("sequence") != expected_sequence:
+        raise ValueError("experiment journal sequence is not contiguous")
+    if value.get("schema_version") != EXPERIMENT_SCHEMA_VERSION:
+        raise ValueError("unsupported experiment journal schema_version")
+    event_id = value.get("event_id")
+    if not isinstance(event_id, str):
+        raise ValueError("experiment journal event_id is invalid")
+    if path.name != f"{expected_sequence:020d}-{event_id}.json":
+        raise ValueError("experiment journal filename does not match its identity")
+    if value.get("project_id") != target.root.parent.parent.name:
+        raise ValueError("experiment journal project identity mismatch")
+    if value.get("previous_event_digest") != previous_digest:
+        raise ValueError("experiment journal digest chain is invalid")
+    computed = contract_digest(_event_without_digest(value))
+    if value.get("event_digest") != computed:
+        raise ValueError(f"experiment journal event digest mismatch: {event_id}")
+    return value, computed
+
+
+def _journal_events(target: ExperimentPaths) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
     previous_digest: str | None = None
-    for expected, event in enumerate(events, start=1):
-        if event.get("sequence") != expected:
-            raise ValueError("experiment journal sequence is not contiguous")
-        if event.get("schema_version") != EXPERIMENT_SCHEMA_VERSION:
-            raise ValueError("unsupported experiment journal schema_version")
-        event_id = event.get("event_id")
-        if not isinstance(event_id, str):
-            raise ValueError("experiment journal event_id is invalid")
-        expected_name = f"{expected:020d}-{event_id}.json"
-        if not (target.journal_dir / expected_name).is_file():
-            raise ValueError("experiment journal filename does not match its identity")
-        if event.get("project_id") != target.root.parent.parent.name:
-            raise ValueError("experiment journal project identity mismatch")
-        if event.get("previous_event_digest") != previous_digest:
-            raise ValueError("experiment journal digest chain is invalid")
-        computed = contract_digest(_event_without_digest(event))
-        if event.get("event_digest") != computed:
-            raise ValueError(f"experiment journal event digest mismatch: {event_id}")
-        previous_digest = computed
+    for expected, path in enumerate(_journal_event_paths(target), start=1):
+        event, previous_digest = _read_journal_event(
+            target,
+            path,
+            expected_sequence=expected,
+            previous_digest=previous_digest,
+        )
+        events.append(event)
     return events
 
 
@@ -705,50 +733,77 @@ def _apply_acceptance_event(
         )
 
 
-def _apply_event_to_database(database_path: Path, event: Mapping[str, Any]) -> bool:
+def _apply_event_to_connection(
+    connection: sqlite3.Connection,
+    event: Mapping[str, Any],
+) -> bool:
     event_digest = contract_digest(_event_without_digest(event))
     if event.get("event_digest") != event_digest:
         raise ValueError(
             f"experiment journal event digest mismatch: {event.get('event_id')}"
         )
-    with _connect(database_path) as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        previous = connection.execute(
-            "SELECT source_digest FROM projection_inputs WHERE source_id = ?",
-            (event["event_id"],),
-        ).fetchone()
-        if previous is not None:
-            if previous["source_digest"] != event_digest:
-                raise RuntimeError("experiment projection input digest conflict")
-            connection.rollback()
-            return False
-        event_type = event["event_type"]
-        if event_type == "plan_published":
-            _apply_plan_event(connection, event)
-        elif event_type == "binding_observed":
-            _apply_binding_event(connection, event)
-        elif event_type == "result_ingested":
-            _apply_result_event(connection, event)
-        elif event_type == "acceptance_recorded":
-            _apply_acceptance_event(connection, event)
-        else:
-            raise ValueError(f"unsupported experiment journal event type: {event_type}")
-        connection.execute(
-            "INSERT INTO projection_inputs(source_id, source_digest, sequence) VALUES (?, ?, ?)",
-            (event["event_id"], event_digest, event["sequence"]),
-        )
-        connection.execute(
-            "INSERT INTO registry_events(sequence, event_id, event_type, event_digest, occurred_at) VALUES (?, ?, ?, ?, ?)",
-            (
-                event["sequence"],
-                event["event_id"],
-                event_type,
-                event_digest,
-                event["occurred_at"],
-            ),
+    previous = connection.execute(
+        "SELECT source_digest FROM projection_inputs WHERE source_id = ?",
+        (event["event_id"],),
+    ).fetchone()
+    if previous is not None:
+        if previous["source_digest"] != event_digest:
+            raise RuntimeError("experiment projection input digest conflict")
+        return False
+    event_type = event["event_type"]
+    if event_type == "plan_published":
+        _apply_plan_event(connection, event)
+    elif event_type == "binding_observed":
+        _apply_binding_event(connection, event)
+    elif event_type == "result_ingested":
+        _apply_result_event(connection, event)
+    elif event_type == "acceptance_recorded":
+        _apply_acceptance_event(connection, event)
+    else:
+        raise ValueError(f"unsupported experiment journal event type: {event_type}")
+    connection.execute(
+        "INSERT INTO projection_inputs(source_id, source_digest, sequence) VALUES (?, ?, ?)",
+        (event["event_id"], event_digest, event["sequence"]),
+    )
+    connection.execute(
+        "INSERT INTO registry_events(sequence, event_id, event_type, event_digest, occurred_at) VALUES (?, ?, ?, ?, ?)",
+        (
+            event["sequence"],
+            event["event_id"],
+            event_type,
+            event_digest,
+            event["occurred_at"],
+        ),
+    )
+    return True
+
+
+def _apply_events_in_transaction(
+    connection: sqlite3.Connection,
+    events: Iterable[Mapping[str, Any]],
+) -> int:
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        applied = sum(
+            int(_apply_event_to_connection(connection, event)) for event in events
         )
         connection.commit()
-    return True
+    except Exception:
+        connection.rollback()
+        raise
+    return applied
+
+
+def _apply_events_to_database(
+    database_path: Path,
+    events: Iterable[Mapping[str, Any]],
+) -> int:
+    with _connect(database_path) as connection:
+        return _apply_events_in_transaction(connection, events)
+
+
+def _apply_event_to_database(database_path: Path, event: Mapping[str, Any]) -> bool:
+    return bool(_apply_events_to_database(database_path, (event,)))
 
 
 def _apply_event(paths: ControllerPaths, event: Mapping[str, Any]) -> bool:
@@ -756,12 +811,82 @@ def _apply_event(paths: ControllerPaths, event: Mapping[str, Any]) -> bool:
     return _apply_event_to_database(target.database_path, event)
 
 
+def _projection_head(
+    connection: sqlite3.Connection,
+) -> tuple[int, str | None, str | None]:
+    event_count, event_sequence = connection.execute(
+        "SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM registry_events"
+    ).fetchone()
+    input_count, input_sequence = connection.execute(
+        "SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM projection_inputs"
+    ).fetchone()
+    if (
+        int(event_count) != int(event_sequence)
+        or int(input_count) != int(input_sequence)
+        or int(event_count) != int(input_count)
+    ):
+        raise RuntimeError("experiment projection sequence is not contiguous")
+    sequence = int(event_sequence)
+    if sequence == 0:
+        return 0, None, None
+    row = connection.execute(
+        """SELECT re.event_id, re.event_digest, pi.source_digest
+           FROM registry_events re
+           JOIN projection_inputs pi ON pi.source_id = re.event_id
+           WHERE re.sequence = ? AND pi.sequence = ?""",
+        (sequence, sequence),
+    ).fetchone()
+    if row is None or row["event_digest"] != row["source_digest"]:
+        raise RuntimeError("experiment projection head is inconsistent")
+    return sequence, str(row["event_id"]), str(row["event_digest"])
+
+
 def _catch_up_locked(paths: ControllerPaths) -> int:
     target = ensure_registry(paths)
-    applied = 0
-    for event in _journal_events(target):
-        applied += int(_apply_event_to_database(target.database_path, event))
-    return applied
+    journal_paths = _journal_event_paths(target)
+    with _connect(target.database_path) as connection:
+        sequence, event_id, previous_digest = _projection_head(connection)
+        if sequence > len(journal_paths):
+            raise RuntimeError("experiment projection is ahead of the journal")
+        if sequence:
+            expected_name = f"{sequence:020d}-{event_id}.json"
+            anchor_path = journal_paths[sequence - 1]
+            if anchor_path.name != expected_name:
+                raise RuntimeError(
+                    "experiment projection head does not match the journal"
+                )
+            anchor_previous_digest = None
+            if sequence > 1:
+                previous = connection.execute(
+                    "SELECT event_digest FROM registry_events WHERE sequence = ?",
+                    (sequence - 1,),
+                ).fetchone()
+                if previous is None:
+                    raise RuntimeError("experiment projection head is inconsistent")
+                anchor_previous_digest = str(previous["event_digest"])
+            anchor, anchor_digest = _read_journal_event(
+                target,
+                anchor_path,
+                expected_sequence=sequence,
+                previous_digest=anchor_previous_digest,
+            )
+            if anchor["event_id"] != event_id or anchor_digest != previous_digest:
+                raise RuntimeError(
+                    "experiment projection head does not match the journal"
+                )
+            previous_digest = anchor_digest
+        if sequence == len(journal_paths):
+            return 0
+        events: list[dict[str, Any]] = []
+        for expected, path in enumerate(journal_paths[sequence:], start=sequence + 1):
+            event, previous_digest = _read_journal_event(
+                target,
+                path,
+                expected_sequence=expected,
+                previous_digest=previous_digest,
+            )
+            events.append(event)
+        return _apply_events_in_transaction(connection, events)
 
 
 def experiment_purge_blockers(
@@ -834,8 +959,7 @@ def rebuild_registry(paths: ControllerPaths) -> dict[str, Any]:
             with contextlib.suppress(FileNotFoundError):
                 Path(f"{temporary}{suffix}").unlink()
         _initialize_database(temporary, epoch=secrets.token_hex(16))
-        for event in events:
-            _apply_event_to_database(temporary, event)
+        _apply_events_to_database(temporary, events)
         with contextlib.closing(sqlite3.connect(temporary, timeout=5)) as connection:
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
         for suffix in ("-wal", "-shm"):
@@ -1452,6 +1576,96 @@ def ingest_result(
     }
 
 
+def _projected_manifests(
+    paths: ControllerPaths,
+) -> dict[str, _ProjectedManifest]:
+    target = ensure_registry(paths)
+    with _experiment_lock(paths):
+        _catch_up_locked(paths)
+        journal_paths = _journal_event_paths(target)
+        with _connect(target.database_path) as connection:
+            event_digests = {
+                int(row["sequence"]): str(row["event_digest"])
+                for row in connection.execute(
+                    "SELECT sequence, event_digest FROM registry_events"
+                )
+            }
+            projected: dict[str, _ProjectedManifest] = {}
+            for row in connection.execute(
+                """SELECT DISTINCT r.manifest_id, r.manifest_digest,
+                                  r.ingested_event_id, re.sequence, re.event_digest
+                   FROM results r
+                   JOIN registry_events re ON re.event_id = r.ingested_event_id"""
+            ):
+                manifest_id = str(row["manifest_id"])
+                manifest_digest = str(row["manifest_digest"])
+                sequence = int(row["sequence"])
+                event_id = str(row["ingested_event_id"])
+                if sequence <= 0 or sequence > len(journal_paths):
+                    raise RuntimeError(
+                        "experiment result projection is ahead of the journal"
+                    )
+                event_path = journal_paths[sequence - 1]
+                if event_path.name != f"{sequence:020d}-{event_id}.json":
+                    raise RuntimeError(
+                        "experiment result projection does not match the journal"
+                    )
+                event, event_digest = _read_journal_event(
+                    target,
+                    event_path,
+                    expected_sequence=sequence,
+                    previous_digest=event_digests.get(sequence - 1),
+                )
+                if event_digest != row["event_digest"]:
+                    raise RuntimeError(
+                        "experiment projection event does not match the journal"
+                    )
+                payload = event.get("payload")
+                if not isinstance(payload, Mapping):
+                    raise RuntimeError("experiment result event payload is invalid")
+                event_manifest = payload.get("manifest")
+                verification = payload.get("verification")
+                if (
+                    event.get("event_type") != "result_ingested"
+                    or not isinstance(event_manifest, Mapping)
+                    or event_manifest.get("manifest_id") != manifest_id
+                    or event_manifest.get("manifest_digest") != manifest_digest
+                    or not isinstance(verification, Mapping)
+                ):
+                    raise RuntimeError(
+                        "experiment result projection does not match its journal event"
+                    )
+                raw_receipts = verification.get("receipts", {})
+                if not isinstance(raw_receipts, Mapping):
+                    raise RuntimeError("experiment result verification is invalid")
+                current = _ProjectedManifest(
+                    manifest_digest=manifest_digest,
+                    receipt_digests={
+                        str(run_id): str(digest)
+                        for run_id, digest in raw_receipts.items()
+                    },
+                )
+                previous = projected.setdefault(manifest_id, current)
+                if previous != current:
+                    raise RuntimeError(
+                        "experiment projection contains conflicting manifest records"
+                    )
+            return projected
+
+
+def _output_sync_verification_digest(completed: Mapping[str, Any]) -> str:
+    receipt = completed.get("receipt")
+    if not isinstance(receipt, Mapping):
+        raise ValueError("completed output-sync receipt is invalid")
+    # Source pruning changes lifecycle metadata after archival verification.
+    stable_receipt = dict(receipt)
+    if "source_deletion_performed" in stable_receipt:
+        stable_receipt["source_deletion_performed"] = False
+    stable_receipt.pop("source_deleted_at", None)
+    stable_receipt.pop("source_deletion_result", None)
+    return contract_digest({**completed, "receipt": stable_receipt})
+
+
 def ingest_completed_sync_results(paths: ControllerPaths) -> dict[str, Any]:
     if not paths.config_path.is_file():
         return {"projected": 0, "errors": []}
@@ -1460,6 +1674,7 @@ def ingest_completed_sync_results(paths: ControllerPaths) -> dict[str, Any]:
         str(item["run_id"]): item
         for item in list_completed_syncs(execution_paths.registry_root)
     }
+    projected_manifests = _projected_manifests(paths)
     projected = 0
     errors: list[dict[str, str]] = []
     for emitter_run_id, completed in completed_by_run.items():
@@ -1488,6 +1703,27 @@ def ingest_completed_sync_results(paths: ControllerPaths) -> dict[str, Any]:
                 for result in manifest["results"]
                 for contribution in result["contributions"]
             }
+            projected_manifest = projected_manifests.get(manifest["manifest_id"])
+            if projected_manifest is not None:
+                if projected_manifest.manifest_digest != manifest["manifest_digest"]:
+                    raise RuntimeError(
+                        "experiment manifest id was reused with different content"
+                    )
+                current_receipt_digests = {}
+                for run_id in sorted(contribution_ids):
+                    contributing_sync = completed_by_run.get(run_id)
+                    if contributing_sync is None:
+                        raise ValueError(
+                            f"contributing run has no completed output sync: {run_id}"
+                        )
+                    current_receipt_digests[run_id] = (
+                        _output_sync_verification_digest(contributing_sync)
+                    )
+                if current_receipt_digests != projected_manifest.receipt_digests:
+                    raise RuntimeError(
+                        "experiment output-sync verification changed after ingestion"
+                    )
+                continue
             receipt_digests: dict[str, str] = {}
             for run_id in sorted(contribution_ids):
                 contributing_sync = completed_by_run.get(run_id)
@@ -1532,7 +1768,9 @@ def ingest_completed_sync_results(paths: ControllerPaths) -> dict[str, Any]:
                     for contribution in matching
                 ):
                     raise ValueError(f"contributing frozen binding mismatch: {run_id}")
-                receipt_digests[run_id] = contract_digest(contributing_sync)
+                receipt_digests[run_id] = _output_sync_verification_digest(
+                    contributing_sync
+                )
             emitter_intent = completed.get("intent")
             if (
                 not isinstance(emitter_intent, Mapping)
@@ -1545,6 +1783,10 @@ def ingest_completed_sync_results(paths: ControllerPaths) -> dict[str, Any]:
                 verification={"mode": "output_sync", "receipts": receipt_digests},
             )
             projected += int(bool(outcome["ingested"]))
+            projected_manifests[manifest["manifest_id"]] = _ProjectedManifest(
+                manifest_digest=manifest["manifest_digest"],
+                receipt_digests=receipt_digests,
+            )
         except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
             errors.append({"run_id": emitter_run_id, "error": str(exc)})
     return {"projected": projected, "errors": errors}
@@ -1661,7 +1903,10 @@ def _plan_for_head(
     )
 
 
-def _authoritative_run_statuses(paths: ControllerPaths) -> dict[str, str]:
+def _authoritative_run_statuses(
+    paths: ControllerPaths,
+    run_ids: Iterable[str] | None = None,
+) -> dict[str, str]:
     statuses: dict[str, str] = {}
     queue_mapping = {
         "queued": "queued",
@@ -1669,10 +1914,24 @@ def _authoritative_run_statuses(paths: ControllerPaths) -> dict[str, str]:
         "failed": "failed",
         "stopped": "failed",
     }
-    for job, state in list_jobs(paths):
-        mapped = queue_mapping.get(str(state["status"]))
-        if mapped is not None:
-            statuses[str(job["run_id"])] = mapped
+    selected_run_ids = None if run_ids is None else sorted(set(run_ids))
+    if selected_run_ids is None:
+        for job, state in list_jobs(paths):
+            mapped = queue_mapping.get(str(state["status"]))
+            if mapped is not None:
+                statuses[str(job["run_id"])] = mapped
+    else:
+        for run_id in selected_run_ids:
+            entry = paths.queue_dir / run_id
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            try:
+                state = load_job_state(paths, run_id)
+            except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                continue
+            mapped = queue_mapping.get(str(state["status"]))
+            if mapped is not None:
+                statuses[run_id] = mapped
     if not paths.config_path.is_file():
         return statuses
     execution_paths = project_paths(paths.config_path)
@@ -1685,16 +1944,29 @@ def _authoritative_run_statuses(paths: ControllerPaths) -> dict[str, str]:
         "failed": "failed",
         "stopped": "failed",
     }
-    for entry in execution_paths.runs_dir.glob("rr-*"):
-        if not entry.is_dir() or entry.is_symlink():
-            continue
-        try:
-            _manifest, state = load_current_run(execution_paths, entry.name)
-        except (FileNotFoundError, OSError, RuntimeError, ValueError):
-            continue
-        mapped = execution_mapping.get(str(state["status"]))
-        if mapped is not None:
-            statuses[entry.name] = mapped
+    if selected_run_ids is None:
+        for entry in execution_paths.runs_dir.glob("rr-*"):
+            if not entry.is_dir() or entry.is_symlink():
+                continue
+            try:
+                _manifest, state = load_current_run(execution_paths, entry.name)
+            except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                continue
+            mapped = execution_mapping.get(str(state["status"]))
+            if mapped is not None:
+                statuses[entry.name] = mapped
+    else:
+        for run_id in selected_run_ids:
+            entry = execution_paths.runs_dir / run_id
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            try:
+                state = load_current_state(execution_paths, run_id)
+            except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                continue
+            mapped = execution_mapping.get(str(state["status"]))
+            if mapped is not None:
+                statuses[run_id] = mapped
     return statuses
 
 
@@ -2126,8 +2398,12 @@ def _query_registry_locked(
     query: Mapping[str, Any],
 ) -> dict[str, Any]:
     target = ensure_registry(paths)
-    run_statuses = _authoritative_run_statuses(paths)
     with _connect(target.database_path) as connection:
+        bound_run_ids = {
+            str(row["run_id"])
+            for row in connection.execute("SELECT DISTINCT run_id FROM run_bindings")
+        }
+        run_statuses = _authoritative_run_statuses(paths, bound_run_ids)
         epoch, event_cursor = _query_context(connection)
         operation = query["operation"]
         active_design_revision_id = None

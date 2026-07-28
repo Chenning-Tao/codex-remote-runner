@@ -394,21 +394,22 @@ def register(args: argparse.Namespace) -> dict[str, Any]:
         run_ids=run_ids,
     )
 
-    existing = False
+    existing_subscription: dict[str, Any] | None = None
     with state_lock(paths):
         existing_path = _subscription_path(paths, wake_id)
         if existing_path.is_file():
-            _validate_subscription(_read_json(existing_path), existing_path)
+            existing_subscription = _validate_subscription(
+                _read_json(existing_path), existing_path
+            )
             _sync_pending_marker_locked(paths)
-            existing = True
-    if existing:
+    if existing_subscription is not None:
         supervisor = _supervisor_status(paths)
         worker = _start_or_supervised_worker(paths, supervisor)
         return {
             "status": "registered",
             "created": False,
             "wake_id": wake_id,
-            "thread_id": thread_id,
+            "thread_id": existing_subscription["thread_id"],
             "project_config": str(config_path),
             "run_ids": run_ids,
             "worker": worker,
@@ -421,13 +422,13 @@ def register(args: argparse.Namespace) -> dict[str, Any]:
         run_ids,
         timeout=timeout,
     )
-    preflight_thread(codex_executable, thread_id)
+    delivery_thread_id = preflight_thread(codex_executable, thread_id)
     ready_payload = _ready_payload(wake_id, initial_views)
     subscription: dict[str, Any] = {
         "schema_version": SUBSCRIPTION_SCHEMA_VERSION,
         "wake_id": wake_id,
         "status": "ready" if ready_payload is not None else "pending",
-        "thread_id": thread_id,
+        "thread_id": delivery_thread_id,
         "project_config": str(config_path),
         "project_id": config.project_id,
         "run_ids": run_ids,
@@ -471,7 +472,7 @@ def register(args: argparse.Namespace) -> dict[str, Any]:
         "status": "registered",
         "created": created,
         "wake_id": wake_id,
-        "thread_id": thread_id,
+        "thread_id": delivery_thread_id,
         "project_config": str(config_path),
         "run_ids": run_ids,
         "worker": worker,
@@ -514,19 +515,22 @@ def uninstall_supervisor(args: argparse.Namespace) -> dict[str, Any]:
 def cancel(args: argparse.Namespace) -> dict[str, Any]:
     paths = wakeup_paths(_state_root_from_args(args))
     wake_id = _validate_wake_id(args.wake_id)
-    with state_lock(paths):
-        path = _subscription_path(paths, wake_id)
-        if not path.is_file():
-            raise FileNotFoundError(f"wakeup subscription is not pending: {wake_id}")
-        subscription = _validate_subscription(_read_json(path), path)
-        if subscription["status"] == "delivering":
-            raise RuntimeError(f"wakeup subscription is already delivering: {wake_id}")
-        _archive_locked(
-            paths,
-            subscription,
-            status="cancelled",
-            delivery=None,
-        )
+    with worker_lock(paths) as worker_idle:
+        with state_lock(paths):
+            path = _subscription_path(paths, wake_id)
+            if not path.is_file():
+                raise FileNotFoundError(f"wakeup subscription is not pending: {wake_id}")
+            subscription = _validate_subscription(_read_json(path), path)
+            if subscription["status"] == "delivering" and not worker_idle:
+                raise RuntimeError(
+                    f"wakeup subscription is actively delivering: {wake_id}"
+                )
+            _archive_locked(
+                paths,
+                subscription,
+                status="cancelled",
+                delivery=None,
+            )
     return {"status": "cancelled", "wake_id": wake_id}
 
 
@@ -934,6 +938,10 @@ def record_error(
             subscription = _validate_subscription(_read_json(path), path)
             field = f"{kind}_attempts"
             subscription[field] = int(subscription[field]) + 1
+            if kind == "delivery":
+                subscription["delivery_not_before"] = time.time() + retry_delay(
+                    int(subscription[field])
+                )
             subscription["last_error"] = {
                 "kind": kind,
                 "message": str(error)[:1000],
