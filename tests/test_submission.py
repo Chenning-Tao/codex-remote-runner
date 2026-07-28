@@ -23,7 +23,10 @@ def config(tmp_path: Path) -> Path:
         path,
         {
             "project_id": "example",
-            "controller": {"ssh": "controller_host", "root": "/Users/test/.remote-runner"},
+            "controller": {
+                "ssh": "controller_host",
+                "root": "/Users/test/.remote-runner",
+            },
             "source": {"local_repo": "code"},
             "remote": {
                 "compute-a": {
@@ -38,32 +41,34 @@ def config(tmp_path: Path) -> Path:
     return path
 
 
+def binding_template() -> dict[str, object]:
+    return {
+        "kind": "run_binding",
+        "schema_version": 1,
+        "targets": [
+            {
+                "study_id": "study-0123456789abcdef",
+                "origin_design_revision_id": "design-0123456789abcdef",
+                "plan_digest": "sha256:" + "1" * 64,
+                "point_id": "point-0123456789abcdef",
+                "point_revision_id": "pointrev-0123456789abcdef",
+                "point_revision_digest": "sha256:" + "2" * 64,
+                "setting_digest": "sha256:" + "3" * 64,
+                "result_group_id": "primary",
+                "contribution_role": "primary",
+            }
+        ],
+        "expects_result_manifest": False,
+        "metadata": {},
+    }
+
+
 def test_experiment_binding_template_is_finalized_for_exact_run(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "binding.json"
     path.write_text(
-        json.dumps(
-            {
-                "kind": "run_binding",
-                "schema_version": 1,
-                "targets": [
-                    {
-                        "study_id": "study-0123456789abcdef",
-                        "origin_design_revision_id": "design-0123456789abcdef",
-                        "plan_digest": "sha256:" + "1" * 64,
-                        "point_id": "point-0123456789abcdef",
-                        "point_revision_id": "pointrev-0123456789abcdef",
-                        "point_revision_digest": "sha256:" + "2" * 64,
-                        "setting_digest": "sha256:" + "3" * 64,
-                        "result_group_id": "primary",
-                        "contribution_role": "primary",
-                    }
-                ],
-                "expects_result_manifest": False,
-                "metadata": {},
-            }
-        ),
+        json.dumps(binding_template()),
         encoding="utf-8",
     )
 
@@ -78,6 +83,78 @@ def test_experiment_binding_template_is_finalized_for_exact_run(
     assert binding["run_id"] == "rr-0123456789abcdef"
     assert binding["source_revision"] == "a" * 40
     assert binding["binding_digest"].startswith("sha256:")
+
+
+def test_supplied_binding_identity_is_reproducible_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "binding.json"
+    template = binding_template()
+    template["binding_id"] = "binding-0123456789abcdef"
+    path.write_text(json.dumps(template), encoding="utf-8")
+
+    first = submission._finalize_experiment_binding(
+        path,
+        run_id="rr-0123456789abcdef",
+        source_revision="a" * 40,
+    )
+    second = submission._finalize_experiment_binding(
+        path,
+        run_id="rr-0123456789abcdef",
+        source_revision="a" * 40,
+    )
+
+    assert first == second
+    assert first is not None
+    assert first["binding_id"] == "binding-0123456789abcdef"
+
+    frozen = dict(first)
+    path.write_text(json.dumps(frozen), encoding="utf-8")
+    assert (
+        submission._finalize_experiment_binding(
+            path,
+            run_id="rr-0123456789abcdef",
+            source_revision="a" * 40,
+        )
+        == first
+    )
+
+    frozen_targets = list(frozen["targets"])
+    frozen_targets[0] = {**frozen_targets[0], "setting_digest": "sha256:" + "4" * 64}
+    frozen["targets"] = frozen_targets
+    path.write_text(json.dumps(frozen), encoding="utf-8")
+    with pytest.raises(ValueError, match="binding_digest does not match"):
+        submission._finalize_experiment_binding(
+            path,
+            run_id="rr-0123456789abcdef",
+            source_revision="a" * 40,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("run_id", "rr-fedcba9876543210", "run_id does not match"),
+        ("source_revision", "b" * 40, "source_revision does not match"),
+    ],
+)
+def test_binding_template_rejects_supplied_run_identity_mismatch(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    path = tmp_path / "binding.json"
+    template = binding_template()
+    template[field] = value
+    path.write_text(json.dumps(template), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        submission._finalize_experiment_binding(
+            path,
+            run_id="rr-0123456789abcdef",
+            source_revision="a" * 40,
+        )
 
 
 @pytest.mark.parametrize("override_name", [None, "task-repo"])
@@ -107,7 +184,9 @@ def test_managed_run_fans_out_selected_source_and_submits_prepared_manifest(
             },
         }
     ]
-    monkeypatch.setattr(submission, "probe_project_pool", lambda *_args, **_kwargs: pool)
+    monkeypatch.setattr(
+        submission, "probe_project_pool", lambda *_args, **_kwargs: pool
+    )
     prepared_from: list[Path] = []
 
     def prepare(local_repo: Path, **_kwargs) -> PreparationResult:
@@ -115,7 +194,9 @@ def test_managed_run_fans_out_selected_source_and_submits_prepared_manifest(
         return PreparationResult(
             revision="a" * 40,
             ref="refs/remote-runner/example/" + "a" * 40,
-            prepared=(PreparedServer("compute-a", "compute-a:/srv/repo.git", "ref", "a" * 40),),
+            prepared=(
+                PreparedServer("compute-a", "compute-a:/srv/repo.git", "ref", "a" * 40),
+            ),
             failures=(),
         )
 
@@ -124,8 +205,9 @@ def test_managed_run_fans_out_selected_source_and_submits_prepared_manifest(
     monkeypatch.setattr(
         submission,
         "call_controller",
-        lambda _config, _action, *, timeout, payload: submitted.update(payload)
-        or {"outcome": {"action": "queued"}},
+        lambda _config, _action, *, timeout, payload: (
+            submitted.update(payload) or {"outcome": {"action": "queued"}}
+        ),
     )
     args = argparse.Namespace(
         project_config=config_path,
@@ -175,7 +257,9 @@ def test_managed_run_fans_out_selected_source_and_submits_prepared_manifest(
     assert prepared[0]["configured_cores"] == 256
 
 
-def test_relative_source_override_fails_before_pool_probe(tmp_path: Path, monkeypatch) -> None:
+def test_relative_source_override_fails_before_pool_probe(
+    tmp_path: Path, monkeypatch
+) -> None:
     config_path = config(tmp_path)
 
     def unexpected_probe(*_args, **_kwargs):
@@ -225,7 +309,9 @@ def test_all_server_uses_automatic_pool_for_submission(
         return PreparationResult(
             revision="a" * 40,
             ref="refs/remote-runner/example/" + "a" * 40,
-            prepared=(PreparedServer("compute-a", "compute-a:/srv/repo.git", "ref", "a" * 40),),
+            prepared=(
+                PreparedServer("compute-a", "compute-a:/srv/repo.git", "ref", "a" * 40),
+            ),
             failures=(),
         )
 
@@ -235,8 +321,9 @@ def test_all_server_uses_automatic_pool_for_submission(
     monkeypatch.setattr(
         submission,
         "call_controller",
-        lambda _config, _action, *, timeout, payload: submitted.update(payload)
-        or {"outcome": {"action": "queued"}},
+        lambda _config, _action, *, timeout, payload: (
+            submitted.update(payload) or {"outcome": {"action": "queued"}}
+        ),
     )
 
     result = submission.submit(
@@ -316,7 +403,10 @@ def test_test_workload_allows_configured_testing_pool_subset(
             ref="refs/remote-runner/example/" + "a" * 40,
             prepared=(
                 PreparedServer(
-                    "compute-d", "server-compute-d:/srv/compute-d/repo.git", "ref", "a" * 40
+                    "compute-d",
+                    "server-compute-d:/srv/compute-d/repo.git",
+                    "ref",
+                    "a" * 40,
                 ),
             ),
             failures=(),
@@ -442,8 +532,9 @@ def test_test_workload_filters_reused_preparation_to_testing_subset(
     monkeypatch.setattr(
         submission,
         "call_controller",
-        lambda _config, _action, *, timeout, payload: submitted.update(payload)
-        or {"outcome": {"action": "queued"}},
+        lambda _config, _action, *, timeout, payload: (
+            submitted.update(payload) or {"outcome": {"action": "queued"}}
+        ),
     )
 
     result = submission.submit(
@@ -503,7 +594,9 @@ def test_managed_run_reuses_preparation_without_remote_probe_or_push(
     preparation = PreparationResult(
         revision=revision,
         ref=f"refs/remote-runner/example/{revision}",
-        prepared=(PreparedServer("compute-a", "compute-a:/srv/repo.git", "ref", revision),),
+        prepared=(
+            PreparedServer("compute-a", "compute-a:/srv/repo.git", "ref", revision),
+        ),
         failures=(),
     )
     prepared_servers = [
@@ -548,8 +641,9 @@ def test_managed_run_reuses_preparation_without_remote_probe_or_push(
     monkeypatch.setattr(
         submission,
         "call_controller",
-        lambda _config, _action, *, timeout, payload: submitted.update(payload)
-        or {"outcome": {"action": "queued"}},
+        lambda _config, _action, *, timeout, payload: (
+            submitted.update(payload) or {"outcome": {"action": "queued"}}
+        ),
     )
     args = argparse.Namespace(
         project_config=config_path,
@@ -677,7 +771,9 @@ def test_reused_preparation_rejects_server_registry_drift(tmp_path: Path) -> Non
     preparation = PreparationResult(
         revision=revision,
         ref=f"refs/remote-runner/example/{revision}",
-        prepared=(PreparedServer("compute-a", "compute-a:/srv/repo.git", "ref", revision),),
+        prepared=(
+            PreparedServer("compute-a", "compute-a:/srv/repo.git", "ref", revision),
+        ),
         failures=(),
     )
     manifest_path = tmp_path / "prepared.json"

@@ -18,9 +18,15 @@ from .execution_registry import (
     runtime_path,
     sha256_bytes,
 )
+from .experiment_contracts import canonical_json_bytes, normalize_run_binding
 from .output_paths import validate_resolved_output
 from .remote_shell import remote_python_stdin_command, ssh_connection_options
 from .tmux import run_tmux_session
+
+
+EXPERIMENT_BINDING_ASSET = "experiment-binding.json"
+EXPERIMENT_BINDING_ENV = "RR_EXPERIMENT_BINDING_PATH"
+EXPERIMENT_BINDING_SHA256_ENV = "RR_EXPERIMENT_BINDING_SHA256"
 
 
 @dataclass(frozen=True)
@@ -75,7 +81,7 @@ class LaunchPlan:
 
 def _sitecustomize_source(run_id: str) -> bytes:
     title = json.dumps(run_id)
-    return f'''import os
+    return f"""import os
 
 
 def _privacy_failure():
@@ -95,10 +101,10 @@ try:
         _privacy_failure()
 except BaseException:
     _privacy_failure()
-'''.encode()
+""".encode()
 
 
-SUPERVISOR_SOURCE = r'''import os
+SUPERVISOR_SOURCE = r"""import os
 import json
 import signal
 import subprocess
@@ -198,7 +204,7 @@ while group_has_other_members():
 if stopping or (runtime_dir / "stop.request").exists():
     raise SystemExit(143)
 raise SystemExit(child_exit_code)
-'''
+"""
 
 
 def _supervisor_source(run_id: str, privacy_mode: str | None) -> str:
@@ -208,7 +214,7 @@ def _supervisor_source(run_id: str, privacy_mode: str | None) -> str:
         )
     elif privacy_mode == PROCESS_TITLE_PRIVACY_MODE:
         title = json.dumps(run_id)
-        workload_exec = f'''    workload_env = os.environ.copy()
+        workload_exec = f"""    workload_env = os.environ.copy()
     workload_env["RR_PROCESS_TITLE_REQUIRED"] = "1"
     workload_env["RR_PROCESS_TITLE"] = {title}
     original_pythonpath = workload_env.get("PYTHONPATH")
@@ -219,7 +225,7 @@ def _supervisor_source(run_id: str, privacy_mode: str | None) -> str:
         "bash",
         ("remote-runner:" + run_id + "-workload", "-s"),
         workload_env,
-    )'''
+    )"""
     else:
         raise ValueError(f"unsupported privacy mode: {privacy_mode!r}")
     if SUPERVISOR_SOURCE.count("__WORKLOAD_EXEC__") != 1:
@@ -237,6 +243,7 @@ def _wrapper_source(
     *,
     output_root: str | None = None,
     output_path: str | None = None,
+    experiment_binding_sha256: str | None = None,
 ) -> str:
     quoted_run_id = shlex.quote(run_id)
     quoted_label_json = shlex.quote(json.dumps(label, ensure_ascii=True))
@@ -253,11 +260,18 @@ def _wrapper_source(
                 f"RR_OUTPUT_DIR={shlex.quote(str(PurePosixPath(output_path).parent))}",
             )
         )
+    if experiment_binding_sha256 is not None:
+        workload_environment.extend(
+            (
+                f'{EXPERIMENT_BINDING_ENV}="${{runtime_dir}}/{EXPERIMENT_BINDING_ASSET}"',
+                f"{EXPERIMENT_BINDING_SHA256_ENV}={shlex.quote(experiment_binding_sha256)}",
+            )
+        )
     workload_prefix = " ".join(workload_environment)
     supervisor_b64 = base64.b64encode(
         _supervisor_source(run_id, privacy_mode).encode()
     ).decode()
-    return f'''#!/usr/bin/env bash
+    return f"""#!/usr/bin/env bash
 set -u
 umask 077
 cd -- "${{0%/*}}" || exit 125
@@ -323,7 +337,7 @@ printf '[REMOTE_RUNNER_START] %s\n' "$started_at"
 write_status running null null || exit 125
 cd -- "$workdir" || exit 125
 
-unset RR_OUTPUT_ROOT RR_OUTPUT_PATH RR_OUTPUT_DIR
+unset RR_OUTPUT_ROOT RR_OUTPUT_PATH RR_OUTPUT_DIR {EXPERIMENT_BINDING_ENV} {EXPERIMENT_BINDING_SHA256_ENV}
 {workload_prefix} {quoted_project_python} -c 'import base64,os,sys; os.setsid(); os.execv(sys.executable, ("remote-runner:" + sys.argv[1], "-c", base64.b64decode(sys.argv[3]).decode(), sys.argv[1], sys.argv[2]))' "$run_id" "$runtime_dir" {supervisor_b64!r} \
   < "${{runtime_dir}}/command.sh" &
 workload_pid=$!
@@ -333,10 +347,10 @@ while kill -0 -- "-$workload_pid" 2>/dev/null; do
   sleep 0.05
 done
 exit "$workload_rc"
-'''
+"""
 
 
-REMOTE_BOOTSTRAP = r'''import base64
+REMOTE_BOOTSTRAP = r"""import base64
 import hashlib
 import json
 import os
@@ -349,6 +363,7 @@ from pathlib import Path, PurePosixPath
 
 RUN_ID_RE = re.compile(r"^rr-[0-9a-f]{16}$")
 ALLOWED_ASSETS = {"run.sh": 0o700, "command.sh": 0o600}
+EXPERIMENT_BINDING_ASSET = "experiment-binding.json"
 
 def exact_tmux_target(session_name):
     return "=" + session_name
@@ -365,6 +380,12 @@ def emit(ok, phase, message=None, tmux_started=False, status=None):
 def fail(message, phase="preflight"):
     emit(False, phase, message, False, None)
     raise SystemExit(1)
+
+experiment_binding_handoff = payload.get("experiment_binding_handoff", False)
+if not isinstance(experiment_binding_handoff, bool):
+    fail("invalid experiment binding handoff request", "validation")
+if experiment_binding_handoff:
+    ALLOWED_ASSETS[EXPERIMENT_BINDING_ASSET] = 0o400
 
 def read_status(path):
     try:
@@ -571,10 +592,10 @@ if status is None or not owner_path.is_file() or not pgid_path.is_file():
     emit(False, "start", "tmux did not produce complete runtime state", True, status)
     raise SystemExit(2)
 emit(True, "started", None, True, status)
-'''
+"""
 
 
-SITE_CUSTOMIZE_PROBE_SOURCE = r'''import importlib.abc
+SITE_CUSTOMIZE_PROBE_SOURCE = r"""import importlib.abc
 import importlib.util
 import json
 import site
@@ -610,10 +631,10 @@ except (ImportError, ValueError):
     spec = None
 origin = None if spec is None else (getattr(spec, "origin", None) or "<discoverable>")
 print("RR_SITE_CUSTOMIZE_PROBE " + json.dumps(origin), flush=True)
-'''
+"""
 
 
-SET_PROCESS_TITLE_PROBE_SOURCE = r'''import os
+SET_PROCESS_TITLE_PROBE_SOURCE = r"""import os
 
 os.environ["SPT_NOENV"] = "1"
 import setproctitle
@@ -621,14 +642,14 @@ import setproctitle
 setproctitle.setproctitle("rr-privacy-preflight")
 if setproctitle.getproctitle() != "rr-privacy-preflight":
     raise SystemExit("setproctitle did not change the process title")
-'''
+"""
 
 
-PROCESS_TITLE_HELPER_PROBE_SOURCE = r'''from pathlib import Path
+PROCESS_TITLE_HELPER_PROBE_SOURCE = r"""from pathlib import Path
 import sitecustomize
 
 print("RR_PROCESS_TITLE_HELPER " + str(Path(sitecustomize.__file__).resolve()), flush=True)
-'''
+"""
 
 
 def _privacy_bootstrap_source() -> str:
@@ -653,7 +674,7 @@ def _privacy_bootstrap_source() -> str:
     insertion_point = "root.mkdir(mode=0o700, exist_ok=True)"
     if source.count(insertion_point) != 1:
         raise RuntimeError("remote bootstrap privacy insertion point is invalid")
-    preflight = f'''if payload.get("process_title_privacy") != {{"mode": "required"}}:
+    preflight = f"""if payload.get("process_title_privacy") != {{"mode": "required"}}:
     fail("invalid process-title privacy request", "validation")
 
 privacy_environment = os.environ.copy()
@@ -738,7 +759,7 @@ try:
 except OSError as exc:
     fail("could not stage the generated process-title privacy helper: " + str(exc))
 
-'''
+"""
     return source.replace(insertion_point, preflight + insertion_point)
 
 
@@ -815,6 +836,16 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
         output_relpath=manifest.get("output_relpath"),
         output_path=manifest.get("output_path"),
     )
+    raw_experiment_binding = manifest.get("experiment_binding")
+    experiment_binding = (
+        None
+        if raw_experiment_binding is None
+        else normalize_run_binding(raw_experiment_binding)
+    )
+    binding_bytes = (
+        None if experiment_binding is None else canonical_json_bytes(experiment_binding)
+    )
+    binding_sha256 = None if binding_bytes is None else sha256_bytes(binding_bytes)
     wrapper_bytes = _wrapper_source(
         run_id,
         str(manifest["label"]),
@@ -824,11 +855,21 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
         str(manifest.get("workload_class", "standard")),
         output_root=output_root,
         output_path=output_path,
+        experiment_binding_sha256=binding_sha256,
     ).encode()
     asset_list = [
         LaunchAsset("run.sh", wrapper_bytes, sha256_bytes(wrapper_bytes), 0o700),
         LaunchAsset("command.sh", command_bytes, sha256_bytes(command_bytes), 0o600),
     ]
+    if binding_bytes is not None and binding_sha256 is not None:
+        asset_list.append(
+            LaunchAsset(
+                EXPERIMENT_BINDING_ASSET,
+                binding_bytes,
+                binding_sha256,
+                0o400,
+            )
+        )
     if privacy_mode == PROCESS_TITLE_PRIVACY_MODE:
         helper_bytes = _sitecustomize_source(run_id)
         asset_list.append(
@@ -864,6 +905,8 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
             for asset in assets
         ],
     }
+    if experiment_binding is not None:
+        payload["experiment_binding_handoff"] = True
     if privacy_mode == PROCESS_TITLE_PRIVACY_MODE:
         payload["process_title_privacy"] = {"mode": "required"}
     return LaunchPlan(

@@ -5,6 +5,15 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.6.1 - 2026-07-28
+
+### Added
+
+- Exposed each finalized run binding to its bound workload as a canonical,
+  read-only launch asset through `RR_EXPERIMENT_BINDING_PATH` and its exact
+  asset digest through `RR_EXPERIMENT_BINDING_SHA256`, enabling native result
+  producers to cite the exact controller-submitted binding identity.
+
 ## 0.6.0 - 2026-07-28
 
 ### Added

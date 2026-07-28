@@ -92,6 +92,19 @@ must be `candidate`. The producer writes a bounded `experiment_result` with
 intervals, evidence counts, checks, and artifact references in the manifest;
 keep raw per-observation payloads in referenced artifacts.
 
+For every bound run, Remote Runner installs the normalized finalized binding as
+a canonical UTF-8 JSON launch asset with mode `0400` and sets
+`RR_EXPERIMENT_BINDING_PATH` to its absolute runtime path. The
+`RR_EXPERIMENT_BINDING_SHA256` variable carries the `sha256:<hex>` digest of
+those exact file bytes. The bytes are the
+same binding frozen in the controller job and execution manifest, including the
+final run ID, source revision, binding ID, binding digest, targets, and result
+manifest path. Unbound workloads receive neither the asset nor the variable.
+The producer must parse the file as data and fail closed unless its run, target,
+setting, and recomputed binding digest match the result it is about to emit; it
+must not import `remote_runner._internal` or infer these identities from command
+text, labels, or output paths.
+
 The output-sync worker reads the exact manifest from the verified archive,
 checks regular-file and size limits, verifies referenced artifact SHA256 values,
 and idempotently projects it into the experiment registry. Native producers must
@@ -243,7 +256,11 @@ The workload receives:
 
 - `RR_PROJECT_PYTHON`: selected configured project interpreter;
 - `RR_OUTPUT_PATH` and `RR_OUTPUT_DIR`: selected physical output identity;
-- `RR_OUTPUT_ROOT`: selected root for relative-output jobs.
+- `RR_OUTPUT_ROOT`: selected root for relative-output jobs;
+- `RR_EXPERIMENT_BINDING_PATH`: canonical finalized binding asset for bound
+  runs only;
+- `RR_EXPERIMENT_BINDING_SHA256`: SHA-256 digest of that exact binding asset,
+  also for bound runs only.
 
 Use these variables instead of repeating server-specific paths in the command.
 

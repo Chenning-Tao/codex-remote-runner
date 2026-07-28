@@ -22,6 +22,10 @@ from remote_runner._internal.execution_registry import (
     project_paths,
     update_current_state,
 )
+from remote_runner._internal.experiment_contracts import (
+    canonical_json_bytes,
+    normalize_run_binding,
+)
 from remote_runner._internal.launch_plan import LaunchPlan, build_launch_plan
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +33,32 @@ pytestmark = pytest.mark.usefixtures("reap_test_runner_processes")
 
 
 RUN_ID = "rr-fedcba9876543210"
+
+
+def experiment_binding(run_id: str, source_revision: str) -> dict[str, object]:
+    return {
+        "kind": "run_binding",
+        "schema_version": 1,
+        "binding_id": "binding-0123456789abcdef",
+        "run_id": run_id,
+        "source_revision": source_revision,
+        "targets": [
+            {
+                "study_id": "study-0123456789abcdef",
+                "origin_design_revision_id": "design-0123456789abcdef",
+                "plan_digest": "sha256:" + "1" * 64,
+                "point_id": "point-0123456789abcdef",
+                "point_revision_id": "pointrev-0123456789abcdef",
+                "point_revision_digest": "sha256:" + "2" * 64,
+                "setting_digest": "sha256:" + "3" * 64,
+                "result_group_id": "primary",
+                "contribution_role": "primary",
+            }
+        ],
+        "result_manifest_relpath": "experiment-result.json",
+        "expects_result_manifest": True,
+        "metadata": {},
+    }
 
 
 def write_yaml(path: Path, data: dict[str, object]) -> None:
@@ -48,11 +78,15 @@ def register_local_run(
     output_relpath: str | None = None,
     output_path: str | None = None,
     workload_class: str = "standard",
+    source_revision: str | None = None,
+    experiment_binding_value: dict[str, object] | None = None,
+    remote_workdir: Path | None = None,
 ) -> tuple[Path, LaunchPlan]:
     project = tmp_path / "project"
-    workdir = tmp_path / "remote-workdir"
+    workdir = tmp_path / "remote-workdir" if remote_workdir is None else remote_workdir
     project.mkdir()
-    workdir.mkdir()
+    if remote_workdir is None:
+        workdir.mkdir()
     config = project / ".remote-runner.yaml"
     write_yaml(
         config,
@@ -84,6 +118,8 @@ def register_local_run(
         output_relpath=output_relpath,
         output_path=output_path,
         output_metadata=None,
+        source_revision=source_revision,
+        experiment_binding=experiment_binding_value,
         run_id=run_id,
     )
     registration.register(args)
@@ -235,7 +271,9 @@ def test_wrapper_keeps_runtime_files_after_changing_workdir(tmp_path: Path) -> N
 
     assert (runtime / "status.json").is_file()
     assert (runtime / "log").is_file()
-    assert str(manifest["remote_workdir"]) in (runtime / "log").read_text(encoding="utf-8")
+    assert str(manifest["remote_workdir"]) in (runtime / "log").read_text(
+        encoding="utf-8"
+    )
     assert not (Path(str(manifest["remote_workdir"])) / "status.json").exists()
 
 
@@ -249,12 +287,114 @@ def test_launch_plan_is_normal_and_command_is_not_in_argv(tmp_path: Path) -> Non
     assert command.strip() not in argv_text
     assert "sitecustomize" not in plan.bootstrap_stdin.decode()
     assert "setproctitle" not in plan.bootstrap_stdin.decode()
-    assert "privacy" not in next(
+    assert (
+        "privacy"
+        not in next(
+            asset.content.decode() for asset in plan.assets if asset.name == "run.sh"
+        ).lower()
+    )
+    assert (
+        'RR_EXPERIMENT_BINDING_PATH="${runtime_dir}/experiment-binding.json"'
+        not in next(
+            asset.content.decode() for asset in plan.assets if asset.name == "run.sh"
+        )
+    )
+    assert "RR_EXPERIMENT_BINDING_SHA256=sha256:" not in next(
         asset.content.decode() for asset in plan.assets if asset.name == "run.sh"
-    ).lower()
+    )
 
 
-def test_launch_plan_reuses_remote_runner_ssh_control_connection(tmp_path: Path) -> None:
+def test_binding_launch_asset_is_canonical_read_only_and_visible_to_workload(
+    tmp_path: Path,
+) -> None:
+    revision = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    binding = experiment_binding(RUN_ID, revision)
+    capture = tmp_path / "binding-handoff.json"
+    command = f"""{sys.executable} - <<'PY'
+import hashlib
+import json
+import os
+import stat
+from pathlib import Path
+
+binding_path = Path(os.environ["RR_EXPERIMENT_BINDING_PATH"])
+Path({str(capture)!r}).write_text(json.dumps({{
+    "path": str(binding_path),
+    "declared_sha256": os.environ["RR_EXPERIMENT_BINDING_SHA256"],
+    "actual_sha256": "sha256:" + hashlib.sha256(binding_path.read_bytes()).hexdigest(),
+    "content": json.loads(binding_path.read_text(encoding="utf-8")),
+    "mode": stat.S_IMODE(binding_path.stat().st_mode),
+}}), encoding="utf-8")
+PY
+"""
+    _config, plan = register_local_run(
+        tmp_path,
+        command,
+        expected_revision=revision,
+        source_revision=revision,
+        experiment_binding_value=binding,
+        remote_workdir=ROOT,
+    )
+    binding_asset = next(
+        asset for asset in plan.assets if asset.name == "experiment-binding.json"
+    )
+    normalized = normalize_run_binding(binding)
+
+    assert binding_asset.content == canonical_json_bytes(normalized)
+    assert binding_asset.mode == 0o400
+    assert plan.public()["assets"][2]["mode"] == "0400"
+
+    home = tmp_path / "home"
+    home.mkdir()
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "RR_EXPERIMENT_BINDING_PATH": "poison-binding-path",
+        "RR_EXPERIMENT_BINDING_SHA256": "sha256:" + "0" * 64,
+    }
+    completed = subprocess.run(
+        [sys.executable, "-"],
+        input=plan.bootstrap_stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        check=False,
+        timeout=15,
+    )
+    try:
+        assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+        runtime = home / ".rr" / RUN_ID
+        record = wait_for_json(capture)
+        assert record == {
+            "path": str(runtime / "experiment-binding.json"),
+            "declared_sha256": binding_asset.sha256,
+            "actual_sha256": binding_asset.sha256,
+            "content": normalized,
+            "mode": 0o400,
+        }
+        deadline = time.monotonic() + 5
+        status_record = wait_for_json(runtime / "status.json")
+        while status_record["state"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.02)
+            status_record = wait_for_json(runtime / "status.json")
+        assert status_record["state"] == "succeeded"
+    finally:
+        subprocess.run(
+            ["tmux", "kill-session", "-t", f"={RUN_ID}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+
+def test_launch_plan_reuses_remote_runner_ssh_control_connection(
+    tmp_path: Path,
+) -> None:
     _config, plan = register_local_run(tmp_path, "true\n")
 
     assert "ControlMaster=auto" in plan.bootstrap_ssh_argv
@@ -269,7 +409,9 @@ def test_launch_control_plane_uses_configured_project_python(tmp_path: Path) -> 
         "true\n",
         project_python=configured_python,
     )
-    wrapper = next(asset.content.decode() for asset in plan.assets if asset.name == "run.sh")
+    wrapper = next(
+        asset.content.decode() for asset in plan.assets if asset.name == "run.sh"
+    )
 
     assert plan.bootstrap_ssh_argv[-1] == f"{shlex.quote(configured_python)} -"
     assert f"{shlex.quote(configured_python)} -c " in wrapper
@@ -404,7 +546,9 @@ def test_wrapper_does_not_depend_on_path_python3(tmp_path: Path) -> None:
 
 def test_bootstrap_installs_private_runtime_and_starts_tmux(tmp_path: Path) -> None:
     run_id = "rr-1111222233334444"
-    _config, plan = register_local_run(tmp_path, "sleep 0.2\nprintf 'done\\n'\n", run_id=run_id)
+    _config, plan = register_local_run(
+        tmp_path, "sleep 0.2\nprintf 'done\\n'\n", run_id=run_id
+    )
     home = tmp_path / "home"
     home.mkdir()
     env = os.environ.copy()
@@ -535,7 +679,9 @@ def test_transport_timeouts_cover_connect_and_remote_work(
         observed.append(float(kwargs["timeout"]))
         stdin = kwargs["input"]
         assert isinstance(stdin, bytes)
-        prefix = "RR_STOP_RESULT" if b"RR_STOP_RESULT" in stdin else "RR_BOOTSTRAP_RESULT"
+        prefix = (
+            "RR_STOP_RESULT" if b"RR_STOP_RESULT" in stdin else "RR_BOOTSTRAP_RESULT"
+        )
         payload = (
             {"ok": True, "tmux_started": True, "status": {"state": "running"}}
             if prefix == "RR_BOOTSTRAP_RESULT"
@@ -609,7 +755,10 @@ def test_stop_main_queries_configured_controller(
     write_yaml(
         config,
         {
-            "controller": {"ssh": "controller_host", "root": "/Users/test/.remote-runner"},
+            "controller": {
+                "ssh": "controller_host",
+                "root": "/Users/test/.remote-runner",
+            },
             "source": {"local_repo": "code"},
             "remote": {
                 "compute-a": {
@@ -634,17 +783,20 @@ def test_stop_main_queries_configured_controller(
 
     monkeypatch.setattr(stopping, "call_controller", stop_controller)
 
-    assert cli.main(
-        [
-            "stop",
-            "--project-config",
-            str(config),
-            "--run-id",
-            RUN_ID,
-            "--timeout",
-            "4",
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "stop",
+                "--project-config",
+                str(config),
+                "--run-id",
+                RUN_ID,
+                "--timeout",
+                "4",
+            ]
+        )
+        == 0
+    )
 
     assert observed == {
         "action": "stop",
@@ -737,7 +889,9 @@ PY
             wrapper.wait(timeout=5)
 
 
-def test_stop_does_not_trust_terminal_status_while_group_is_alive(tmp_path: Path) -> None:
+def test_stop_does_not_trust_terminal_status_while_group_is_alive(
+    tmp_path: Path,
+) -> None:
     home = tmp_path / "home"
     _config, plan = register_local_run(tmp_path, "sleep 60\n")
     runtime = install_plan_runtime(plan, home)
@@ -849,7 +1003,9 @@ def test_stop_refuses_unowned_process_group(tmp_path: Path) -> None:
     try:
         (runtime / "pgid").write_text(f"{worker.pid}\n", encoding="utf-8")
         (runtime / "owner.json").write_text(
-            json.dumps({"run_id": RUN_ID, "pid": worker.pid + 1, "pgid": worker.pid + 1}),
+            json.dumps(
+                {"run_id": RUN_ID, "pid": worker.pid + 1, "pgid": worker.pid + 1}
+            ),
             encoding="utf-8",
         )
 

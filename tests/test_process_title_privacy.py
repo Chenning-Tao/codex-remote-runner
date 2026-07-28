@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from remote_runner._internal import launch, launch_plan, monitoring, registration, stopping
+from remote_runner._internal import (
+    launch,
+    launch_plan,
+    monitoring,
+    registration,
+    stopping,
+)
 from remote_runner._internal.execution_registry import (
     PROCESS_TITLE_PRIVACY_MODE,
     load_current_run,
@@ -64,6 +70,8 @@ def registration_args(
     run_id: str,
     privacy: str | None,
     command: str = "printf 'done\\n'\n",
+    source_revision: str | None = None,
+    experiment_binding: dict[str, object] | None = None,
 ) -> argparse.Namespace:
     runtime = yaml.safe_load(config.read_text(encoding="utf-8"))["remote"]["local"]
     return argparse.Namespace(
@@ -78,10 +86,12 @@ def registration_args(
         command=command,
         remote_workdir=runtime["workdir"],
         project_python=runtime["python"],
-        expected_revision=None,
+        expected_revision=source_revision,
         require_clean_worktree=False,
         output_path=None,
         output_metadata=None,
+        source_revision=source_revision,
+        experiment_binding=experiment_binding,
         run_id=run_id,
         privacy=privacy,
     )
@@ -131,7 +141,9 @@ def bootstrap_result(stdout: bytes) -> dict[str, object]:
     return result
 
 
-def test_registration_freezes_only_explicit_process_title_privacy(tmp_path: Path) -> None:
+def test_registration_freezes_only_explicit_process_title_privacy(
+    tmp_path: Path,
+) -> None:
     _project, _workdir, config = make_project(tmp_path)
     normal_path = registration.register(
         registration_args(config, run_id=NORMAL_RUN_ID, privacy=None)
@@ -151,7 +163,9 @@ def test_registration_freezes_only_explicit_process_title_privacy(tmp_path: Path
     assert process_title_privacy_mode(normal_manifest) is None
     assert private_manifest["process_title_privacy"] == {"mode": "required"}
     assert process_title_privacy_mode(private_manifest) == PROCESS_TITLE_PRIVACY_MODE
-    assert load_current_run(project_paths(config), PRIVATE_RUN_ID)[0] == private_manifest
+    assert (
+        load_current_run(project_paths(config), PRIVATE_RUN_ID)[0] == private_manifest
+    )
 
     with pytest.raises(ValueError, match="unsupported privacy mode"):
         registration.register(
@@ -231,7 +245,10 @@ def test_normal_and_opt_in_plans_have_exact_distinct_assets(tmp_path: Path) -> N
         "command.sh",
         "sitecustomize.py",
     ]
-    assert all("content" not in item and "data" not in item for item in private_public["assets"])
+    assert all(
+        "content" not in item and "data" not in item
+        for item in private_public["assets"]
+    )
     assert normal.bootstrap_ssh_argv[-1] == shlex.join((sys.executable, "-"))
     assert private.bootstrap_ssh_argv[-1] == shlex.join((sys.executable, "-S", "-"))
 
@@ -248,6 +265,58 @@ def test_normal_and_opt_in_plans_have_exact_distinct_assets(tmp_path: Path) -> N
     )
     assert PRIVATE_RUN_ID in helper
     assert "process-title privacy test" not in helper
+
+
+def test_privacy_plan_preserves_experiment_binding_handoff(tmp_path: Path) -> None:
+    revision = "a" * 40
+    _project, _workdir, config = make_project(tmp_path)
+    binding = {
+        "kind": "run_binding",
+        "schema_version": 1,
+        "binding_id": "binding-0123456789abcdef",
+        "run_id": PRIVATE_RUN_ID,
+        "source_revision": revision,
+        "targets": [
+            {
+                "study_id": "study-0123456789abcdef",
+                "origin_design_revision_id": "design-0123456789abcdef",
+                "plan_digest": "sha256:" + "1" * 64,
+                "point_id": "point-0123456789abcdef",
+                "point_revision_id": "pointrev-0123456789abcdef",
+                "point_revision_digest": "sha256:" + "2" * 64,
+                "setting_digest": "sha256:" + "3" * 64,
+                "result_group_id": "primary",
+                "contribution_role": "primary",
+            }
+        ],
+        "result_manifest_relpath": "experiment-result.json",
+        "expects_result_manifest": True,
+        "metadata": {},
+    }
+    registration.register(
+        registration_args(
+            config,
+            run_id=PRIVATE_RUN_ID,
+            privacy=PROCESS_TITLE_PRIVACY_MODE,
+            source_revision=revision,
+            experiment_binding=binding,
+        )
+    )
+
+    plan = launch_plan.build_launch_plan(project_paths(config), PRIVATE_RUN_ID)
+
+    assert [(asset.name, asset.mode) for asset in plan.assets] == [
+        ("run.sh", 0o700),
+        ("command.sh", 0o600),
+        ("experiment-binding.json", 0o400),
+        ("sitecustomize.py", 0o600),
+    ]
+    wrapper = plan.assets[0].content.decode()
+    assert "RR_EXPERIMENT_BINDING_PATH" in wrapper
+    assert "RR_EXPERIMENT_BINDING_SHA256=sha256:" in wrapper
+    assert "ALLOWED_ASSETS[EXPERIMENT_BINDING_ASSET] = 0o400" in (
+        plan.bootstrap_stdin.decode()
+    )
 
 
 def test_sitecustomize_probe_discovers_without_executing_existing_hook(
@@ -284,7 +353,9 @@ def test_sitecustomize_probe_discovers_without_executing_existing_hook(
     assert not marker.exists()
 
 
-def test_generated_helper_sets_spt_noenv_before_import_and_title(tmp_path: Path) -> None:
+def test_generated_helper_sets_spt_noenv_before_import_and_title(
+    tmp_path: Path,
+) -> None:
     helper_dir = tmp_path / "helper"
     helper_dir.mkdir()
     helper_source = launch_plan._sitecustomize_source(PRIVATE_RUN_ID).decode()
@@ -551,9 +622,7 @@ def test_privacy_launch_rejection_keeps_registered_state(
 
 def test_monitor_projects_privacy_only_for_opt_in_current_run(tmp_path: Path) -> None:
     _project, _workdir, config = make_project(tmp_path)
-    registration.register(
-        registration_args(config, run_id=NORMAL_RUN_ID, privacy=None)
-    )
+    registration.register(registration_args(config, run_id=NORMAL_RUN_ID, privacy=None))
     registration.register(
         registration_args(
             config,
