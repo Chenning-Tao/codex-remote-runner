@@ -5,6 +5,13 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.6.3 - 2026-07-29
+
+### Fixed
+
+- Made staged controller virtual environments relocatable so installed console
+  scripts remain executable after the release directory is atomically activated.
+
 ## 0.6.2 - 2026-07-29
 
 ### Added

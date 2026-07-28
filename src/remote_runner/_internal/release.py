@@ -323,7 +323,7 @@ trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/artifact" "$staging/source"
 tar -xzf "$payload" -C "$staging/artifact"
 tar -xzf "$staging/artifact/source.tar.gz" -C "$staging/source"
-"$uv" venv "$staging/venv" --python 3.12
+"$uv" venv "$staging/venv" --python 3.12 --relocatable
 "$uv" pip install \
   --python "$staging/venv/bin/python" \
   --constraints "$staging/artifact/constraints.txt" \
