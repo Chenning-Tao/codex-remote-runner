@@ -5,6 +5,8 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.6.1 - 2026-07-28
+
 ### Added
 
 - Exposed each finalized run binding to its bound workload as a canonical,
