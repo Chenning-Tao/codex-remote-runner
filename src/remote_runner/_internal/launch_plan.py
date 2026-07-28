@@ -18,9 +18,14 @@ from .execution_registry import (
     runtime_path,
     sha256_bytes,
 )
+from .experiment_contracts import canonical_json_bytes, normalize_run_binding
 from .output_paths import validate_resolved_output
 from .remote_shell import remote_python_stdin_command, ssh_connection_options
 from .tmux import run_tmux_session
+
+
+EXPERIMENT_BINDING_ASSET = "experiment-binding.json"
+EXPERIMENT_BINDING_ENV = "RR_EXPERIMENT_BINDING_PATH"
 
 
 @dataclass(frozen=True)
@@ -237,6 +242,7 @@ def _wrapper_source(
     *,
     output_root: str | None = None,
     output_path: str | None = None,
+    experiment_binding_handoff: bool = False,
 ) -> str:
     quoted_run_id = shlex.quote(run_id)
     quoted_label_json = shlex.quote(json.dumps(label, ensure_ascii=True))
@@ -252,6 +258,10 @@ def _wrapper_source(
                 f"RR_OUTPUT_PATH={shlex.quote(output_path)}",
                 f"RR_OUTPUT_DIR={shlex.quote(str(PurePosixPath(output_path).parent))}",
             )
+        )
+    if experiment_binding_handoff:
+        workload_environment.append(
+            f'{EXPERIMENT_BINDING_ENV}="${{runtime_dir}}/{EXPERIMENT_BINDING_ASSET}"'
         )
     workload_prefix = " ".join(workload_environment)
     supervisor_b64 = base64.b64encode(
@@ -323,7 +333,7 @@ printf '[REMOTE_RUNNER_START] %s\n' "$started_at"
 write_status running null null || exit 125
 cd -- "$workdir" || exit 125
 
-unset RR_OUTPUT_ROOT RR_OUTPUT_PATH RR_OUTPUT_DIR
+unset RR_OUTPUT_ROOT RR_OUTPUT_PATH RR_OUTPUT_DIR {EXPERIMENT_BINDING_ENV}
 {workload_prefix} {quoted_project_python} -c 'import base64,os,sys; os.setsid(); os.execv(sys.executable, ("remote-runner:" + sys.argv[1], "-c", base64.b64decode(sys.argv[3]).decode(), sys.argv[1], sys.argv[2]))' "$run_id" "$runtime_dir" {supervisor_b64!r} \
   < "${{runtime_dir}}/command.sh" &
 workload_pid=$!
@@ -349,6 +359,7 @@ from pathlib import Path, PurePosixPath
 
 RUN_ID_RE = re.compile(r"^rr-[0-9a-f]{16}$")
 ALLOWED_ASSETS = {"run.sh": 0o700, "command.sh": 0o600}
+EXPERIMENT_BINDING_ASSET = "experiment-binding.json"
 
 def exact_tmux_target(session_name):
     return "=" + session_name
@@ -365,6 +376,12 @@ def emit(ok, phase, message=None, tmux_started=False, status=None):
 def fail(message, phase="preflight"):
     emit(False, phase, message, False, None)
     raise SystemExit(1)
+
+experiment_binding_handoff = payload.get("experiment_binding_handoff", False)
+if not isinstance(experiment_binding_handoff, bool):
+    fail("invalid experiment binding handoff request", "validation")
+if experiment_binding_handoff:
+    ALLOWED_ASSETS[EXPERIMENT_BINDING_ASSET] = 0o400
 
 def read_status(path):
     try:
@@ -815,6 +832,12 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
         output_relpath=manifest.get("output_relpath"),
         output_path=manifest.get("output_path"),
     )
+    raw_experiment_binding = manifest.get("experiment_binding")
+    experiment_binding = (
+        None
+        if raw_experiment_binding is None
+        else normalize_run_binding(raw_experiment_binding)
+    )
     wrapper_bytes = _wrapper_source(
         run_id,
         str(manifest["label"]),
@@ -824,11 +847,22 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
         str(manifest.get("workload_class", "standard")),
         output_root=output_root,
         output_path=output_path,
+        experiment_binding_handoff=experiment_binding is not None,
     ).encode()
     asset_list = [
         LaunchAsset("run.sh", wrapper_bytes, sha256_bytes(wrapper_bytes), 0o700),
         LaunchAsset("command.sh", command_bytes, sha256_bytes(command_bytes), 0o600),
     ]
+    if experiment_binding is not None:
+        binding_bytes = canonical_json_bytes(experiment_binding)
+        asset_list.append(
+            LaunchAsset(
+                EXPERIMENT_BINDING_ASSET,
+                binding_bytes,
+                sha256_bytes(binding_bytes),
+                0o400,
+            )
+        )
     if privacy_mode == PROCESS_TITLE_PRIVACY_MODE:
         helper_bytes = _sitecustomize_source(run_id)
         asset_list.append(
@@ -864,6 +898,8 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
             for asset in assets
         ],
     }
+    if experiment_binding is not None:
+        payload["experiment_binding_handoff"] = True
     if privacy_mode == PROCESS_TITLE_PRIVACY_MODE:
         payload["process_title_privacy"] = {"mode": "required"}
     return LaunchPlan(

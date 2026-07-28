@@ -115,8 +115,10 @@ remote-runner experiment query \
 
 使用 `remote-runner run --experiment-binding binding.json` 可以为精确 run ID 和
 Git revision 生成并冻结 binding。新 producer 在同步输出中写入
-`experiment_result`；结果满足资格条件后仍需显式 acceptance 才会成为当前正式
-结果。契约、权威边界和后续加固项见
+`experiment_result`。带 binding 的 workload 会通过
+`RR_EXPERIMENT_BINDING_PATH` 收到 canonical finalized binding 的只读文件路径；
+没有 binding 的 workload 不会收到该变量。结果满足资格条件后仍需显式
+acceptance 才会成为当前正式结果。契约、权威边界和后续加固项见
 [实现计划](docs/plans/experiment-registry-results-dashboard.md)。
 
 ## 运行
