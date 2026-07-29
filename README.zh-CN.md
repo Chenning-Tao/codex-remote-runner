@@ -11,7 +11,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 - 由控制器持久化队列与运行状态，任务不会依赖原始客户端进程。
 - 根据已配置的容量、可用性和优先级自动选择执行服务器。
 - 在远程 detached worktree 中准备并运行精确的 Git revision。
-- 支持前台实时等待和事件驱动的 Codex 任务历史回报。
+- 支持附着式 Codex 等待，并在等待工具完成后恢复发起它的 App 回合。
 - 提供可交互的 Textual 和本地网页控制面板，并支持确认后停止任务。
 - 提供由控制器持有、包含冻结 binding 与已验证结果的实验注册表。
 - 提供明确的停止、清理、彻底删除、服务器排空和输出归档流程。
@@ -43,7 +43,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.6.4'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.7.0'
 remote-runner --help
 ```
 
@@ -158,7 +158,28 @@ remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
 
 [SKILL.md](SKILL.md) 和 [agents/openai.yaml](agents/openai.yaml) 提供 Codex skill 的元数据与运行契约。它们用于补充 CLI；Python wheel 不会安装任何用户专属的 Codex 配置。
 
-如果结果必须实时出现在 Codex App 任务中，应保持前台等待，并在结果就绪后调用一次 App 自有的 `send_message_to_thread` 工具。后台 `remote-runner wakeup` 在等待期间不启动模型回合，但其公开保证仅为 `thread_history_only`；它无法强制另一个桌面连接刷新。事件发生后，它会在一个完成回合中使用只读监控及已有日志或同步产物完成失败诊断或结果分析，再将完整回合写入任务历史。
+当前 Codex App 任务需要自动回报时，发起任务的这一轮必须让 `run --wait` 或
+`remote-runner wait --until reportable` 保持为尚未完成的工具调用。这是一条
+附着式完成链路，不是后台回调：
+
+1. CLI 首先读取精确 run 的权威聚合状态。
+2. run 尚不可回报时，CLI 使用状态 etag 在 controller 上发起有界的
+   `wait-run` 长等待。状态一旦变化，controller 会立即返回；状态未变化时的
+   超时只会让 CLI 在内部续接传输，不会结束工具调用、启动模型回合，也不会
+   增加一套对计算服务器的探测循环。
+3. 达到所选条件后，CLI 只向 stdout 写入一份最终权威 JSON，然后退出。
+   状态变化和未变化的长等待超时只属于 stderr 状态信息。
+4. 正常的工具完成事件随后恢复发起等待的 Codex 回合。Codex 此时才能检查
+   已有日志或同步产物并生成最终回复。是否显示未读标记或系统通知，由 Codex
+   App 根据任务焦点和通知设置自行决定；Remote Runner 不写入 App 状态，也不
+   保证一定出现这两种界面提示。
+
+没有显式传入 `--max-wait` 或 `--connection-grace` 时，本地等待既没有总时限，
+也没有 controller 连续失联时限。这两个选项只是显式退出机制：它们只结束
+本地等待，不会停止持久化的远程 run。如果发起等待的 App 回合或工具会话结束，
+远程 run 仍会继续，但系统不会自动生成 detached 回报；之后必须使用同一个
+精确 run ID 重新附着。Remote Runner 不再提供 detached Codex callback、独立
+App Server 回报、模型 heartbeat 或定时模型/工具轮询路径。
 
 ## 安全与支持
 

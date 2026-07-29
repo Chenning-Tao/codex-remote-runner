@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from pathlib import Path
 
+import pytest
 from starlette.testclient import TestClient
 
 from remote_runner._internal.queue_control import QueuePreparationError
@@ -409,7 +411,7 @@ def test_web_stop_refreshes_stale_snapshot_when_run_no_longer_exists(
     assert probe.document()["snapshot"] == {"servers": [], "queue": []}
 
 
-def test_web_queue_update_requires_revision_and_refreshes_snapshot(
+def test_web_queue_update_requires_revision_and_refreshes_snapshot_in_background(
     tmp_path: Path,
 ) -> None:
     snapshots = iter(
@@ -502,6 +504,88 @@ def test_web_queue_update_requires_revision_and_refreshes_snapshot(
         )
     ]
     assert probe.document()["snapshot"]["queue"][0]["job"]["queue_priority"] == "urgent"
+
+
+def test_web_queue_update_sends_response_before_background_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: {"servers": [], "queue": []},
+    )
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def slow_refresh() -> None:
+        refresh_started.set()
+        await release_refresh.wait()
+
+    monkeypatch.setattr(probe, "probe_once", slow_refresh)
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        queue_update_query=lambda *_args: {"changed": True},
+    )
+    payload = json.dumps(
+        {
+            "run_id": "rr-0123456789abcdef",
+            "expected_revision": 3,
+            "move": "first",
+        }
+    ).encode()
+
+    async def exercise() -> None:
+        request_sent = False
+        response_sent = asyncio.Event()
+        messages: list[dict[str, object]] = []
+
+        async def receive() -> dict[str, object]:
+            nonlocal request_sent
+            if not request_sent:
+                request_sent = True
+                return {"type": "http.request", "body": payload, "more_body": False}
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict[str, object]) -> None:
+            messages.append(message)
+            if message["type"] == "http.response.body":
+                response_sent.set()
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "PATCH",
+            "scheme": "http",
+            "path": "/api/queue/rr-0123456789abcdef",
+            "raw_path": b"/api/queue/rr-0123456789abcdef",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"content-type", b"application/json"),
+                (b"x-remote-runner-action", b"update-queue"),
+            ],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+        request = asyncio.create_task(app(scope, receive, send))
+        await response_sent.wait()
+        await refresh_started.wait()
+
+        assert not request.done()
+        assert messages[0]["type"] == "http.response.start"
+        assert messages[0]["status"] == 200
+        assert messages[1]["type"] == "http.response.body"
+
+        release_refresh.set()
+        await request
+
+    asyncio.run(exercise())
 
 
 def test_web_capacity_update_requires_revision_and_refreshes_snapshot(

@@ -22,8 +22,6 @@ from ._internal import (
     submission,
     task_purge,
     waiting,
-    wakeup,
-    wakeup_worker,
 )
 from ._internal.pool import DEFAULT_SERVER_REGISTRY
 from ._internal.preparation_manifest import write_preparation_manifest
@@ -100,8 +98,10 @@ def _add_wait_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--connection-grace",
         type=_positive_int,
-        default=300,
-        help="retry controller transport failures for this many seconds",
+        help=(
+            "stop after this many seconds of continuous controller transport failure; "
+            "default: retry indefinitely"
+        ),
     )
 
 
@@ -239,59 +239,6 @@ def build_parser() -> argparse.ArgumentParser:
     wait_parser.add_argument("--run-id", required=True)
     wait_parser.add_argument("--timeout", type=int, default=8)
     _add_wait_options(wait_parser)
-
-    wakeup_parser = subparsers.add_parser(
-        "wakeup",
-        help="persist a Codex history turn once a run cohort is reportable",
-    )
-    wakeup_actions = wakeup_parser.add_subparsers(
-        dest="wakeup_action",
-        required=True,
-        metavar="{register,list,install,uninstall,cancel}",
-    )
-    wakeup_register = wakeup_actions.add_parser(
-        "register",
-        help="register a durable history follow-up for one exact run cohort",
-    )
-    _add_project_config(wakeup_register)
-    wakeup_register.add_argument(
-        "--run-id",
-        dest="run_ids",
-        action="append",
-        required=True,
-        help="exact run in the cohort; repeat for multiple runs",
-    )
-    wakeup_register.add_argument(
-        "--codex-thread-id",
-        help="target Codex task; defaults to CODEX_THREAD_ID",
-    )
-    wakeup_register.add_argument(
-        "--codex-executable",
-        type=Path,
-        help="absolute Codex CLI executable; defaults to PATH discovery",
-    )
-    wakeup_register.add_argument("--timeout", type=int, default=8)
-    wakeup_actions.add_parser(
-        "list",
-        help="list pending and ready wakeup subscriptions",
-    )
-    wakeup_actions.add_parser(
-        "install",
-        help="install on-demand macOS restart recovery for pending wakeups",
-    )
-    wakeup_actions.add_parser(
-        "uninstall",
-        help="remove the macOS wakeup restart-recovery supervisor",
-    )
-    wakeup_cancel = wakeup_actions.add_parser(
-        "cancel",
-        help="cancel one pending wakeup subscription",
-    )
-    wakeup_cancel.add_argument("--wake-id", required=True)
-    wakeup_worker_parser = wakeup_actions.add_parser("worker")
-    wakeup_worker_parser.add_argument("--state-root", type=Path, required=True)
-    wakeup_worker_parser.add_argument("--once", action="store_true")
-    wakeup_worker_parser.add_argument("--supervised", action="store_true")
 
     tui_parser = subparsers.add_parser(
         "tui",
@@ -551,6 +498,8 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.subcommand == "run":
         if not args.wait and args.max_wait is not None:
             raise ValueError("--max-wait requires --wait")
+        if not args.wait and args.connection_grace is not None:
+            raise ValueError("--connection-grace requires --wait")
         result = submission.submit(args)
         if args.wait:
             print(
@@ -577,27 +526,6 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return result, waiting.wait_exit_code(result)
     if args.subcommand == "experiment":
         return experiment_client.execute(args), 0
-    if args.subcommand == "wakeup":
-        if args.wakeup_action == "register":
-            return wakeup.register(args), 0
-        if args.wakeup_action == "list":
-            return wakeup.list_registered(args), 0
-        if args.wakeup_action == "install":
-            return wakeup.install_supervisor(args), 0
-        if args.wakeup_action == "uninstall":
-            return wakeup.uninstall_supervisor(args), 0
-        if args.wakeup_action == "cancel":
-            return wakeup.cancel(args), 0
-        if args.wakeup_action == "worker":
-            return (
-                wakeup_worker.run_worker(
-                    wakeup.wakeup_paths(args.state_root),
-                    once=args.once,
-                    supervised=args.supervised,
-                ),
-                0,
-            )
-        raise AssertionError(f"unhandled wakeup action: {args.wakeup_action}")
     if args.subcommand == "stop":
         return stopping.request_stop(args), 0
     if args.subcommand == "cleanup":

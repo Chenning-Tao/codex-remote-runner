@@ -15,7 +15,7 @@ tested, but operators should review upgrades before applying them to active pool
 - Durable queued and running workloads backed by controller-owned state.
 - Automatic placement using configured capacity, availability, and priority.
 - Exact Git revision preparation in detached remote worktrees.
-- Foreground live waits and event-driven Codex history follow-ups.
+- Attached Codex waits that resume the originating App turn when the wait tool completes.
 - Interactive Textual and local browser dashboards with confirmed run stopping.
 - Controller-owned experiment registry with frozen bindings and verified results.
 - Explicit stop, cleanup, purge, server drain, and output archival workflows.
@@ -49,7 +49,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.6.4'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.7.0'
 remote-runner --help
 ```
 
@@ -193,13 +193,32 @@ operations.
 skill metadata and operating contract. They complement the CLI; the Python wheel
 does not install user-specific Codex configuration.
 
-For a result that must appear live in the Codex App, keep the wait attached and use
-the App-owned `send_message_to_thread` tool once the result is ready. Detached
-`remote-runner wakeup` uses no model turns while waiting, but its public guarantee is
-only `thread_history_only`; it cannot force a separate desktop connection to refresh.
-After an event, its single completion turn may use read-only monitoring and existing
-logs or synchronized artifacts to finish the diagnosis or result analysis before it
-is committed to history.
+For an automatic report in the current Codex App task, the originating turn must keep
+`run --wait` or `remote-runner wait --until reportable` as an unfinished tool call.
+This is an attached completion path, not a background callback:
+
+1. The CLI reads the exact run's authoritative aggregate view.
+2. While the run is not reportable, the CLI blocks in bounded controller `wait-run`
+   requests keyed by the view etag. The controller returns early when that view
+   changes. An unchanged timeout only renews the transport inside the CLI; it does not
+   complete the tool call, start a model turn, or add another compute-server probe
+   loop.
+3. At the selected condition, the CLI writes one final authoritative JSON document to
+   stdout and exits. State changes and unchanged long-poll timeouts are status-only
+   stderr output.
+4. Normal tool completion resumes the originating Codex turn. Codex can then inspect
+   existing logs or synchronized artifacts and produce the final response. The App
+   itself decides whether that response gets an unread indicator or notification from
+   its focus and notification settings; Remote Runner neither writes App state nor
+   guarantees either UI signal.
+
+With neither `--max-wait` nor `--connection-grace`, the local wait has no duration or
+continuous-controller-outage limit. Either option is an explicit escape hatch that
+ends only the local wait and leaves the durable run untouched. If the originating App
+turn or tool session ends, the run continues but there is no automatic detached
+follow-up; reattach later with the exact run ID. Remote Runner has no detached Codex
+callback, standalone App Server delivery, model heartbeat, or scheduled model/tool
+polling path.
 
 ## Security And Support
 

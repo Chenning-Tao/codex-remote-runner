@@ -5,6 +5,27 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.7.0 - 2026-07-29
+
+### Changed
+
+- Made the attached `wait --until reportable` tool session the sole Codex follow-up
+  path: command completion resumes the same App turn for native reporting, while
+  controller waiting remains outside the model.
+- Retried controller transport failures indefinitely by default during an attached
+  wait; `--connection-grace` now opts into a bounded outage window.
+
+### Fixed
+
+- Returned successful Web queue-update responses before refreshing the dashboard
+  snapshot, so a slow controller refresh no longer holds the mutation response open.
+
+### Removed
+
+- Removed the detached `wakeup` command, standalone App Server delivery worker, and
+  macOS LaunchAgent supervisor because history-only delivery cannot update the Codex
+  App's unread or completion state.
+
 ## 0.6.4 - 2026-07-29
 
 ### Added

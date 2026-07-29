@@ -34,7 +34,6 @@ def test_public_cli_has_exact_lifecycle_subcommands() -> None:
         "run",
         "monitor",
         "wait",
-        "wakeup",
         "stop",
         "cleanup",
         "purge-run",
@@ -49,6 +48,7 @@ def test_public_cli_has_exact_lifecycle_subcommands() -> None:
         "web",
     ):
         assert subcommand in top_level
+    assert "wakeup" not in top_level
 
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert project["project"]["scripts"] == {"remote-runner": "remote_runner.cli:main"}
@@ -83,15 +83,10 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
     assert "--until" in wait_help
     assert "reportable" in wait_help
     assert "--max-wait" in wait_help
-    wakeup_register_help = help_text("wakeup", "register")
-    assert "--run-id" in wakeup_register_help
-    assert "--codex-thread-id" in wakeup_register_help
-    assert "--codex-executable" in wakeup_register_help
-    assert "--wake-id" in help_text("wakeup", "cancel")
-    wakeup_help = help_text("wakeup")
-    assert "install" in wakeup_help
-    assert "uninstall" in wakeup_help
-    assert "worker" not in wakeup_help
+    assert "--connection-grace" in wait_help
+    parsed_wait = cli.build_parser().parse_args(["wait", "--run-id", "rr-test"])
+    assert parsed_wait.max_wait is None
+    assert parsed_wait.connection_grace is None
     assert "--run-id" in help_text("stop")
     assert "--apply" in help_text("cleanup")
     run_purge_help = help_text("purge-run")
@@ -178,7 +173,6 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
         "remote-runner run",
         "remote-runner monitor",
         "remote-runner wait",
-        "remote-runner wakeup",
         "remote-runner stop",
         "remote-runner cleanup",
         "remote-runner purge-run",
@@ -193,12 +187,29 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
         "Run and follow durable remote workloads"
         == metadata["interface"]["short_description"]
     )
-    assert (
-        "foreground wait for a live Codex App report"
-        in metadata["interface"]["default_prompt"]
-    )
-    assert "output synchronization completes" in metadata["interface"]["default_prompt"]
-    assert "history-only follow-up" in metadata["interface"]["default_prompt"]
+    prompt = metadata["interface"]["default_prompt"]
+    assert "keep the originating tool call attached" in prompt
+    assert "--wait --until reportable" in prompt
+    assert "final wait JSON plus tool completion" in prompt
+    assert "Do not add model polling or a detached callback" in prompt
+    assert "do not promise an App unread indicator" in prompt
+
+
+def test_codex_docs_define_the_attached_completion_boundary() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+    lifecycle = (ROOT / "references" / "lifecycle.md").read_text(encoding="utf-8")
+
+    assert "event-driven Codex history follow-ups" not in readme
+    assert "事件驱动的 Codex 任务历史回报" not in readme_zh
+    assert "Treat only process exit plus the final authoritative stdout JSON" in skill
+    assert "never promise a blue dot" in skill
+    assert "never write App state" in skill
+    assert "An unchanged timeout only renews the CLI-to-controller transport" in lifecycle
+    assert "Remote Runner does not own or guarantee those UI signals" in lifecycle
+    for document in (readme, readme_zh, skill, lifecycle):
+        assert "remote-runner wakeup" not in document
 
 
 def test_user_facing_skill_and_help_hide_internal_schemas() -> None:
