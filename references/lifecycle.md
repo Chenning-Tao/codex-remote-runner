@@ -7,7 +7,7 @@ stopping work, or cleaning records.
 
 - [State Interpretation](#state-interpretation)
 - [Waiting For Terminal State](#waiting-for-terminal-state)
-- [Event-Driven Codex Wakeup](#event-driven-codex-wakeup)
+- [Attached Codex Reporting](#attached-codex-reporting)
 - [Structured Workload Progress](#structured-workload-progress)
 - [Transport Diagnostics](#transport-diagnostics)
 - [Stop](#stop)
@@ -78,7 +78,7 @@ An active execution whose launch outcome remains unknown is also
 `attention_required`. Monitoring records the same condition when SSH is reachable and
 a stored running execution has neither its exact process group nor tmux session. This
 does not invent a terminal outcome: it exposes the verified authority/runtime
-conflict so a wait or wakeup cannot remain pending forever. Unreachable or incomplete
+conflict so an attached wait cannot remain pending forever. Unreachable or incomplete
 observations remain non-authoritative and do not trigger this condition.
 
 With the default `--until execution-terminal`, observing any authoritative terminal
@@ -90,105 +90,51 @@ Runs with no sync intent, plus failed and stopped runs, return at execution term
 Cancelled or unknown sync for a succeeded run returns `attention_required`.
 
 A wait deadline exits nonzero and leaves the durable run untouched. The final JSON
-reports `wait_status`, transport retry counts, and the aggregate `run_view`; status
-messages and heartbeats go to stderr. `run --wait` performs submission and the same
-wait in one command, printing the submitted run ID to stderr before waiting so an
-interruption can always resume that exact run instead of resubmitting it.
+reports `wait_status`, transport retry counts, and the aggregate `run_view`. State
+changes and unchanged long-poll timeouts are status-only stderr output; they are not
+completion signals. `run --wait` performs submission and the same wait in one command,
+printing the submitted run ID to stderr before waiting so an interruption can always
+resume that exact run instead of resubmitting it.
 
 Execution completion does not imply synchronized output availability. The final run
 view includes current output-sync status; select `--until reportable` whenever the
 consumer needs synchronized output before reporting or analysis. Progress remains a
 latest observation rather than a replayable controller event stream.
 
-## Event-Driven Codex Wakeup
+## Attached Codex Reporting
 
-Use a detached wakeup only when a durable run should outlive the current Codex task
-and committing a follow-up to task history is sufficient. Register the exact run IDs
-together so the cohort produces one follow-up turn:
+Keep `remote-runner run --wait` or `remote-runner wait` as an unfinished tool call in
+the originating Codex App turn. The CLI does not call Codex when the run finishes. It
+first reads the exact aggregate run view, then holds bounded controller `wait-run`
+requests keyed by that view's etag. The controller returns early when the view changes.
+An unchanged timeout only renews the CLI-to-controller transport; it does not complete
+the tool call, invoke the model, or add another compute-server probe loop.
 
-```bash
-remote-runner wakeup register \
-  --project-config /absolute/path/to/.remote-runner.yaml \
-  --run-id rr-0123456789abcdef \
-  --run-id rr-fedcba9876543210
-```
+Only process exit plus the final authoritative stdout JSON is the completion signal.
+The App's normal tool-completion event then resumes the originating Codex turn. Codex
+can inspect existing logs or synchronized artifacts and produce the final response.
+That response is eligible for the App's ordinary unread and notification behavior.
+Remote Runner does not own or guarantee those UI signals. The App decides them from
+its own focus and notification state.
 
-Registration binds to `CODEX_THREAD_ID` by default, resolves and stores the absolute
-Codex executable, verifies the controller's cohort-wait protocol, and verifies the
-target task through a read-only App Server request. Multi-agent sub-agent tasks resolve
-to their root parent task because App Server does not accept direct input for
-sub-agents. Registration then persists the subscription under the private Codex home
-and starts an on-demand local worker. Run registration as the
-last command before ending the Codex task. Use an explicit `--codex-thread-id` only
-when the caller already owns that exact task.
+Waiting therefore needs no model heartbeat. Do not react to stderr status by issuing
+`monitor` calls, and do not add a shell callback, standalone App Server, private App
+IPC, desktop database or cache write, deep link, or scheduled model/tool poll to bridge
+completion back into Codex.
 
-The local worker waits through one controller connection per cohort batch. Waiting,
-transport retries, sleep, and resume use no model turn. Any `attention_required`,
-`missing`, or `purged` member makes the cohort ready immediately; otherwise every
-member must be terminal. A succeeded member whose output sync is `pending`,
-`retryable`, or `waiting_for_succeeded_state` is not ready until sync becomes
-`completed`. A failed or stopped member does not wait for output sync. Cancelled or
-unknown sync on a succeeded member wakes as an attention condition. A terminal subset
-does not cause a busy loop while other members remain active.
+With neither `--max-wait` nor `--connection-grace`, the attached wait has no total
+duration limit and retries controller transport failures indefinitely with bounded
+backoff. These options are explicit local escape hatches: they end only the wait and
+never stop or alter the durable remote run. `Ctrl-C`, App termination, sleep, or a lost
+tool session likewise leaves the run intact; reattach using the same exact run ID.
 
-Delivery retries persist their next-attempt time and yield back to cohort monitoring.
-One unreachable or incompatible target therefore cannot starve unrelated subscriptions.
-
-Before contacting Codex, the worker atomically persists a minimal ready payload with
-only run ID, phase, outcome, terminal source, attention reason, etag, and output-sync
-status. It resumes the original task through `codex app-server --stdio`, uses the
-deterministic wake ID as `turn/start.clientUserMessageId`, and keeps App Server alive
-until `turn/completed`. After an ambiguous start response, it inspects task history
-for that client ID before another start is permitted. This is an effectively-once
-history commit: an already recorded matching turn is never intentionally duplicated.
-
-The wake turn completes the user-facing investigation rather than merely announcing
-status. Its trusted prompt includes the absolute project config and exact run IDs. It
-permits read-only `remote-runner monitor` queries and inspection of existing logs or
-synchronized artifacts: failed runs receive a concrete diagnosis, succeeded runs
-receive result analysis, and attention conditions receive an evidence-based next
-step. Remote content is treated as untrusted data. The turn must not resubmit, stop,
-clean, purge, edit, or otherwise mutate state without an explicit user request.
-
-The worker waits for the full diagnostic or analysis turn to complete before
-archiving it as `history_committed`, with delivery guarantee `thread_history_only`.
-Waiting consumes no model turn; the completion investigation can use model tokens and
-read-only tool calls after the event. Once no subscriptions remain, the pending
-marker is removed and the worker exits. There is no heartbeat or scheduled model
-polling fallback.
-
-A standalone App Server transport does not own the desktop App connection. Its
-`turn/completed` event proves history persistence, not live rendering, unread state,
-or an OS notification in the Codex App. Live delivery requires the App-owned
-`send_message_to_thread` tool from an active App turn. Keep a foreground wait attached
-when live display is required, then report in that task or call the tool once for
-another task. The controller wait is outside the model, but the App host may resume a
-long-running tool turn, so only the detached worker has a strict zero-wait-token
-guarantee. Do not use private App IPC, desktop database/cache writes, deep links, or
-recurring model polling as a bridge.
-
-The detached worker survives normal task completion, sleep, and transient network
-failure. Pending files survive process or machine failure. On macOS, explicit
-one-time installation provides automatic login/reboot recovery while still running
-no idle process:
-
-```bash
-remote-runner wakeup install
-```
-
-This writes and loads a user LaunchAgent whose `KeepAlive.PathState` is the pending
-marker. Its environment contains the resolved executable directories needed by the
-installed Python, remote-runner, Codex, and Node commands, rather than relying on
-launchd's minimal default `PATH`. It starts only while work exists. Because installation changes user launch
-configuration, do not perform it during an ordinary run. Inspect current state with
-`remote-runner wakeup list`, cancel one pending subscription with
-`remote-runner wakeup cancel --wake-id ID`, and remove the supervisor explicitly with
-`remote-runner wakeup uninstall`.
-
-If thread identity, Codex discovery, App Server preflight, or worker startup is
-unavailable, registration fails explicitly. Keep `remote-runner run --wait` or
-`remote-runner wait` attached; never replace a failed wakeup with a heartbeat or ask
-the user to poll manually.
+Use `--until reportable` for App-facing reports. A succeeded output-backed run remains
+attached until checksum-verified output synchronization is `completed`; failed and
+stopped runs return at terminal authority; missing, purged, and inconsistent authority
+return explicit attention states. For a cohort, submit all runs concurrently and then
+wait for every exact run ID before producing one combined report. If the originating
+App turn or tool session ends, state clearly that the run remains durable but no
+automatic App follow-up will occur; reattach with the exact run ID.
 
 ## Structured Workload Progress
 

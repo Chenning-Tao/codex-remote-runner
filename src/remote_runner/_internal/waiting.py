@@ -100,9 +100,11 @@ def wait_for_run(
         raise ValueError("--until must be execution-terminal or reportable")
     run_id = validate_current_run_id(args.run_id)
     timeout = _validate_positive(args.timeout, "--timeout")
-    connection_grace = _validate_positive(
-        getattr(args, "connection_grace", 300),
-        "--connection-grace",
+    connection_grace_value = getattr(args, "connection_grace", None)
+    connection_grace = (
+        None
+        if connection_grace_value is None
+        else _validate_positive(connection_grace_value, "--connection-grace")
     )
     max_wait_value = getattr(args, "max_wait", None)
     max_wait = (
@@ -171,7 +173,10 @@ def wait_for_run(
             failed_at = time.monotonic()
             if first_transport_error_at is None:
                 first_transport_error_at = failed_at
-            if failed_at - first_transport_error_at >= connection_grace:
+            if (
+                connection_grace is not None
+                and failed_at - first_transport_error_at >= connection_grace
+            ):
                 raise RuntimeError(
                     "controller remained unavailable beyond --connection-grace; "
                     f"last error: {exc}"

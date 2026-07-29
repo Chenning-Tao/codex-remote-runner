@@ -1,4 +1,4 @@
 interface:
   display_name: "Remote Runner"
   short_description: "Run and follow durable remote workloads"
-  default_prompt: "Use $remote-runner to submit my clean committed HEAD, keep a foreground wait for a live Codex App report, and report only after authoritative failure or attention, or after succeeded output synchronization completes. Use detached wakeup only when a history-only follow-up is acceptable."
+  default_prompt: "Use $remote-runner to submit my clean committed HEAD, keep the originating tool call attached with --wait --until reportable, and treat only the final wait JSON plus tool completion as the follow-up signal. Then inspect the authoritative outcome and report in that same Codex App turn. Do not add model polling or a detached callback, and do not promise an App unread indicator."

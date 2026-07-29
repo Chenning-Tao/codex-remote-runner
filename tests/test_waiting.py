@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pytest
@@ -62,7 +63,7 @@ def args(config_path: Path, **changes: object) -> argparse.Namespace:
         "timeout": 8,
         "until": "execution-terminal",
         "max_wait": None,
-        "connection_grace": 300,
+        "connection_grace": None,
     }
     values.update(changes)
     return argparse.Namespace(**values)
@@ -304,6 +305,61 @@ def test_wait_retries_a_transient_controller_failure(
     assert "retrying in 1s" in reports[0]
 
 
+def test_wait_retries_controller_failures_indefinitely_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    attempts = 0
+
+    def call(_config, _action: str, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("first disconnect")
+        if attempts == 2:
+            now[0] = 301.0
+            raise RuntimeError("still disconnected")
+        return {"run_view": view("terminal", outcome="succeeded")}
+
+    monkeypatch.setattr(waiting.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(waiting.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(waiting, "call_controller", call)
+
+    result = waiting.wait_for_run(args(config(tmp_path)), reporter=lambda _line: None)
+
+    assert result["wait_status"] == "completed"
+    assert result["transport_retries"] == 2
+    assert attempts == 3
+
+
+def test_explicit_connection_grace_ends_an_unreachable_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    attempts = 0
+
+    def call(_config, _action: str, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            now[0] = 301.0
+        raise RuntimeError("controller unavailable")
+
+    monkeypatch.setattr(waiting.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(waiting.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(waiting, "call_controller", call)
+
+    with pytest.raises(RuntimeError, match="beyond --connection-grace"):
+        waiting.wait_for_run(
+            args(config(tmp_path), connection_grace=300),
+            reporter=lambda _line: None,
+        )
+
+    assert attempts == 2
+
+
 def test_wait_deadline_returns_last_view_without_stopping_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -367,7 +423,7 @@ def test_run_wait_combines_submission_and_wait_results(
             subcommand="run",
             wait=True,
             max_wait=None,
-            connection_grace=300,
+            connection_grace=None,
             until="execution-terminal",
             project_config=Path("/tmp/project.yaml"),
             timeout=8,
@@ -378,6 +434,36 @@ def test_run_wait_combines_submission_and_wait_results(
     assert result["wait"] == completed
     assert returncode == 0
     assert f"submitted run_id={RUN_ID}; waiting" in capsys.readouterr().err
+
+
+def test_wait_cli_writes_one_final_json_result_to_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    completed = {
+        "wait_status": "completed",
+        "run_view": view(
+            "terminal",
+            outcome="succeeded",
+            output_sync_status="completed",
+        ),
+    }
+    monkeypatch.setattr(cli.waiting, "wait_for_run", lambda _args: completed)
+
+    returncode = cli.main(
+        [
+            "wait",
+            "--run-id",
+            RUN_ID,
+            "--until",
+            "reportable",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert returncode == 0
+    assert json.loads(captured.out) == completed
+    assert captured.err == ""
 
 
 def test_run_rejects_max_wait_before_submission(
@@ -391,3 +477,23 @@ def test_run_rejects_max_wait_before_submission(
 
     with pytest.raises(ValueError, match="--max-wait requires --wait"):
         cli._execute(argparse.Namespace(subcommand="run", wait=False, max_wait=60))
+
+
+def test_run_rejects_connection_grace_before_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli.submission,
+        "submit",
+        lambda _args: pytest.fail("invalid wait options must not submit a run"),
+    )
+
+    with pytest.raises(ValueError, match="--connection-grace requires --wait"):
+        cli._execute(
+            argparse.Namespace(
+                subcommand="run",
+                wait=False,
+                max_wait=None,
+                connection_grace=60,
+            )
+        )

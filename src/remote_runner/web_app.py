@@ -13,6 +13,7 @@ import threading
 import webbrowser
 from typing import Any
 
+from starlette.background import BackgroundTask
 from starlette.applications import Starlette
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
@@ -584,10 +585,10 @@ def create_app(
                 {"error": "invalid_queue_update", "detail": detail},
                 status_code=400,
             )
-        await probe.probe_once()
         return JSONResponse(
             {"status": "updated", "run_id": run_id, "result": result},
             headers={"Cache-Control": "no-store"},
+            background=BackgroundTask(probe.probe_once),
         )
 
     async def queue_batch_update_endpoint(request: Request) -> Response:
