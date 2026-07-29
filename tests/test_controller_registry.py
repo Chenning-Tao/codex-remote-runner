@@ -266,6 +266,52 @@ def test_queued_jobs_can_be_reordered_within_their_scheduling_lane(
     ]
 
 
+def test_queued_job_can_be_moved_to_the_front_of_its_scheduling_lane(
+    tmp_path: Path,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    run_ids = [
+        RUN_ID,
+        "rr-1111111111111111",
+        "rr-2222222222222222",
+        "rr-3333333333333333",
+    ]
+    for index, run_id in enumerate(run_ids):
+        item = queued_job()
+        item["run_id"] = run_id
+        submit_job(paths, item, now=f"2026-01-01T00:00:0{index}+00:00")
+
+    result = update_queued_job(
+        paths,
+        "rr-3333333333333333",
+        expected_revision=0,
+        move="first",
+    )
+
+    assert result["changed"] is True
+    assert [job["run_id"] for job, _state in list_queued(paths)] == [
+        "rr-3333333333333333",
+        RUN_ID,
+        "rr-1111111111111111",
+        "rr-2222222222222222",
+    ]
+    assert [load_job(paths, run_id)[1]["revision"] for run_id in run_ids] == [
+        1,
+        1,
+        1,
+        1,
+    ]
+
+    unchanged = update_queued_job(
+        paths,
+        "rr-3333333333333333",
+        expected_revision=1,
+        move="first",
+    )
+
+    assert unchanged["changed"] is False
+
+
 def test_queued_job_priority_and_eligible_servers_can_be_changed(
     tmp_path: Path,
 ) -> None:

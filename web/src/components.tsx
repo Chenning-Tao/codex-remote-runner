@@ -20,6 +20,7 @@ import {
   AlertCircle,
   ArrowDown,
   ArrowUp,
+  ArrowUpToLine,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -391,7 +392,7 @@ export function QueueTable({
   entries: QueueEntry[];
   now: number;
   onSelect: (selection: Selection) => void;
-  onMove: (entry: QueueEntry, direction: "up" | "down") => void;
+  onMove: (entry: QueueEntry, direction: "first" | "up" | "down") => void;
   movement: Map<string, { up: boolean; down: boolean }>;
   mutatingRunId: string | null;
   selectedRunIds: Set<string>;
@@ -468,14 +469,23 @@ export function QueueTable({
                 <div className="rr-queue-order-actions">
                   <button
                     type="button"
+                    aria-label="将任务移到最前"
+                    title="将任务移到最前"
+                    disabled={!allowed.up || busy}
+                    onClick={() => onMove(entry, "first")}
+                  >
+                    {mutatingRunId === runId
+                      ? <LoaderCircle className="rr-spin" aria-hidden="true" />
+                      : <ArrowUpToLine aria-hidden="true" />}
+                  </button>
+                  <button
+                    type="button"
                     aria-label="上移任务"
                     title="上移任务"
                     disabled={!allowed.up || busy}
                     onClick={() => onMove(entry, "up")}
                   >
-                    {mutatingRunId === runId
-                      ? <LoaderCircle className="rr-spin" aria-hidden="true" />
-                      : <ArrowUp aria-hidden="true" />}
+                    <ArrowUp aria-hidden="true" />
                   </button>
                   <button
                     type="button"

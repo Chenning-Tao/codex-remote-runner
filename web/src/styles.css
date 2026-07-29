@@ -769,9 +769,11 @@ input {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 92px;
 }
 
 .rr-queue-order-actions button {
+  flex: 0 0 28px;
   width: 28px;
   height: 28px;
   display: inline-grid;

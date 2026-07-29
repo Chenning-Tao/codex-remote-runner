@@ -1183,8 +1183,8 @@ def update_queued_job(
         queue_priority = normalize_queue_priority(queue_priority)
     if workload_class is not None:
         workload_class = normalize_workload_class(workload_class)
-    if move not in {None, "up", "down"}:
-        raise ValueError("queued job move must be 'up' or 'down'")
+    if move not in {None, "first", "up", "down"}:
+        raise ValueError("queued job move must be 'first', 'up', or 'down'")
     if (
         queue_priority is None
         and workload_class is None
@@ -1312,8 +1312,20 @@ def update_queued_job(
                 for i, candidate in enumerate(lane)
                 if candidate["run_id"] == validated_run_id
             )
+            if move == "first" and index > 0:
+                reordered = [lane[index], *lane[:index], *lane[index + 1 :]]
+                base = min(int(candidate["queue_position"]) for candidate in lane)
+                for position, candidate in enumerate(reordered):
+                    positioned = {
+                        **candidate,
+                        "queue_position": base + position * 2,
+                    }
+                    jobs_to_write[str(positioned["run_id"])] = positioned
+                updated_job = jobs_to_write[validated_run_id]
+                changed = True
+                ordering_changed = True
             destination_index = index - 1 if move == "up" else index + 1
-            if 0 <= destination_index < len(lane):
+            if move != "first" and 0 <= destination_index < len(lane):
                 neighbor = lane[destination_index]
                 target_position = int(updated_job["queue_position"])
                 neighbor_position = int(neighbor["queue_position"])
