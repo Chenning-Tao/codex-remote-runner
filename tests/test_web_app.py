@@ -484,6 +484,7 @@ def test_web_queue_update_requires_revision_and_refreshes_snapshot(
                 "queue_priority": "urgent",
                 "workload_class": "test",
                 "eligible_servers": ["compute-b"],
+                "move": "first",
             },
         )
 
@@ -496,6 +497,7 @@ def test_web_queue_update_requires_revision_and_refreshes_snapshot(
                 "queue_priority": "urgent",
                 "workload_class": "test",
                 "eligible_servers": ["compute-b"],
+                "move": "first",
             },
         )
     ]

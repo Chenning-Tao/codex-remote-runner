@@ -5,6 +5,13 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 
 ## Unreleased
 
+## 0.6.4 - 2026-07-29
+
+### Added
+
+- Added a queue control that moves queued work directly to the front of its
+  scheduling lane while preserving controller revision conflict protection.
+
 ## 0.6.3 - 2026-07-29
 
 ### Fixed

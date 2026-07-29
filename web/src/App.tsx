@@ -294,7 +294,7 @@ function RunsDashboard() {
     });
   }
 
-  async function moveQueueEntry(entry: QueueEntry, direction: "up" | "down") {
+  async function moveQueueEntry(entry: QueueEntry, direction: "first" | "up" | "down") {
     const runId = entry.job.run_id;
     const revision = entry.state.revision;
     if (!runId || typeof revision !== "number" || mutatingRunId) return;

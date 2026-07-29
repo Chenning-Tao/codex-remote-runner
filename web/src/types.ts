@@ -85,7 +85,7 @@ export interface QueueUpdateChanges {
   queue_priority?: "urgent" | "normal";
   workload_class?: "standard" | "test";
   eligible_servers?: string[];
-  move?: "up" | "down";
+  move?: "first" | "up" | "down";
 }
 
 export interface BatchQueueUpdateItem {
