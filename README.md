@@ -93,7 +93,9 @@ contract and provisioning requirements.
 Open the dashboard for one configured project:
 
 ```bash
-remote-runner web --project-config /absolute/path/to/.remote-runner.yaml
+remote-runner web \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --source-repo /absolute/path/to/clean/worktree
 ```
 
 The command binds only to `127.0.0.1`, opens the system browser, and streams the
@@ -118,6 +120,15 @@ runner processes, frozen queue candidates, and output archival. Retirement drain
 controller-wide admission and removes project, global, local SSH, and dedicated
 archive-source credentials while preserving shared login keys, history, runtime
 directories, and outputs.
+
+`--source-repo` is optional but recommended when queue controls may prepare new
+servers. It names the clean local worktree used to push each exact queued historical
+revision. If it is omitted and configured `source.local_repo` is dirty, historical
+queue preparation may use a clean linked worktree registered to the same Git common
+directory. The backend verifies every requested commit object and reports the selected
+path and selection mode in its structured preparation result. It never stashes,
+commits, resets, or submits uncommitted files. With no trusted clean source it fails
+the preparation and preserves the prior queue settings.
 
 ## Experiment Registry
 

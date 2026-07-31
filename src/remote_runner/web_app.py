@@ -60,7 +60,11 @@ BatchUpdateKey = tuple[
     str | None,
     tuple[str, ...] | None,
 ]
-BatchUpdateResult = tuple[list[str], list[dict[str, str]]]
+BatchUpdateResult = tuple[
+    list[str],
+    list[dict[str, str]],
+    list[dict[str, Any]],
+]
 BatchUpdateOperation = Callable[[], Awaitable[BatchUpdateResult]]
 ExperimentQuery = Callable[[argparse.Namespace, dict[str, Any]], dict[str, Any]]
 ExperimentAcceptance = Callable[[argparse.Namespace, dict[str, Any]], dict[str, Any]]
@@ -741,10 +745,11 @@ def create_app(
             update_args = argparse.Namespace(**vars(probe.args))
             succeeded: list[str] = []
             failed: list[dict[str, str]] = []
+            source_preparations: list[dict[str, Any]] = []
             ordering_revision_offset = 0
             for run_id, expected_revision in normalized_updates:
                 try:
-                    await asyncio.to_thread(
+                    result = await asyncio.to_thread(
                         queue_update_query,
                         update_args,
                         run_id,
@@ -755,6 +760,13 @@ def create_app(
                             **controller_changes,
                         },
                     )
+                    raw_preparations = result.get("source_preparations")
+                    if isinstance(raw_preparations, list):
+                        source_preparations.extend(
+                            {**item, "run_id": run_id}
+                            for item in raw_preparations
+                            if isinstance(item, dict)
+                        )
                     succeeded.append(run_id)
                     if ordering_change_expected[run_id]:
                         ordering_revision_offset += 1
@@ -781,7 +793,7 @@ def create_app(
                     failed.append({"run_id": run_id, "error": code, "detail": detail})
 
             await probe.probe_once()
-            return succeeded, failed
+            return succeeded, failed, source_preparations
 
         batch_key = (
             tuple(normalized_updates),
@@ -789,10 +801,19 @@ def create_app(
             workload_class,
             tuple(eligible_servers) if isinstance(eligible_servers, list) else None,
         )
-        succeeded, failed = await in_flight_batch_updates.run(batch_key, apply_updates)
+        succeeded, failed, source_preparations = await in_flight_batch_updates.run(
+            batch_key, apply_updates
+        )
         status = "updated" if not failed else "partial" if succeeded else "failed"
+        response_payload: dict[str, Any] = {
+            "status": status,
+            "succeeded": succeeded,
+            "failed": failed,
+        }
+        if source_preparations:
+            response_payload["source_preparations"] = source_preparations
         return JSONResponse(
-            {"status": status, "succeeded": succeeded, "failed": failed},
+            response_payload,
             status_code=200 if not failed else 207,
             headers={"Cache-Control": "no-store"},
         )

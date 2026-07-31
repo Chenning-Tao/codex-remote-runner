@@ -15,6 +15,13 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
   including total, available, used, and percentage fields with Linux and macOS
   fallbacks when the remote host exposes them.
 
+### Fixed
+
+- Allowed dashboard `add-server` batches and `sync-pool` to prepare exact queued
+  historical revisions from a verified clean linked worktree when the configured
+  checkout has unrelated local changes, while preserving explicit-source priority,
+  per-revision object checks, structured source audit data, and fail-closed behavior.
+
 ## 0.7.0 - 2026-07-29
 
 ### Changed

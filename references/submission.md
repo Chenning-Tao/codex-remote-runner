@@ -125,6 +125,18 @@ Omit `--source-repo` to use `source.local_repo`. Use an absolute clean Git
 worktree path to submit another task worktree without changing project identity,
 controller, candidates, or scheduling.
 
+Historical queue extension (`add-server`, `sync-pool`, and the dashboard queue
+editor that reuses `add-server`) has one narrow fallback that ordinary submission
+does not have. When no override is supplied and configured `source.local_repo` is
+dirty, it may choose a clean worktree registered by that repository's Git common
+directory. The candidate must resolve to its own worktree root, share the exact
+common directory, be clean, and contain every requested queued commit object.
+Selection is deterministic and is reported with the source path, clean HEAD, and
+verified revisions. An explicit `--source-repo` never falls back. If no candidate
+passes every check, preparation fails closed without changing queue eligibility.
+This flow never stashes, commits, resets, copies, or submits uncommitted file
+contents.
+
 Prepare once for a cohort. Reuse still verifies clean `HEAD` plus project-config
 and server-registry digests. Explicit preparation must succeed without fallback;
 automatic preparation may continue with a non-empty verified subset and reports
@@ -166,9 +178,12 @@ must satisfy the queued minimum-core, test-pool, and relative-output constraints
 Historical jobs with an absolute output identity cannot gain another server.
 
 Pool synchronization requires the queued commit objects to remain available in
-the clean local source repository. It reports per-revision preparation failures
-without removing existing candidates; rerunning it is idempotent. Historical
-jobs with a server-specific absolute output identity remain fixed snapshots.
+the selected clean local source repository. Before reusing one source for the
+cohort, it verifies every queued historical revision needed by that synchronization.
+It reports source selection in the structured result and per-revision preparation
+failures without removing existing candidates; rerunning it is idempotent.
+Historical jobs with a server-specific absolute output identity remain fixed
+snapshots.
 
 Use repeated `--candidate-server NAME` options when the workload has a real
 server allow-list that cannot be expressed as a core requirement. The allowed

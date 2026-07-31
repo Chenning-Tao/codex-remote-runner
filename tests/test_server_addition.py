@@ -7,7 +7,11 @@ import pytest
 
 from remote_runner._internal import server_addition
 from remote_runner._internal.execution_registry import write_yaml
-from remote_runner._internal.source import PreparationResult, PreparedServer
+from remote_runner._internal.source import (
+    HistoricalSourceSelection,
+    PreparationResult,
+    PreparedServer,
+)
 
 
 RUN_ID = "rr-0123456789abcdef"
@@ -129,6 +133,17 @@ def test_add_prepares_queued_revision_and_extends_one_run(
     monkeypatch.setattr(server_addition, "prepare_revision", prepare)
 
     addition_args = args(tmp_path)
+    source_repo = (addition_args.project_config.parent / "code").resolve()
+    monkeypatch.setattr(
+        server_addition,
+        "select_historical_source_repo",
+        lambda *_args, **_kwargs: HistoricalSourceSelection(
+            source_repo=source_repo,
+            selection="configured",
+            clean_head=REVISION,
+            verified_revisions=(REVISION,),
+        ),
+    )
     addition_args.placement_token = "placement-token"
     result = server_addition.add(addition_args)
 
@@ -145,6 +160,12 @@ def test_add_prepares_queued_revision_and_extends_one_run(
     assert prepared_servers[0]["name"] == "compute-d"
     assert payload["placement_token"] == "placement-token"
     assert result["prepared_servers"] == ["compute-c", "compute-d"]
+    assert result["source"] == {
+        "selection": "configured",
+        "source_repo": str(source_repo),
+        "clean_head": REVISION,
+        "verified_revisions": [REVISION],
+    }
     assert result["outcome"] == {"action": "extended", "added_servers": 1}
 
 

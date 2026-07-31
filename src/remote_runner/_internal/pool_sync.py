@@ -7,7 +7,12 @@ from .config import load_managed_project_config
 from .controller.client import call_controller
 from .execution_registry import resolve_project_config
 from .pool import probe_project_pool
-from .source import DeploymentTarget, prepare_revision
+from .source import (
+    DeploymentTarget,
+    HistoricalSourceSelection,
+    prepare_revision,
+    select_historical_source_repo,
+)
 from .submission import (
     _prepared_manifest,
     _reachable_targets,
@@ -25,10 +30,12 @@ def _pending_jobs(value: dict[str, Any]) -> list[dict[str, Any]]:
 def sync(args: argparse.Namespace) -> dict[str, Any]:
     config_path = resolve_project_config(args.project_config)
     config = load_managed_project_config(config_path)
-    source_repo = resolve_source_repo(config.local_repo, args.source_repo)
     pending = _pending_jobs(
         call_controller(config, "pending-all", timeout=args.timeout)
     )
+    pending_revisions = tuple(str(job.get("revision")) for job in pending)
+    source: HistoricalSourceSelection | None = None
+    source_failure: str | None = None
     prepared_cache: dict[tuple[str, str], dict[str, Any]] = {}
     failed_cache: dict[tuple[str, str], str] = {}
     policy_failures: list[dict[str, str]] = []
@@ -122,9 +129,28 @@ def sync(args: argparse.Namespace) -> dict[str, Any]:
                 continue
             if key in failed_cache:
                 continue
+            if source is None and source_failure is None:
+                source_override = getattr(args, "source_repo", None)
+                try:
+                    source = select_historical_source_repo(
+                        config.local_repo,
+                        (
+                            resolve_source_repo(config.local_repo, source_override)
+                            if source_override is not None
+                            else None
+                        ),
+                        revisions=pending_revisions,
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    source_failure = str(exc)
+            if source_failure is not None:
+                failed_cache[key] = source_failure
+                continue
+            if source is None:
+                raise AssertionError("historical source selection returned no result")
             try:
                 preparation = prepare_revision(
-                    source_repo,
+                    source.source_repo,
                     project_id=config.project_id,
                     targets=[
                         DeploymentTarget(
@@ -170,5 +196,6 @@ def sync(args: argparse.Namespace) -> dict[str, Any]:
         "update_count": len(updates),
         "prepared_count": len(prepared_cache),
         "preparation_failures": failures,
+        "source": source.audit() if source is not None else None,
         "controller": controller,
     }
