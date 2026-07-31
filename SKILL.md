@@ -170,6 +170,7 @@ interpreting authority, progress, output synchronization, or transport ambiguity
 - `remote-runner stop`: stop one exact queued or running run through the controller.
 - `remote-runner sync-pool` / `add-server`: extend eligible queued work.
 - `remote-runner drain-server` / `resume-server`: control new dispatch leases.
+- `remote-runner retire-server`: assess and permanently remove one server's scheduling and dedicated connection configuration.
 - `remote-runner cleanup`: review or remove verified stopped runtime and records.
 - `remote-runner purge-run`: remove one failed attempt under an explicit provenance policy.
 - `remote-runner purge-task`: remove one explicitly discarded task and its results.

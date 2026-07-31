@@ -3,7 +3,17 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
-## Unreleased
+## 0.8.0 - 2026-07-31
+
+### Added
+
+- Added guarded server retirement in the CLI and Web dashboard, with a controller-
+  wide multi-project assessment, actual process and output-archive checks, repeated
+  post-drain validation, and explicit cleanup of project/global entries, exact SSH
+  aliases, known-host records, and exclusive archive-source credentials.
+- Added live physical-memory telemetry to server probes and the Web dashboard,
+  including total, available, used, and percentage fields with Linux and macOS
+  fallbacks when the remote host exposes them.
 
 ## 0.7.0 - 2026-07-29
 

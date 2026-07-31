@@ -443,6 +443,93 @@ def test_drain_server_counts_frozen_queue_matches_and_resume_wakes_dispatcher(
     assert started == ["example"]
 
 
+def retirement_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "server": {
+            "name": "compute-a",
+            "enabled": True,
+            "auto_select": True,
+            "testing_enabled": False,
+            "output_root_configured": True,
+            "python": "/opt/python3",
+            "configured_cores": 8,
+            "configured_memory_gb": 32,
+            "standard_slots": 1,
+            "test_slots": 0,
+            "endpoints": [{"ssh": "compute-a", "ssh_profile": "ssh"}],
+            "configuration_error": None,
+        },
+    }
+
+
+def test_server_retirement_assessment_is_ready_for_idle_unused_server(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps(retirement_payload()))
+    )
+    monkeypatch.setattr(
+        controller_service,
+        "collect_server_snapshot",
+        lambda _servers, **_kwargs: [
+            {"name": "compute-a", "state": "idle", "active_runs": []}
+        ],
+    )
+
+    result = controller_service.assess_server_retirement(
+        argparse.Namespace(
+            controller_root=tmp_path / "controller",
+            project_id="example",
+            server="compute-a",
+            timeout=8,
+            interval=60,
+        )
+    )
+
+    assert result["ready"] is True
+    assert result["blockers"] == []
+    assert result["attention"] == []
+
+
+def test_server_retirement_assessment_finds_queue_matches_across_projects(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "controller"
+    submit_job(controller_paths(root, "other-project"), job())
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps(retirement_payload()))
+    )
+    monkeypatch.setattr(
+        controller_service,
+        "collect_server_snapshot",
+        lambda _servers, **_kwargs: [
+            {"name": "compute-a", "state": "idle", "active_runs": []}
+        ],
+    )
+
+    result = controller_service.assess_server_retirement(
+        argparse.Namespace(
+            controller_root=root,
+            project_id="example",
+            server="compute-a",
+            timeout=8,
+            interval=60,
+        )
+    )
+
+    assert result["ready"] is False
+    assert result["projects"][0]["project_id"] == "other-project"
+    assert result["projects"][0]["queued_runs"][0]["run_id"] == (
+        "rr-0123456789abcdef"
+    )
+    assert any(
+        blocker["code"] == "queued_candidate" for blocker in result["blockers"]
+    )
+
+
 def test_status_returns_terminal_queue_record_for_explicit_run(tmp_path: Path) -> None:
     paths = controller_paths(tmp_path / "controller", "example")
     submit_job(paths, job())

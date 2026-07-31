@@ -210,6 +210,24 @@ after the drain is committed. Use normal monitoring and stopping rules for exist
 executions. `resume-server --server NAME` removes the persistent drain and wakes the
 invoking project's dispatcher when matching work is queued.
 
+Use `retire-server --server NAME` for permanent removal from scheduling and managed
+connection configuration. It is an authoritative assessment and dry run unless
+`--apply` is present. The controller checks all projects under its root, the target's
+actual runner processes, frozen queue candidates, and output-sync state. Apply first
+commits the controller-wide drain, repeats the assessment, revokes dedicated source
+authorization when reachable, and removes project, global, local SSH, archive source,
+exclusive key-pair, and known-host entries from the previewed cleanup inventory.
+
+The command does not stop active work or delete remote runtime/output data; those
+conditions block retirement. Failed and stopped output paths are attention items so
+the operator can decide whether destroying the instance would discard anything still
+useful. An unreachable server is never treated as proof of safety. Use
+`--allow-unreachable` only after the instance is already offline; all other blockers
+remain authoritative. If a configuration file changes concurrently or a later phase
+fails, the drain and completed revocations remain in place and the command reports
+the exact partial state instead of overwriting newer configuration or claiming full
+completion.
+
 Controller-owned purge and synchronized-output pruning use maintenance leases. These
 remain available while a server is drained, share the same server-wide exclusion as
 dispatch leases, and never make the server eligible for new workload placement.

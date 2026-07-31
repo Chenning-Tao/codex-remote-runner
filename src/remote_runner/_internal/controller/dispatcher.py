@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 import time
@@ -51,6 +52,103 @@ from pathlib import Path
 def exact_tmux_target(session_name):
     return "=" + session_name
 
+
+def memory_snapshot():
+    total = None
+    available = None
+    try:
+        values = {}
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            key, raw = line.split(":", 1)
+            parts = raw.strip().split()
+            if not parts:
+                continue
+            multiplier = 1024 if len(parts) > 1 and parts[1] == "kB" else 1
+            values[key] = int(parts[0]) * multiplier
+        total = values.get("MemTotal")
+        available = values.get("MemAvailable")
+        if available is None and total is not None:
+            available = sum(
+                values.get(key, 0)
+                for key in ("MemFree", "Buffers", "Cached")
+            )
+    except (OSError, ValueError):
+        pass
+
+    if total is None:
+        try:
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            total_pages = int(os.sysconf("SC_PHYS_PAGES"))
+            available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+            if page_size > 0 and total_pages > 0:
+                total = page_size * total_pages
+                if available_pages >= 0:
+                    available = page_size * available_pages
+        except (OSError, ValueError, TypeError):
+            pass
+
+    if total is None:
+        try:
+            sysctl = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                text=True,
+                timeout=2,
+            )
+            if sysctl.returncode == 0:
+                total = int(sysctl.stdout.strip())
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+
+        if total is not None and total > 0:
+            try:
+                vm_stat = subprocess.run(
+                    ["vm_stat"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    text=True,
+                    timeout=2,
+                )
+                if vm_stat.returncode == 0:
+                    header = vm_stat.stdout.splitlines()[0]
+                    page_size = int(header.split("page size of", 1)[1].split()[0])
+                    pages = {}
+                    for line in vm_stat.stdout.splitlines()[1:]:
+                        key, raw = line.split(":", 1)
+                        pages[key] = int(raw.strip().rstrip("."))
+                    available = page_size * sum(
+                        pages.get(key, 0)
+                        for key in ("Pages free", "Pages speculative", "Pages purgeable")
+                    )
+            except (IndexError, OSError, ValueError, subprocess.SubprocessError):
+                pass
+
+    if total is None or total <= 0:
+        return {
+            "memory_total_bytes": None,
+            "memory_available_bytes": None,
+            "memory_used_bytes": None,
+            "memory_used_percent": None,
+        }
+
+    if available is not None:
+        available = max(0, min(total, available))
+        used = total - available
+        used_percent = (used / total) * 100.0
+    else:
+        used = None
+        used_percent = None
+    return {
+        "memory_total_bytes": total,
+        "memory_available_bytes": available,
+        "memory_used_bytes": used,
+        "memory_used_percent": used_percent,
+    }
+
+
 active = []
 root = Path.home() / ".rr"
 if root.is_dir():
@@ -99,6 +197,7 @@ print(json.dumps({
     "load5": load5,
     "load15": load15,
     "remote_cores": os.cpu_count(),
+    **memory_snapshot(),
 }))
 """
 MAX_CAPACITY_PROBE_WORKERS = 8
@@ -135,6 +234,14 @@ class CapacitySnapshot:
     drained_servers: frozenset[str]
 
 
+def _optional_non_negative_int(value: object, field: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer or null")
+    return value
+
+
 def probe_server_state(ssh: str, python: str, timeout: int) -> dict[str, Any]:
     argv = [
         "ssh",
@@ -165,8 +272,39 @@ def probe_server_state(ssh: str, python: str, timeout: int) -> dict[str, Any]:
         load5 = float(value["load5"])
         load15 = float(value["load15"])
         remote_cores = value.get("remote_cores")
-    except (KeyError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise RuntimeError("active-run probe returned invalid JSON") from exc
+    try:
+        memory_total_bytes = _optional_non_negative_int(
+            value.get("memory_total_bytes"), "memory_total_bytes"
+        )
+        memory_available_bytes = _optional_non_negative_int(
+            value.get("memory_available_bytes"), "memory_available_bytes"
+        )
+        memory_used_bytes = _optional_non_negative_int(
+            value.get("memory_used_bytes"), "memory_used_bytes"
+        )
+        memory_used_percent = value.get("memory_used_percent")
+        if memory_used_percent is not None:
+            if (
+                isinstance(memory_used_percent, bool)
+                or not isinstance(memory_used_percent, (int, float))
+                or not math.isfinite(float(memory_used_percent))
+                or not 0 <= float(memory_used_percent) <= 100
+            ):
+                raise ValueError("memory_used_percent must be between 0 and 100")
+            memory_used_percent = float(memory_used_percent)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"active-run probe returned invalid memory data: {exc}") from exc
+    for name, item in (
+        ("memory_total_bytes", memory_total_bytes),
+        ("memory_available_bytes", memory_available_bytes),
+        ("memory_used_bytes", memory_used_bytes),
+    ):
+        if item is not None and memory_total_bytes is not None and item > memory_total_bytes:
+            raise RuntimeError(
+                f"active-run probe returned invalid memory data: {name} exceeds total"
+            )
     if not isinstance(active_runs, list) or not all(
         isinstance(item, dict)
         and isinstance(item.get("run_id"), str)
@@ -192,6 +330,10 @@ def probe_server_state(ssh: str, python: str, timeout: int) -> dict[str, Any]:
         "load5": load5,
         "load15": load15,
         "remote_cores": remote_cores,
+        "memory_total_bytes": memory_total_bytes,
+        "memory_available_bytes": memory_available_bytes,
+        "memory_used_bytes": memory_used_bytes,
+        "memory_used_percent": memory_used_percent,
         "active_runs": normalized,
         "active_run_ids": tuple(item["run_id"] for item in normalized),
     }

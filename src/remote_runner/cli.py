@@ -18,6 +18,7 @@ from ._internal import (
     run_purge,
     server_addition,
     server_draining,
+    server_retirement,
     stopping,
     submission,
     task_purge,
@@ -487,6 +488,41 @@ def build_parser() -> argparse.ArgumentParser:
         _add_project_config(server_state_parser)
         server_state_parser.add_argument("--server", required=True)
         server_state_parser.add_argument("--timeout", type=int, default=8)
+    retire_server_parser = subparsers.add_parser(
+        "retire-server",
+        help="assess and remove one server's scheduling and connection configuration",
+    )
+    _add_project_config(retire_server_parser)
+    retire_server_parser.add_argument(
+        "--server-registry",
+        type=Path,
+        default=DEFAULT_SERVER_REGISTRY,
+    )
+    retire_server_parser.add_argument("--server", required=True)
+    retire_server_parser.add_argument(
+        "--ssh-config",
+        type=Path,
+        default=server_retirement.DEFAULT_SSH_CONFIG,
+    )
+    retire_server_parser.add_argument(
+        "--known-hosts",
+        type=Path,
+        default=server_retirement.DEFAULT_KNOWN_HOSTS,
+    )
+    retire_server_parser.add_argument(
+        "--allow-unreachable",
+        action="store_true",
+        help=(
+            "allow cleanup of an already offline server; dedicated archive keys "
+            "are deleted even when source authorization cannot be revoked"
+        ),
+    )
+    retire_server_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="drain and remove the server configuration; omission is a dry run",
+    )
+    retire_server_parser.add_argument("--timeout", type=int, default=8)
     return parser
 
 
@@ -560,6 +596,8 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return server_draining.update(args, drained=True), 0
     if args.subcommand == "resume-server":
         return server_draining.update(args, drained=False), 0
+    if args.subcommand == "retire-server":
+        return server_retirement.retire(args), 0
     raise AssertionError(f"unhandled subcommand: {args.subcommand}")
 
 

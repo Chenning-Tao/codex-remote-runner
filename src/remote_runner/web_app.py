@@ -35,6 +35,11 @@ from ._internal.experiment_client import request_query as request_experiment_que
 from ._internal.experiment_contracts import MAX_CONTRACT_BYTES
 from ._internal.queue_control import QueuePreparationError, request_queue_update
 from ._internal.server_draining import request_server_drain_update
+from ._internal.server_retirement import (
+    RetirementBlockedError,
+    request_server_retirement,
+    request_server_retirement_preview,
+)
 from ._internal.stopping import request_stop
 
 
@@ -48,6 +53,7 @@ CapacityUpdateQuery = Callable[
     [argparse.Namespace, str, dict[str, Any]], dict[str, Any]
 ]
 ServerDrainQuery = Callable[[argparse.Namespace, str, bool], dict[str, Any]]
+ServerRetirementQuery = Callable[[argparse.Namespace, str], dict[str, Any]]
 BatchUpdateKey = tuple[
     tuple[tuple[str, int], ...],
     str | None,
@@ -270,6 +276,10 @@ def create_app(
     queue_update_query: QueueUpdateQuery = request_queue_update,
     capacity_update_query: CapacityUpdateQuery = request_capacity_update,
     server_drain_query: ServerDrainQuery = request_server_drain_update,
+    server_retirement_query: ServerRetirementQuery = request_server_retirement,
+    server_retirement_preview: ServerRetirementQuery = (
+        request_server_retirement_preview
+    ),
     experiment_query: ExperimentQuery = request_experiment_query,
     experiment_acceptance: ExperimentAcceptance = request_experiment_acceptance,
 ) -> Starlette:
@@ -949,6 +959,111 @@ def create_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    async def server_retirement_endpoint(request: Request) -> Response:
+        if request.headers.get("x-remote-runner-action") != "retire-server":
+            return JSONResponse(
+                {"error": "missing retire-server action header"}, status_code=403
+            )
+        content_type = (
+            request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        )
+        if content_type != "application/json":
+            return JSONResponse(
+                {"error": "server retirement request must use application/json"},
+                status_code=415,
+            )
+        server = request.path_params["server"]
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"server", "confirm"}
+            or payload.get("server") != server
+            or payload.get("confirm") is not True
+        ):
+            return JSONResponse(
+                {"error": "server retirement confirmation is invalid"},
+                status_code=400,
+            )
+        snapshot = probe.document().get("snapshot")
+        known_servers = (
+            {
+                item.get("name")
+                for item in snapshot.get("servers", [])
+                if isinstance(snapshot, dict) and isinstance(item, dict)
+            }
+            if isinstance(snapshot, dict)
+            else set()
+        )
+        if server not in known_servers:
+            return JSONResponse({"error": "server_not_found"}, status_code=404)
+        update_args = argparse.Namespace(**vars(probe.args))
+        try:
+            result = await asyncio.to_thread(
+                server_retirement_query,
+                update_args,
+                server,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            detail = _concise_controller_error(exc)
+            if "not configured for this project" in detail:
+                await probe.probe_once()
+                return JSONResponse(
+                    {"error": "server_not_found"},
+                    status_code=404,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if isinstance(exc, RetirementBlockedError) or detail.startswith(
+                "cannot retire"
+            ):
+                return JSONResponse(
+                    {"error": "server_retirement_blocked", "detail": detail},
+                    status_code=409,
+                    headers={"Cache-Control": "no-store"},
+                )
+            return JSONResponse(
+                {"error": "server_retirement_failed", "detail": detail},
+                status_code=400,
+                headers={"Cache-Control": "no-store"},
+            )
+        await probe.probe_once()
+        return JSONResponse(
+            {"status": "retired", "server": server, "result": result},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def server_retirement_preview_endpoint(request: Request) -> Response:
+        server = request.path_params["server"]
+        snapshot = probe.document().get("snapshot")
+        known_servers = (
+            {
+                item.get("name")
+                for item in snapshot.get("servers", [])
+                if isinstance(snapshot, dict) and isinstance(item, dict)
+            }
+            if isinstance(snapshot, dict)
+            else set()
+        )
+        if server not in known_servers:
+            return JSONResponse({"error": "server_not_found"}, status_code=404)
+        preview_args = argparse.Namespace(**vars(probe.args))
+        try:
+            result = await asyncio.to_thread(
+                server_retirement_preview,
+                preview_args,
+                server,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            detail = _concise_controller_error(exc)
+            return JSONResponse(
+                {"error": "server_retirement_assessment_failed", "detail": detail},
+                status_code=400,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
     async def events_endpoint(request: Request) -> Response:
         async def stream() -> AsyncIterator[str]:
             sequence = -1
@@ -999,6 +1114,16 @@ def create_app(
                 "/api/servers/{server:str}/capacity",
                 capacity_update_endpoint,
                 methods=["PATCH"],
+            ),
+            Route(
+                "/api/servers/{server:str}/retire",
+                server_retirement_endpoint,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/servers/{server:str}/retirement",
+                server_retirement_preview_endpoint,
+                methods=["GET"],
             ),
             Route(
                 "/api/servers/{server:str}/{operation:str}",

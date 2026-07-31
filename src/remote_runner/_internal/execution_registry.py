@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import sys
 import tempfile
 import uuid
@@ -212,6 +213,31 @@ def write_yaml(path: Path, data: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp, path)
         _fsync_directory(path.parent)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+
+
+def replace_config_yaml(path: Path, data: dict[str, Any]) -> None:
+    """Atomically replace an existing user-managed YAML config."""
+    replace_config_text(path, _yaml_bytes(data))
+
+
+def replace_config_text(path: Path, content: str | bytes) -> None:
+    """Atomically replace an existing user-managed text config."""
+    resolved = path.expanduser().resolve(strict=True)
+    mode = stat.S_IMODE(resolved.stat().st_mode)
+    encoded = content.encode() if isinstance(content, str) else content
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{resolved.name}.", dir=resolved.parent)
+    tmp = Path(raw_tmp)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb", closefd=True) as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, resolved)
+        _fsync_directory(resolved.parent)
     finally:
         with contextlib.suppress(FileNotFoundError):
             tmp.unlink()

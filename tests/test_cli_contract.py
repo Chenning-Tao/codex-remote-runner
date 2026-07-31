@@ -44,6 +44,7 @@ def test_public_cli_has_exact_lifecycle_subcommands() -> None:
         "add-server",
         "drain-server",
         "resume-server",
+        "retire-server",
         "tui",
         "web",
     ):
@@ -115,6 +116,13 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
     assert "--no-open" in web_help
     assert "--server" in help_text("drain-server")
     assert "--server" in help_text("resume-server")
+    retire_help = help_text("retire-server")
+    assert "--server" in retire_help
+    assert "--server-registry" in retire_help
+    assert "--ssh-config" in retire_help
+    assert "--known-hosts" in retire_help
+    assert "--allow-unreachable" in retire_help
+    assert "--apply" in retire_help
 
 
 def test_tui_reports_missing_optional_dependencies_without_traceback(

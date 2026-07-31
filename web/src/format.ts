@@ -1,5 +1,7 @@
 import type { ActiveRun, RunProgress, ServerSnapshot } from "./types";
 
+const BYTES_PER_GIB = 1024 ** 3;
+
 const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
   timeStyle: "medium",
@@ -71,6 +73,39 @@ export function serverLoad(server: ServerSnapshot): string {
   const load = typeof server.load1 === "number" ? server.load1.toFixed(1) : "--";
   const cores = typeof server.configured_cores === "number" ? server.configured_cores : "--";
   return `${load} / ${cores}`;
+}
+
+function memoryBytes(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function memoryAmount(bytes: number): string {
+  const gib = bytes / BYTES_PER_GIB;
+  if (gib >= 100) return gib.toFixed(0);
+  if (gib >= 10) return gib.toFixed(1);
+  return gib.toFixed(2);
+}
+
+export function memoryPercent(server: ServerSnapshot): number | null {
+  const reported = server.memory_used_percent;
+  if (typeof reported === "number" && Number.isFinite(reported)) {
+    return Math.min(100, Math.max(0, reported));
+  }
+  const total = memoryBytes(server.memory_total_bytes);
+  const used = memoryBytes(server.memory_used_bytes);
+  if (total === null || total <= 0 || used === null) return null;
+  return Math.min(100, Math.max(0, (used / total) * 100));
+}
+
+export function serverMemory(server: ServerSnapshot): string {
+  const total = memoryBytes(server.memory_total_bytes);
+  if (total === null || total <= 0) return "--";
+  const available = memoryBytes(server.memory_available_bytes);
+  const reportedUsed = memoryBytes(server.memory_used_bytes);
+  const used = reportedUsed ?? (
+    available === null ? null : Math.max(0, total - Math.min(total, available))
+  );
+  return `${used === null ? "--" : memoryAmount(used)} / ${memoryAmount(total)} GiB`;
 }
 
 export function textMatches(parts: Array<string | undefined>, query: string): boolean {

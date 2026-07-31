@@ -7,6 +7,7 @@ import type {
   ConnectionState,
   DashboardDocument,
   QueueUpdateChanges,
+  ServerRetirementPreview,
 } from "./types";
 
 interface DashboardResult {
@@ -30,6 +31,8 @@ interface DashboardResult {
     changes: CapacityUpdateChanges,
   ) => Promise<void>;
   updateServerDrain: (server: string, drained: boolean) => Promise<void>;
+  retireServer: (server: string) => Promise<void>;
+  previewServerRetirement: (server: string) => Promise<ServerRetirementPreview>;
 }
 
 export class StopRunError extends Error {
@@ -62,6 +65,16 @@ export class ServerDrainError extends Error {
   }
 }
 
+export class ServerRetirementError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = "ServerRetirementError";
+  }
+}
+
 const stopErrorMessages: Record<string, string> = {
   run_not_found: "这个任务已经结束或不存在，列表已刷新。",
   run_dispatching: "任务正在分配服务器，请稍后重试。",
@@ -85,6 +98,13 @@ const capacityErrorMessages: Record<string, string> = {
 const serverDrainErrorMessages: Record<string, string> = {
   server_not_found: "这台服务器已经不在当前项目中，列表已刷新。",
   server_drain_failed: "无法修改服务器调度状态，请稍后重试。",
+};
+
+const serverRetirementErrorMessages: Record<string, string> = {
+  server_not_found: "这台服务器已经不在当前项目中，列表已刷新。",
+  server_retirement_blocked: "当前配置不允许下线这台服务器。",
+  server_retirement_failed: "服务器下线未完整完成，请检查配置和调度状态。",
+  server_retirement_assessment_failed: "无法完成服务器下线评估。",
 };
 
 function parseDocument(value: string): DashboardDocument {
@@ -296,6 +316,74 @@ export function useDashboard(): DashboardResult {
     );
   }, []);
 
+  const retireServer = useCallback(async (server: string) => {
+    const response = await fetch(`/api/servers/${encodeURIComponent(server)}/retire`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Remote-Runner-Action": "retire-server",
+      },
+      body: JSON.stringify({ server, confirm: true }),
+    });
+    if (response.ok) return;
+    let code = "server_retirement_failed";
+    let detail: string | null = null;
+    try {
+      const payload: unknown = await response.json();
+      if (
+        payload
+        && typeof payload === "object"
+        && "error" in payload
+        && typeof payload.error === "string"
+      ) {
+        code = payload.error;
+        if ("detail" in payload && typeof payload.detail === "string") detail = payload.detail;
+      }
+    } catch {
+      // Keep the status-based fallback when the server response is not JSON.
+    }
+    throw new ServerRetirementError(
+      detail
+        ?? serverRetirementErrorMessages[code]
+        ?? `服务器下线失败（${response.status}）`,
+      code,
+    );
+  }, []);
+
+  const previewServerRetirement = useCallback(async (server: string) => {
+    const response = await fetch(`/api/servers/${encodeURIComponent(server)}/retirement`, {
+      cache: "no-store",
+    });
+    let payload: unknown = null;
+    try {
+      payload = await response.json();
+    } catch {
+      // The status-based error below remains useful for a non-JSON response.
+    }
+    if (
+      response.ok
+      && payload
+      && typeof payload === "object"
+      && "schema_version" in payload
+      && "ready" in payload
+      && typeof payload.ready === "boolean"
+      && "assessment" in payload
+      && "cleanup" in payload
+    ) {
+      return payload as ServerRetirementPreview;
+    }
+    let code = "server_retirement_assessment_failed";
+    let detail: string | null = null;
+    if (payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string") {
+      code = payload.error;
+      if ("detail" in payload && typeof payload.detail === "string") detail = payload.detail;
+    }
+    throw new ServerRetirementError(
+      detail ?? serverRetirementErrorMessages[code] ?? `下线评估失败（${response.status}）`,
+      code,
+    );
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -348,5 +436,7 @@ export function useDashboard(): DashboardResult {
     updateQueueBatch,
     updateCapacity,
     updateServerDrain,
+    retireServer,
+    previewServerRetirement,
   };
 }

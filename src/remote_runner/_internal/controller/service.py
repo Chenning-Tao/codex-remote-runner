@@ -22,6 +22,7 @@ from ..execution_registry import (
 )
 from ..output_sync import (
     disable_config,
+    list_pending,
     run_sync_status,
     store_config,
     sync_status,
@@ -51,6 +52,7 @@ from .registry import (
     QUEUE_TERMINAL,
     controller_paths,
     ensure_server_capacities,
+    eligible_prepared_servers,
     list_drained_servers,
     list_jobs,
     list_queued,
@@ -898,6 +900,209 @@ def update_server_drain(args: argparse.Namespace, *, drained: bool) -> dict[str,
     }
 
 
+def assess_server_retirement(args: argparse.Namespace) -> dict[str, Any]:
+    payload = _read_object("server retirement assessment")
+    if set(payload) != {"schema_version", "server"} or payload.get(
+        "schema_version"
+    ) != 1:
+        raise ValueError("server retirement assessment payload is invalid")
+    raw_server = payload.get("server")
+    if not isinstance(raw_server, dict) or raw_server.get("name") != args.server:
+        raise ValueError("server retirement assessment target is invalid")
+    probe_payload = {
+        "schema_version": 1,
+        "servers": [{**raw_server, "enabled": True}],
+    }
+    server = validate_payload(probe_payload)[0]
+    probe = collect_server_snapshot([server], timeout=args.timeout)[0]
+
+    projects_root = args.controller_root.expanduser().resolve() / "projects"
+    project_results: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    attention: list[dict[str, Any]] = []
+    if projects_root.is_dir():
+        project_entries = sorted(
+            entry
+            for entry in projects_root.iterdir()
+            if entry.is_dir() and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", entry.name)
+        )
+    else:
+        project_entries = []
+
+    for entry in project_entries:
+        project_id = entry.name
+        paths = controller_paths(args.controller_root, project_id)
+        project: dict[str, Any] = {
+            "project_id": project_id,
+            "active_runs": [],
+            "queued_runs": [],
+            "pending_output_sync": [],
+            "unverified_succeeded_outputs": [],
+            "terminal_output_attention": [],
+        }
+        try:
+            jobs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            if paths.queue_dir.is_dir():
+                for queue_entry in sorted(paths.queue_dir.iterdir()):
+                    if not queue_entry.is_dir() or queue_entry.name.startswith("."):
+                        continue
+                    try:
+                        jobs.append(load_job(paths, queue_entry.name))
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        raise RuntimeError(
+                            f"invalid controller queue record {queue_entry.name}: {exc}"
+                        ) from exc
+            for job, state in jobs:
+                if state["status"] not in {"queued", "dispatching"}:
+                    continue
+                if args.server not in {
+                    str(item["name"]) for item in eligible_prepared_servers(job)
+                }:
+                    continue
+                project["queued_runs"].append(
+                    {
+                        "run_id": job["run_id"],
+                        "task_id": job["task_id"],
+                        "status": state["status"],
+                    }
+                )
+
+            if paths.config_path.is_file():
+                execution_paths = project_paths(paths.config_path)
+                rows = monitoring.load_registry_rows(execution_paths)
+                for row in rows:
+                    if row.get("server") != args.server:
+                        continue
+                    run_id = row.get("run_id")
+                    if not isinstance(run_id, str):
+                        continue
+                    status = row.get("authoritative_status") or row.get(
+                        "stored_status"
+                    )
+                    if row.get("registry_kind") != "current":
+                        if status not in {"succeeded", "failed", "stopped"}:
+                            blockers.append(
+                                {
+                                    "code": "unsupported_active_execution",
+                                    "project_id": project_id,
+                                    "run_id": run_id,
+                                }
+                            )
+                        continue
+                    manifest, state = load_current_run(execution_paths, run_id)
+                    status = state["status"]
+                    if status not in {"succeeded", "failed", "stopped"}:
+                        project["active_runs"].append(
+                            {
+                                "run_id": run_id,
+                                "task_id": manifest["task_id"],
+                                "status": status,
+                            }
+                        )
+                        continue
+                    output_path = manifest.get("output_path")
+                    if output_path is None:
+                        continue
+                    if status == "succeeded":
+                        sync = run_sync_status(paths.registry_root, run_id)
+                        if sync.get("status") != "completed":
+                            project["unverified_succeeded_outputs"].append(
+                                {
+                                    "run_id": run_id,
+                                    "output_path": output_path,
+                                    "output_sync": sync,
+                                }
+                            )
+                    else:
+                        project["terminal_output_attention"].append(
+                            {
+                                "run_id": run_id,
+                                "status": status,
+                                "output_path": output_path,
+                            }
+                        )
+
+            project["pending_output_sync"] = [
+                {
+                    "run_id": intent["run_id"],
+                    "source_path": intent["source_path"],
+                }
+                for intent in list_pending(paths.registry_root)
+                if intent["source_server"] == args.server
+            ]
+        except (OSError, RuntimeError, ValueError) as exc:
+            project["error"] = str(exc)
+            blockers.append(
+                {
+                    "code": "project_assessment_failed",
+                    "project_id": project_id,
+                    "detail": str(exc),
+                }
+            )
+        for field, code in (
+            ("active_runs", "active_execution"),
+            ("queued_runs", "queued_candidate"),
+            ("pending_output_sync", "pending_output_sync"),
+            ("unverified_succeeded_outputs", "unverified_succeeded_output"),
+        ):
+            for item in project[field]:
+                blockers.append(
+                    {"code": code, "project_id": project_id, **item}
+                )
+        for item in project["terminal_output_attention"]:
+            attention.append(
+                {"code": "terminal_output", "project_id": project_id, **item}
+            )
+        if any(
+            project.get(field)
+            for field in (
+                "active_runs",
+                "queued_runs",
+                "pending_output_sync",
+                "unverified_succeeded_outputs",
+                "terminal_output_attention",
+                "error",
+            )
+        ):
+            project_results.append(project)
+
+    probe_state = probe.get("state")
+    if probe_state == "unreachable":
+        blockers.append(
+            {
+                "code": "server_unreachable",
+                "detail": probe.get("error", "server is unreachable"),
+            }
+        )
+    elif probe_state not in {"idle", "busy"}:
+        blockers.append(
+            {"code": "server_probe_unsupported", "detail": str(probe_state)}
+        )
+    for active in probe.get("active_runs", []):
+        blockers.append(
+            {
+                "code": "server_process_active",
+                "run_id": active.get("run_id"),
+                "workload_class": active.get("workload_class"),
+            }
+        )
+
+    drained = args.server in list_drained_servers(
+        controller_paths(args.controller_root, args.project_id)
+    )
+    return {
+        "schema_version": 1,
+        "server": args.server,
+        "ready": not blockers,
+        "drained": drained,
+        "probe": probe,
+        "projects": project_results,
+        "blockers": blockers,
+        "attention": attention,
+        "assessed_at": utc_now(),
+    }
+
+
 def dashboard(args: argparse.Namespace) -> dict[str, Any]:
     payload = _read_object("dashboard request")
     servers = validate_payload(payload)
@@ -1191,6 +1396,8 @@ def build_parser() -> argparse.ArgumentParser:
     drain_parser.add_argument("--server", required=True)
     resume_parser = subparsers.add_parser("resume-server")
     resume_parser.add_argument("--server", required=True)
+    retirement_parser = subparsers.add_parser("assess-server-retirement")
+    retirement_parser.add_argument("--server", required=True)
     return parser
 
 
@@ -1246,6 +1453,8 @@ def main(argv: list[str] | None = None) -> int:
             result = update_server_drain(args, drained=True)
         elif args.action == "resume-server":
             result = update_server_drain(args, drained=False)
+        elif args.action == "assess-server-retirement":
+            result = assess_server_retirement(args)
         elif args.action == "stop":
             result = stop(args)
         elif args.action == "cleanup-stopped":
