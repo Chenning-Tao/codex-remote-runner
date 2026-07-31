@@ -7,6 +7,16 @@ Remote Runner accepts only a clean committed Git revision. Omit `--source-repo` 
 cohort and reuse its validated manifest when several runs share the same revision and
 eligible servers.
 
+Historical queue extension (`add-server`, `sync-pool`, and the dashboard queue editor)
+has one narrow fallback that ordinary submission does not have. When no override is
+supplied and configured `source.local_repo` is dirty, it may choose a clean worktree
+registered by that repository's Git common directory. The candidate must share the
+exact common directory, be clean, and contain every requested queued commit object.
+Selection is deterministic and reports the source path, clean HEAD, and verified
+revisions. An explicit `--source-repo` never falls back. If no candidate passes every
+check, preparation fails closed without changing queue eligibility. This flow never
+stashes, commits, resets, copies, or submits uncommitted file contents.
+
 ## Detached Submission
 
 `run` is detached by default. A successful call returns the exact run ID and queue
@@ -30,7 +40,9 @@ It does not inspect workload arguments, experiment points, metrics, or result me
 `--server NAME` pins one user-required server. `--server all` keeps a queued automatic
 pool extensible through `sync-pool`; `add-server` appends one prepared server to one
 exact queued run. Test workloads use the configured test pool and its independent slot
-capacity.
+capacity. Pool synchronization verifies every queued historical revision in the
+selected clean local source before reusing it for a cohort, reports its selection, and
+never removes existing candidates when preparation fails.
 
 ## Command And Environment
 

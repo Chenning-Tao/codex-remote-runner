@@ -9,6 +9,7 @@ from remote_runner._internal.source import (
     DeploymentTarget,
     prepare_revision,
     resolve_clean_head,
+    select_historical_source_repo,
 )
 
 
@@ -47,6 +48,92 @@ def test_resolve_clean_head_rejects_dirty_source(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="must be clean"):
         resolve_clean_head(source)
+
+
+def test_historical_source_uses_clean_registered_worktree_when_configured_is_dirty(
+    tmp_path: Path,
+) -> None:
+    source, revision = make_source(tmp_path)
+    linked = tmp_path / "clean-linked"
+    run("git", "worktree", "add", "--detach", str(linked), revision, cwd=source)
+    dirty = source / "paper-plot.txt"
+    dirty.write_text("local paper change\n", encoding="utf-8")
+    status_before = run(
+        "git", "status", "--porcelain", "--untracked-files=normal", cwd=source
+    )
+
+    selected = select_historical_source_repo(
+        source,
+        None,
+        revisions=(revision,),
+    )
+
+    assert selected.source_repo == linked.resolve()
+    assert selected.selection == "linked-worktree"
+    assert selected.verified_revisions == (revision,)
+    assert selected.audit() == {
+        "selection": "linked-worktree",
+        "source_repo": str(linked.resolve()),
+        "clean_head": revision,
+        "verified_revisions": [revision],
+    }
+    assert dirty.read_text(encoding="utf-8") == "local paper change\n"
+    assert (
+        run("git", "status", "--porcelain", "--untracked-files=normal", cwd=source)
+        == status_before
+    )
+
+
+def test_historical_source_fails_closed_without_clean_linked_worktree(
+    tmp_path: Path,
+) -> None:
+    source, revision = make_source(tmp_path)
+    (source / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="no trusted clean linked worktree"):
+        select_historical_source_repo(source, None, revisions=(revision,))
+
+
+def test_historical_source_requires_every_requested_revision(tmp_path: Path) -> None:
+    source, revision = make_source(tmp_path)
+    linked = tmp_path / "clean-linked"
+    run("git", "worktree", "add", "--detach", str(linked), revision, cwd=source)
+    (source / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="queued historical revision is unavailable"):
+        select_historical_source_repo(
+            source,
+            None,
+            revisions=(revision, "f" * 40),
+        )
+
+
+def test_explicit_historical_source_never_falls_back_from_dirty_override(
+    tmp_path: Path,
+) -> None:
+    source, revision = make_source(tmp_path)
+    linked = tmp_path / "clean-linked"
+    run("git", "worktree", "add", "--detach", str(linked), revision, cwd=source)
+    (source / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be clean"):
+        select_historical_source_repo(source, source, revisions=(revision,))
+
+
+def test_explicit_clean_historical_source_takes_priority(tmp_path: Path) -> None:
+    source, revision = make_source(tmp_path)
+    linked = tmp_path / "clean-linked"
+    run("git", "worktree", "add", "--detach", str(linked), revision, cwd=source)
+    (source / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+    selected = select_historical_source_repo(
+        source,
+        linked,
+        revisions=(revision,),
+    )
+
+    assert selected.source_repo == linked.resolve()
+    assert selected.selection == "explicit"
 
 
 def test_fanout_prepares_all_reachable_targets(tmp_path: Path) -> None:

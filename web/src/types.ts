@@ -111,6 +111,14 @@ export interface BatchQueueUpdateResult {
   status: "updated" | "partial" | "failed";
   succeeded: string[];
   failed: BatchQueueUpdateFailure[];
+  source_preparations?: Array<{
+    run_id: string;
+    server: string;
+    selection: "explicit" | "configured" | "linked-worktree";
+    source_repo: string;
+    clean_head: string;
+    verified_revisions: string[];
+  }>;
 }
 
 export interface CapacityUpdateChanges {

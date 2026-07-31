@@ -125,6 +125,11 @@ these external standards and design-system references:
   reusing the `add-server` pipeline, and enables it only after every requested
   preparation succeeds. The UI identifies unprepared choices and reports the
   preparation state while the request is pending.
+- Historical preparation honors the Web process's explicit clean `--source-repo`.
+  Without an override, a dirty configured source may use only a clean linked
+  worktree registered to the same Git common directory. The backend verifies the
+  exact queued revision in that source and returns an auditable source-preparation
+  record; absence of a trusted source fails the edit closed.
 - A preparation failure releases the reservation and preserves the prior
   priority and eligible-server selection. Successfully prepared descriptors may
   remain available for a later retry, but are not silently enabled by the failed

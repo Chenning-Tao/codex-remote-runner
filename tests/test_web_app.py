@@ -4,11 +4,15 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 from starlette.testclient import TestClient
 
+from remote_runner._internal import queue_control, server_addition
+from remote_runner._internal.execution_registry import write_yaml
 from remote_runner._internal.queue_control import QueuePreparationError
+from remote_runner._internal.source import PreparationResult, PreparedServer
 from remote_runner.web_app import DashboardProbe, InFlightBatchUpdates, create_app
 
 
@@ -45,12 +49,14 @@ def test_identical_in_flight_batch_updates_share_one_operation() -> None:
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def operation() -> tuple[list[str], list[dict[str, str]]]:
+        async def operation() -> tuple[
+            list[str], list[dict[str, str]], list[dict[str, object]]
+        ]:
             nonlocal calls
             calls += 1
             started.set()
             await release.wait()
-            return ["rr-0123456789abcdef"], []
+            return ["rr-0123456789abcdef"], [], []
 
         first = asyncio.create_task(updates.run(key, operation))
         await started.wait()
@@ -58,8 +64,8 @@ def test_identical_in_flight_batch_updates_share_one_operation() -> None:
         await asyncio.sleep(0)
         release.set()
 
-        assert await first == (["rr-0123456789abcdef"], [])
-        assert await second == (["rr-0123456789abcdef"], [])
+        assert await first == (["rr-0123456789abcdef"], [], [])
+        assert await second == (["rr-0123456789abcdef"], [], [])
 
     asyncio.run(exercise())
 
@@ -851,6 +857,215 @@ def test_web_batch_queue_update_reports_partial_results_and_refreshes_snapshot(
         "servers": [],
         "queue": [{"job": {"run_id": second_run}}],
     }
+
+
+def test_web_batch_add_server_uses_clean_linked_historical_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def git(*args: str, cwd: Path | None = None) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout.strip()
+
+    source = tmp_path / "code"
+    source.mkdir()
+    git("init", "-q", str(source))
+    git("config", "user.name", "Test User", cwd=source)
+    git("config", "user.email", "test@example.com", cwd=source)
+    experiment = source / "experiment.py"
+    experiment.write_text("print('first')\n", encoding="utf-8")
+    git("add", "experiment.py", cwd=source)
+    git("commit", "-q", "-m", "first", cwd=source)
+    first_revision = git("rev-parse", "HEAD", cwd=source)
+    experiment.write_text("print('second')\n", encoding="utf-8")
+    git("add", "experiment.py", cwd=source)
+    git("commit", "-q", "-m", "second", cwd=source)
+    second_revision = git("rev-parse", "HEAD", cwd=source)
+    clean_source = tmp_path / "clean-source"
+    git(
+        "worktree",
+        "add",
+        "--detach",
+        str(clean_source),
+        second_revision,
+        cwd=source,
+    )
+    dirty_file = source / "paper-plot.txt"
+    dirty_file.write_text("unrelated local plot change\n", encoding="utf-8")
+    dirty_status = git(
+        "status", "--porcelain", "--untracked-files=normal", cwd=source
+    )
+
+    config_path = tmp_path / ".remote-runner.yaml"
+    write_yaml(
+        config_path,
+        {
+            "project_id": "example",
+            "controller": {"ssh": "controller", "root": "/controller"},
+            "source": {"local_repo": "code"},
+            "remote": {
+                name: {
+                    "bare_repo": f"/srv/{name}/repo.git",
+                    "worktree_root": f"/srv/{name}/worktrees",
+                    "python": f"/opt/{name}/python3",
+                }
+                for name in ("compute-a", "compute-b")
+            },
+        },
+    )
+    run_revisions = {
+        "rr-0123456789abcdef": first_revision,
+        "rr-fedcba9876543210": second_revision,
+    }
+    snapshot = {
+        "servers": [],
+        "queue": [
+            {
+                "job": {"run_id": run_id, "queue_priority": "normal"},
+                "state": {"status": "queued", "revision": 1},
+            }
+            for run_id in run_revisions
+        ],
+    }
+    web_args = argparse.Namespace(
+        project_config=config_path,
+        source_repo=None,
+        server_registry=tmp_path / "servers.yaml",
+        ssh_profile="auto",
+        timeout=8,
+        prepare_timeout=60,
+        stop_timeout=12,
+    )
+    probe = DashboardProbe(
+        web_args,
+        project_id="example",
+        interval=30,
+        query=lambda _args: snapshot,
+    )
+    asyncio.run(probe.probe_once())
+
+    def controller(_config, action, *, action_args=(), payload=None, **_kwargs):
+        run_id = action_args[-1] if action_args else None
+        if action == "queued-job":
+            assert run_id in run_revisions
+            return {
+                "job": {
+                    "run_id": run_id,
+                    "revision": run_revisions[run_id],
+                    "minimum_cores": 1,
+                    "workload_class": "standard",
+                    "prepared_servers": ["compute-a"],
+                    "output_relpath": None,
+                    "output_path": None,
+                }
+            }
+        if action == "reserve-queue-update":
+            return {"token": f"token-{run_id}", "state": {"revision": 2}}
+        if action == "extend-job":
+            return {
+                "run_id": run_id,
+                "status": "extended",
+                "added_servers": 1,
+                "prepared_servers": ["compute-a", "compute-b"],
+                "dispatcher_started": False,
+            }
+        if action == "update-queued-job":
+            return {"changed": True}
+        raise AssertionError(f"unexpected controller action: {action} {payload}")
+
+    candidate = {
+        "name": "compute-b",
+        "ssh": "compute-b",
+        "ssh_profile": "intranet",
+        "cores": 128,
+        "priority": 10,
+        "test_slots": 0,
+        "probe": {"reachable": True},
+        "runtime": {
+            "bare_repo": "/srv/compute-b/repo.git",
+            "worktree_root": "/srv/compute-b/worktrees",
+            "python": "/opt/compute-b/python3",
+            "output_root": None,
+        },
+    }
+    prepared: list[tuple[Path, str]] = []
+
+    def prepare(source_repo: Path, *, revision: str, targets, **_kwargs):
+        prepared.append((source_repo, revision))
+        target = targets[0]
+        return PreparationResult(
+            revision=revision,
+            ref=f"refs/remote-runner/example/{revision}",
+            prepared=(
+                PreparedServer(
+                    target.name,
+                    target.remote_url,
+                    f"refs/remote-runner/example/{revision}",
+                    revision,
+                ),
+            ),
+            failures=(),
+        )
+
+    monkeypatch.setattr(queue_control, "call_controller", controller)
+    monkeypatch.setattr(server_addition, "call_controller", controller)
+    monkeypatch.setattr(
+        server_addition,
+        "probe_project_pool",
+        lambda *_args, **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(server_addition, "prepare_revision", prepare)
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        queue_update_query=queue_control.request_queue_update,
+    )
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/queue-batch",
+            headers={"x-remote-runner-action": "update-queue-batch"},
+            json={
+                "updates": [
+                    {"run_id": run_id, "expected_revision": 1}
+                    for run_id in run_revisions
+                ],
+                "eligible_servers": ["compute-a", "compute-b"],
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "updated"
+    assert body["succeeded"] == list(run_revisions)
+    assert body["failed"] == []
+    assert prepared == [
+        (clean_source.resolve(), first_revision),
+        (clean_source.resolve(), second_revision),
+    ]
+    assert body["source_preparations"] == [
+        {
+            "run_id": run_id,
+            "server": "compute-b",
+            "selection": "linked-worktree",
+            "source_repo": str(clean_source.resolve()),
+            "clean_head": second_revision,
+            "verified_revisions": [revision],
+        }
+        for run_id, revision in run_revisions.items()
+    ]
+    assert dirty_file.read_text(encoding="utf-8") == "unrelated local plot change\n"
+    assert (
+        git("status", "--porcelain", "--untracked-files=normal", cwd=source)
+        == dirty_status
+    )
 
 
 def test_web_batch_queue_update_rejects_duplicate_runs(tmp_path: Path) -> None:
