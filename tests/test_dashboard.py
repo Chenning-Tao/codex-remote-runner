@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import subprocess
 from threading import Barrier
@@ -242,6 +243,67 @@ def test_probe_timeout_is_normalized_as_runtime_error(monkeypatch) -> None:
         raise AssertionError("probe timeout was not normalized")
 
 
+def test_probe_server_state_reads_optional_memory_metrics(monkeypatch) -> None:
+    from remote_runner._internal.controller import dispatcher
+
+    payload = {
+        "active_runs": [],
+        "active_run_ids": [],
+        "load1": 1.0,
+        "load5": 2.0,
+        "load15": 3.0,
+        "remote_cores": 8,
+        "memory_total_bytes": 16 * 1024**3,
+        "memory_available_bytes": 6 * 1024**3,
+        "memory_used_bytes": 10 * 1024**3,
+        "memory_used_percent": 62.5,
+    }
+
+    monkeypatch.setattr(
+        dispatcher.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["ssh"], 0, stdout=json.dumps(payload).encode(), stderr=b""
+        ),
+    )
+
+    result = dispatcher.probe_server_state("compute-a", "/opt/python3", timeout=1)
+
+    assert result["memory_total_bytes"] == 16 * 1024**3
+    assert result["memory_available_bytes"] == 6 * 1024**3
+    assert result["memory_used_bytes"] == 10 * 1024**3
+    assert result["memory_used_percent"] == 62.5
+
+
+def test_probe_server_state_rejects_inconsistent_memory_metrics(monkeypatch) -> None:
+    from remote_runner._internal.controller import dispatcher
+
+    payload = {
+        "active_runs": [],
+        "active_run_ids": [],
+        "load1": 1.0,
+        "load5": 2.0,
+        "load15": 3.0,
+        "remote_cores": 8,
+        "memory_total_bytes": 100,
+        "memory_available_bytes": 101,
+    }
+    monkeypatch.setattr(
+        dispatcher.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["ssh"], 0, stdout=json.dumps(payload).encode(), stderr=b""
+        ),
+    )
+
+    try:
+        dispatcher.probe_server_state("compute-a", "/opt/python3", timeout=1)
+    except RuntimeError as exc:
+        assert "memory data" in str(exc)
+    else:
+        raise AssertionError("inconsistent memory metrics should be rejected")
+
+
 def test_controller_dashboard_combines_overview_and_server_snapshot(
     monkeypatch,
     tmp_path: Path,
@@ -267,6 +329,9 @@ def test_controller_dashboard_combines_overview_and_server_snapshot(
             {
                 "name": "compute-a",
                 "state": "idle",
+                "memory_total_bytes": 16 * 1024**3,
+                "memory_used_bytes": 10 * 1024**3,
+                "memory_used_percent": 62.5,
                 "active_runs": [],
                 "timeout": timeout,
             }
@@ -283,6 +348,7 @@ def test_controller_dashboard_combines_overview_and_server_snapshot(
 
     assert result["queue"] == []
     assert result["servers"][0]["name"] == "compute-a"
+    assert result["servers"][0]["memory_used_percent"] == 62.5
     assert result["servers"][0]["timeout"] == 7
     assert result["probe_interval_seconds"] == 60
     assert isinstance(result["collected_at"], str)

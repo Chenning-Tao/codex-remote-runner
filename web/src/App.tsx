@@ -136,6 +136,8 @@ function RunsDashboard() {
     updateQueueBatch,
     updateCapacity,
     updateServerDrain,
+    retireServer,
+    previewServerRetirement,
   } = useDashboard();
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("q") ?? "");
   const [priority, setPriority] = useState<PriorityFilter>(initialPriority);
@@ -379,6 +381,8 @@ function RunsDashboard() {
       onBatchResult={handleBatchResult}
       onCapacityUpdate={updateCapacity}
       onServerDrainUpdate={updateServerDrain}
+      onRetireServer={retireServer}
+      onPreviewServerRetirement={previewServerRetirement}
       availableServers={document?.snapshot?.servers ?? []}
     />
   ) : null;

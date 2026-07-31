@@ -76,6 +76,12 @@ lifecycle operations across a project-owned server pool.
 - Server details can pause or resume controller-wide dispatch admission for one
   server. Pausing requires explicit confirmation, never stops existing work,
   and refreshes authoritative drain state before the UI reports completion.
+- Server details can permanently retire one server after a separate confirmation.
+  A read-only assessment first checks controller-wide project activity, actual runner
+  processes, frozen queue candidates, and output archival. Retirement preserves
+  remote data and history, commits a controller-wide drain, removes managed project,
+  global, local SSH, and dedicated archive credentials, and is blocked while any
+  authoritative work or unverified successful output remains.
 - Desktop web behavior is the acceptance target for the first queue-control
   increment. Queue-control layout and ergonomics on narrow/mobile viewports are
   explicitly outside this increment's acceptance scope.

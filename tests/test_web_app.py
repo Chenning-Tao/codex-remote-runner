@@ -746,6 +746,130 @@ def test_web_server_drain_and_resume_require_confirmation_and_refresh_snapshot(
     assert probe.document()["snapshot"]["server_drains"]["servers"] == {}
 
 
+def test_web_server_retirement_requires_confirmation_and_refreshes_snapshot(
+    tmp_path: Path,
+) -> None:
+    snapshots = iter(
+        (
+            {
+                "servers": [{"name": "compute-a", "enabled": True}],
+                "queue": [],
+                "server_drains": {"scope": "controller", "servers": {}},
+            },
+            {
+                "servers": [{"name": "compute-a", "enabled": False}],
+                "queue": [],
+                "server_drains": {
+                    "scope": "controller",
+                    "servers": {"compute-a": {"requested_by_project": "example"}},
+                },
+            },
+        )
+    )
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: next(snapshots),
+    )
+    asyncio.run(probe.probe_once())
+    calls: list[str] = []
+    preview_calls: list[str] = []
+
+    def retirement_query(
+        _args: argparse.Namespace,
+        server: str,
+    ) -> dict[str, object]:
+        calls.append(server)
+        return {"status": "retired", "server": server}
+
+    def retirement_preview(
+        _args: argparse.Namespace,
+        server: str,
+    ) -> dict[str, object]:
+        preview_calls.append(server)
+        return {
+            "schema_version": 2,
+            "server": server,
+            "ready": True,
+            "status": "ready_to_retire",
+            "assessment": {"effective_blockers": [], "attention": []},
+            "cleanup": {"project_config": {}},
+        }
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        server_retirement_query=retirement_query,
+        server_retirement_preview=retirement_preview,
+    )
+    request = {"server": "compute-a", "confirm": True}
+
+    with TestClient(app) as client:
+        preview = client.get("/api/servers/compute-a/retirement")
+        assert preview.status_code == 200
+        assert preview.json()["ready"] is True
+        rejected = client.post("/api/servers/compute-a/retire", json=request)
+        assert rejected.status_code == 403
+        invalid_confirmation = client.post(
+            "/api/servers/compute-a/retire",
+            headers={"x-remote-runner-action": "retire-server"},
+            json={"server": "compute-a", "confirm": False},
+        )
+        assert invalid_confirmation.status_code == 400
+        retired = client.post(
+            "/api/servers/compute-a/retire",
+            headers={"x-remote-runner-action": "retire-server"},
+            json=request,
+        )
+
+    assert retired.status_code == 200
+    assert retired.json()["status"] == "retired"
+    assert calls == ["compute-a"]
+    assert preview_calls == ["compute-a"]
+    snapshot = probe.document()["snapshot"]
+    assert snapshot["servers"][0]["enabled"] is False
+    assert "compute-a" in snapshot["server_drains"]["servers"]
+
+
+def test_web_server_retirement_reports_preflight_blocker(tmp_path: Path) -> None:
+    probe = DashboardProbe(
+        arguments(),
+        project_id="example",
+        interval=30,
+        query=lambda _args: {
+            "servers": [{"name": "archive", "enabled": True}],
+            "queue": [],
+        },
+    )
+    asyncio.run(probe.probe_once())
+
+    def blocked(_args: argparse.Namespace, server: str) -> dict[str, object]:
+        raise ValueError(
+            f"cannot retire output synchronization target {server!r}; "
+            "move output_sync.target_server first"
+        )
+
+    app = create_app(
+        probe,
+        static_root=static_root(tmp_path),
+        manage_probe=False,
+        server_retirement_query=blocked,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/servers/archive/retire",
+            headers={"x-remote-runner-action": "retire-server"},
+            json={"server": "archive", "confirm": True},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "server_retirement_blocked"
+    assert "move output_sync.target_server first" in response.json()["detail"]
+
+
 def test_web_batch_queue_update_reports_partial_results_and_refreshes_snapshot(
     tmp_path: Path,
 ) -> None:

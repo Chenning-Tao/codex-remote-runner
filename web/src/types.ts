@@ -39,6 +39,10 @@ export interface ServerSnapshot {
   load1?: number;
   load5?: number;
   load15?: number;
+  memory_total_bytes?: number | null;
+  memory_available_bytes?: number | null;
+  memory_used_bytes?: number | null;
+  memory_used_percent?: number | null;
   standard_runs?: number;
   test_runs?: number;
   active_runs?: ActiveRun[];
@@ -114,6 +118,26 @@ export interface BatchQueueUpdateResult {
 export interface CapacityUpdateChanges {
   standard_slots: number;
   test_slots: number;
+}
+
+export interface RetirementIssue {
+  code?: string;
+  project_id?: string;
+  run_id?: string;
+  detail?: string;
+}
+
+export interface ServerRetirementPreview {
+  schema_version: number;
+  server: string;
+  ready: boolean;
+  status: "ready_to_retire" | "blocked";
+  assessment: {
+    effective_blockers?: RetirementIssue[];
+    attention?: RetirementIssue[];
+    probe?: { state?: string };
+  };
+  cleanup: Record<string, unknown>;
 }
 
 export interface StatusSummary {

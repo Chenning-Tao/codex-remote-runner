@@ -36,6 +36,12 @@ servers:
 display and sorting. It is not probed on each refresh and does not affect task
 scheduling.
 
+Live server snapshots additionally expose optional physical-memory probe fields:
+`memory_total_bytes`, `memory_available_bytes`, `memory_used_bytes`, and
+`memory_used_percent`. The controller reads these from the remote host during
+the normal server probe, so a host without readable memory telemetry remains
+usable and reports the unavailable fields as `null`.
+
 The controller initially uses one standard slot and the configured
 `testing.slots` value. The local web dashboard can then persist both values in
 the controller-wide `scheduler/server-capacities.yaml` registry. Web overrides
@@ -125,8 +131,48 @@ Drains are controller-wide because dispatch capacity is shared across projects. 
 block new dispatch leases without stopping work already running on the server. The
 state is persistent and appears in the project overview under `server_drains`. Run
 `remote-runner resume-server --server burst` to remove it. For permanent
-retirement, retain the drain and set both project and global `enabled` fields to
-`false`; this also prevents unnecessary future preparation.
+retirement, preview and then apply the guarded retirement flow:
+
+```bash
+remote-runner retire-server \
+  --project-config /path/to/.remote-runner.yaml \
+  --server-registry ~/.codex/remote-servers.yaml \
+  --server burst
+
+remote-runner retire-server \
+  --project-config /path/to/.remote-runner.yaml \
+  --server-registry ~/.codex/remote-servers.yaml \
+  --server burst \
+  --apply
+```
+
+The dry run asks the controller to assess every project under the same controller
+root. It blocks retirement for active executions, frozen queued candidates, active
+server processes, pending output synchronization, unverified succeeded outputs,
+unknown project state, or an unreachable server. Failed and stopped output paths are
+reported separately because they are not authoritative successful results but would
+be lost if the machine is destroyed.
+
+Apply repeats the assessment after committing the controller-wide drain. It then
+removes the project remote, test-lane reference, output-sync source and pruning
+reference, global inventory entry, exact local SSH Host block, and matching local
+known-host records. When output synchronization uses a remote source alias, apply
+revokes its public key from the source before removing the archive target's exact
+Host block, exclusive IdentityFile pair, and matching known-host records. Identity
+files referenced by another archive Host block and local login identities are always
+preserved. Controller drain and historical run records remain; runtime directories
+and output data are not deleted by this command.
+
+Retirement is also blocked when the server is the output-sync target or the
+project's last enabled automatic candidate. Move those responsibilities first.
+Because global registration, controller admission, SSH authorization, and archive
+credentials can affect more than one project, review the complete dry-run assessment
+and cleanup inventory before `--apply`.
+
+If an instance has already been shut down, add `--allow-unreachable` explicitly.
+The command still requires every other assessment to pass. If the source public key
+cannot be revoked, it removes the corresponding exclusive archive private key so the
+remaining authorization cannot be used and reports that degraded cleanup outcome.
 
 After adding and provisioning an automatic project remote, run
 `remote-runner sync-pool --project-config /path/to/.remote-runner.yaml`. This

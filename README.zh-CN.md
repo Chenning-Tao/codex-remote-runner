@@ -14,7 +14,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 - 支持附着式 Codex 等待，并在等待工具完成后恢复发起它的 App 回合。
 - 提供可交互的 Textual 和本地网页控制面板，并支持确认后停止任务。
 - 提供由控制器持有、包含冻结 binding 与已验证结果的实验注册表。
-- 提供明确的停止、清理、彻底删除、服务器排空和输出归档流程。
+- 提供明确的停止、清理、彻底删除、服务器排空/下线和输出归档流程。
 
 ```text
 本地 CLI / Codex skill
@@ -43,7 +43,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.7.0'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.8.0'
 remote-runner --help
 ```
 
@@ -89,7 +89,12 @@ Standard/Test 并发任务数，也可以在排队任务详情中切换任务类
 候选服务器。槽位只限制任务准入，不修改 worker 数，也不会停止已经运行的
 任务；将槽位设为 `0` 会暂停该类型的新任务。
 
-该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示与 TUI 相同的 controller snapshot。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置。详情栏可以停止一个精确的排队中或运行中任务，也可以修改排队任务的类型、优先级和可用服务器；队列表格还可以跨页勾选多个任务，批量修改任务类型、优先级，并可选地统一为同一组兼容服务器。未选择的设置保持不变。如果新选择的兼容服务器尚未准备，Web 进程会先为任务的精确 revision 完成准备，再启用该服务器。队列写操作使用各任务自己的 controller revision 和有时限的准备租约，旧快照修改或已经进入调度的任务会被拒绝；批量操作会明确报告部分失败并保留失败项。
+服务器详情还可以先评估、再经二次确认永久下线机器。评估会覆盖同一控制器下
+的所有项目、服务器实际任务进程、冻结队列候选和结果归档状态。下线会先在
+控制器范围暂停新任务准入，再删除项目、全局、本机 SSH 和归档端专用同步凭据；
+共享登录密钥、历史记录、运行目录和输出仍会保留。
+
+该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示与 TUI 相同的 controller snapshot。服务器列表会在远端主机提供数据时显示实时负载和物理内存使用量。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置。详情栏可以停止一个精确的排队中或运行中任务，也可以修改排队任务的类型、优先级和可用服务器；队列表格还可以跨页勾选多个任务，批量修改任务类型、优先级，并可选地统一为同一组兼容服务器。未选择的设置保持不变。如果新选择的兼容服务器尚未准备，Web 进程会先为任务的精确 revision 完成准备，再启用该服务器。队列写操作使用各任务自己的 controller revision 和有时限的准备租约，旧快照修改或已经进入调度的任务会被拒绝；批量操作会明确报告部分失败并保留失败项。
 
 ## 实验注册表
 
@@ -148,6 +153,8 @@ remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-...
 remote-runner tui --project-config /path/to/.remote-runner.yaml
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
+remote-runner retire-server --project-config /path/to/.remote-runner.yaml --server compute-a
+remote-runner retire-server --project-config /path/to/.remote-runner.yaml --server compute-a --apply
 ```
 
 在 TUI 中选中运行中或排队中的任务后按 `x`，即可检查并确认停止请求。控制器始终是状态权威；如果传输结果不明确，TUI 会报告停止尚未得到确认并重新刷新，而不会假定任务已经停止。

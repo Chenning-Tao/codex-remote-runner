@@ -30,6 +30,7 @@ import {
   LoaderCircle,
   Play,
   Save,
+  ServerOff,
   ShieldAlert,
   CircleStop,
   WifiOff,
@@ -40,7 +41,9 @@ import {
   dateTime,
   progressLabel,
   progressValue,
+  memoryPercent,
   serverLoad,
+  serverMemory,
   serverState,
 } from "./format";
 import type {
@@ -55,8 +58,14 @@ import type {
   QueueUpdateChanges,
   Selection,
   ServerSnapshot,
+  ServerRetirementPreview,
 } from "./types";
-import { QueueUpdateError, ServerDrainError, StopRunError } from "./useDashboard";
+import {
+  QueueUpdateError,
+  ServerDrainError,
+  ServerRetirementError,
+  StopRunError,
+} from "./useDashboard";
 
 interface StatusVisual {
   text: string;
@@ -98,6 +107,21 @@ function workloadClassLabel(workloadClass: string | undefined): string {
   if (!workloadClass || workloadClass === "standard") return "标准";
   if (workloadClass === "test") return "测试";
   return workloadClass;
+}
+
+function retirementBlockerLabel(code: string | undefined): string {
+  return {
+    active_execution: "仍有运行中的控制器任务",
+    queued_candidate: "仍有排队任务可以调度到这台服务器",
+    pending_output_sync: "仍有结果等待归档",
+    unverified_succeeded_output: "存在尚未校验归档的成功结果",
+    server_process_active: "服务器仍检测到任务进程",
+    server_unreachable: "服务器当前不可达，无法确认进程状态",
+    server_probe_unsupported: "无法确认服务器进程状态",
+    project_assessment_failed: "部分项目状态检查失败",
+    unsupported_active_execution: "存在无法确认状态的历史执行",
+    archive_cleanup_unavailable: "无法检查归档端专用连接凭据",
+  }[code ?? ""] ?? "下线前置检查未通过";
 }
 
 function workerPolicyLabel(workerPolicy: string | undefined): string {
@@ -315,6 +339,7 @@ export function ServerTable({
             const runs = server.active_runs ?? [];
             const drained = drainedServers.has(server.name);
             const utilization = loadPercent(server);
+            const memoryUtilization = memoryPercent(server);
             return (
               <tr key={server.name}>
                 <td>
@@ -345,6 +370,15 @@ export function ServerTable({
                     {utilization !== null && (
                       <span className="rr-resource-track" aria-label={`检测到的核心使用率为 ${utilization.toFixed(0)}%`}>
                         <span style={{ width: `${utilization}%` }} />
+                      </span>
+                    )}
+                    <div className="rr-resource-line">
+                      <span>实时内存</span>
+                      <span className="rr-mono">{serverMemory(server)}</span>
+                    </div>
+                    {memoryUtilization !== null && (
+                      <span className="rr-resource-track" aria-label={`检测到的内存使用率为 ${memoryUtilization.toFixed(0)}%`}>
+                        <span style={{ width: `${memoryUtilization}%` }} />
                       </span>
                     )}
                     <small>
@@ -597,6 +631,8 @@ export function DetailPanel({
   onBatchResult,
   onCapacityUpdate,
   onServerDrainUpdate,
+  onRetireServer,
+  onPreviewServerRetirement,
   availableServers,
 }: {
   selection: Selection;
@@ -618,6 +654,8 @@ export function DetailPanel({
     changes: CapacityUpdateChanges,
   ) => Promise<void>;
   onServerDrainUpdate: (server: string, drained: boolean) => Promise<void>;
+  onRetireServer: (server: string) => Promise<void>;
+  onPreviewServerRetirement: (server: string) => Promise<ServerRetirementPreview>;
   availableServers: ServerSnapshot[];
 }) {
   let title: string;
@@ -668,6 +706,11 @@ export function DetailPanel({
   const [confirmingDrain, setConfirmingDrain] = useState(false);
   const [updatingDrain, setUpdatingDrain] = useState(false);
   const [drainError, setDrainError] = useState<string | null>(null);
+  const [confirmingRetirement, setConfirmingRetirement] = useState(false);
+  const [retirementPreview, setRetirementPreview] = useState<ServerRetirementPreview | null>(null);
+  const [previewingRetirement, setPreviewingRetirement] = useState(false);
+  const [retiring, setRetiring] = useState(false);
+  const [retirementError, setRetirementError] = useState<string | null>(null);
   const preparedServers = queueEntry?.job.supported_servers
     ?? queueEntry?.job.eligible_servers
     ?? [];
@@ -759,7 +802,7 @@ export function DetailPanel({
   const batchPlacementUpdating = batchEntries.some(
     (entry) => Boolean(entry.state.placement_update),
   );
-  const panelBusy = stopping || savingQueue || savingCapacity || savingBatch || updatingDrain;
+  const panelBusy = stopping || savingQueue || savingCapacity || savingBatch || updatingDrain || retiring || previewingRetirement;
 
   useEffect(() => {
     setConfirmingStop(false);
@@ -813,6 +856,14 @@ export function DetailPanel({
     setUpdatingDrain(false);
     setDrainError(null);
   }, [selectedServer?.name, selection.kind === "server" ? selection.drained : false]);
+
+  useEffect(() => {
+    setConfirmingRetirement(false);
+    setRetiring(false);
+    setPreviewingRetirement(false);
+    setRetirementPreview(null);
+    setRetirementError(null);
+  }, [selectedServer?.name, selectedServer?.enabled]);
 
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
@@ -956,8 +1007,45 @@ export function DetailPanel({
     }
   }
 
+  async function retireSelectedServer() {
+    if (!selectedServer || retiring) return;
+    setRetiring(true);
+    setRetirementError(null);
+    try {
+      await onRetireServer(selectedServer.name);
+      onClose();
+    } catch (error: unknown) {
+      if (error instanceof ServerRetirementError && error.code === "server_not_found") {
+        onClose();
+        return;
+      }
+      setRetirementError(error instanceof Error ? error.message : "服务器下线失败");
+      setRetiring(false);
+    }
+  }
+
+  async function previewSelectedServerRetirement() {
+    if (!selectedServer || previewingRetirement) return;
+    setPreviewingRetirement(true);
+    setRetirementError(null);
+    try {
+      const preview = await onPreviewServerRetirement(selectedServer.name);
+      setRetirementPreview(preview);
+      setConfirmingRetirement(true);
+    } catch (error: unknown) {
+      if (error instanceof ServerRetirementError && error.code === "server_not_found") {
+        onClose();
+        return;
+      }
+      setRetirementError(error instanceof Error ? error.message : "服务器下线评估失败");
+    } finally {
+      setPreviewingRetirement(false);
+    }
+  }
+
   if (selection.kind === "server") {
     const server = selection.value;
+    const liveMemoryPercent = memoryPercent(server);
     title = server.name;
     kind = "服务器";
     body = (
@@ -971,7 +1059,9 @@ export function DetailPanel({
               : "允许控制器从所有项目向这台服务器分配新任务。"}
           </p>
           {drainError && <div className="rr-stop-error" role="alert">{drainError}</div>}
-          {selection.drained ? (
+          {selection.drained && server.enabled === false ? (
+            <span className="rr-disabled-note">配置已禁用，调度暂停保持生效。</span>
+          ) : selection.drained ? (
             <Button
               variant="primary"
               icon={updatingDrain ? <LoaderCircle className="rr-spin" /> : <Play />}
@@ -1057,8 +1147,63 @@ export function DetailPanel({
             {savingCapacity ? "正在保存…" : "保存容量"}
           </Button>
         </section>
+        <section className="rr-retirement-editor" aria-labelledby="rr-retirement-editor-title">
+          <h3 id="rr-retirement-editor-title">下线服务器</h3>
+          <p>评估通过后永久暂停新任务，并删除调度配置与专用连接凭据；历史记录、运行目录和输出不会删除。</p>
+          {retirementError && <div className="rr-stop-error" role="alert">{retirementError}</div>}
+          {server.enabled === false && selection.drained ? (
+            <span className="rr-disabled-note">这台服务器已下线。</span>
+          ) : confirmingRetirement ? (
+            <div className="rr-scheduling-confirm" role="group" aria-label="确认下线服务器">
+              <strong>{retirementPreview?.ready ? `确认下线 ${server.name}？` : `${server.name} 暂不能下线`}</strong>
+              {retirementPreview?.ready ? (
+                <>
+                  <span>评估未发现运行、排队或待归档任务；将删除项目、全局、SSH 和专用同步凭据。</span>
+                  {(retirementPreview.assessment.attention?.length ?? 0) > 0 && (
+                    <span>另有 {retirementPreview.assessment.attention?.length} 项失败或停止产物会随实例销毁而丢失。</span>
+                  )}
+                </>
+              ) : (
+                <ul className="rr-retirement-blockers">
+                  {(retirementPreview?.assessment.effective_blockers ?? []).map((blocker, index) => (
+                    <li key={`${blocker.code ?? "blocked"}-${blocker.run_id ?? index}`}>
+                      {retirementBlockerLabel(blocker.code)}
+                      {blocker.run_id ? `（${blocker.run_id}）` : ""}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div>
+                {retirementPreview?.ready && (
+                  <Button
+                    variant="danger"
+                    icon={retiring ? <LoaderCircle className="rr-spin" /> : <ServerOff />}
+                    isDisabled={panelBusy}
+                    onClick={retireSelectedServer}
+                  >
+                    {retiring ? "正在下线…" : "确认下线"}
+                  </Button>
+                )}
+                <Button variant="link" isDisabled={panelBusy} onClick={() => { setConfirmingRetirement(false); setRetirementPreview(null); }}>
+                  {retirementPreview?.ready ? "取消" : "关闭"}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button
+              variant="danger"
+              icon={previewingRetirement ? <LoaderCircle className="rr-spin" /> : <ServerOff />}
+              isDisabled={panelBusy}
+              onClick={previewSelectedServerRetirement}
+            >
+              {previewingRetirement ? "正在评估…" : "下线服务器"}
+            </Button>
+          )}
+        </section>
         <DescriptionList isHorizontal>
           <DetailGroup term="负载（1 / 5 / 15 分钟）" mono>{[server.load1, server.load5, server.load15].map((value) => typeof value === "number" ? value.toFixed(1) : "--").join(" / ")}</DetailGroup>
+          <DetailGroup term="实时内存" mono>{serverMemory(server)}</DetailGroup>
+          <DetailGroup term="内存使用率" mono>{liveMemoryPercent === null ? "--" : `${liveMemoryPercent.toFixed(1)}%`}</DetailGroup>
           <DetailGroup term="配置核心数" mono>{server.configured_cores ?? "--"}</DetailGroup>
           <DetailGroup term="配置内存" mono>{typeof server.configured_memory_gb === "number" ? `${server.configured_memory_gb} GB` : "--"}</DetailGroup>
           <DetailGroup term="远程核心数" mono>{server.remote_cores ?? "--"}</DetailGroup>

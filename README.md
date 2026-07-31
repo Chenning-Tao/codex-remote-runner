@@ -18,7 +18,7 @@ tested, but operators should review upgrades before applying them to active pool
 - Attached Codex waits that resume the originating App turn when the wait tool completes.
 - Interactive Textual and local browser dashboards with confirmed run stopping.
 - Controller-owned experiment registry with frozen bindings and verified results.
-- Explicit stop, cleanup, purge, server drain, and output archival workflows.
+- Explicit stop, cleanup, purge, server drain/retirement, and output archival workflows.
 
 ```text
 local CLI / Codex skill
@@ -49,7 +49,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.7.0'
+uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.8.0'
 remote-runner --help
 ```
 
@@ -97,9 +97,10 @@ remote-runner web --project-config /absolute/path/to/.remote-runner.yaml
 ```
 
 The command binds only to `127.0.0.1`, opens the system browser, and streams the
-same controller snapshot used by the TUI. Use `--no-open` to leave the browser
-closed or `--port PORT` to select another local port. The browser never receives
-SSH configuration. The details drawer can stop one exact queued or running
+same controller snapshot used by the TUI. Server rows include live load and
+physical-memory usage when the remote host exposes it. Use `--no-open` to leave
+the browser closed or `--port PORT` to select another local port. The browser
+never receives SSH configuration. The details drawer can stop one exact queued or running
 workload, change a queued workload's priority and eligible servers, and prepare
 its exact revision on a newly selected compatible server before enabling it. It
 can also switch queued work between the standard and test lanes and edit each
@@ -111,6 +112,12 @@ and optionally one compatible server set. Unselected settings remain unchanged.
 Queue writes use per-run controller revisions and a bounded preparation
 reservation so stale edits or work that has entered dispatch are rejected; batch
 operations report partial failures explicitly.
+Server details can also assess and permanently retire a machine after a second
+confirmation. The assessment covers every project under the controller root, actual
+runner processes, frozen queue candidates, and output archival. Retirement drains
+controller-wide admission and removes project, global, local SSH, and dedicated
+archive-source credentials while preserving shared login keys, history, runtime
+directories, and outputs.
 
 ## Experiment Registry
 
@@ -175,6 +182,8 @@ remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-...
 remote-runner tui --project-config /path/to/.remote-runner.yaml
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
+remote-runner retire-server --project-config /path/to/.remote-runner.yaml --server compute-a
+remote-runner retire-server --project-config /path/to/.remote-runner.yaml --server compute-a --apply
 ```
 
 In the TUI, select a running or queued workload and press `x` to review and confirm
