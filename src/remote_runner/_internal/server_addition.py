@@ -7,7 +7,11 @@ from .config import load_managed_project_config
 from .controller.client import call_controller
 from .execution_registry import resolve_project_config, validate_current_run_id
 from .pool import probe_project_pool
-from .source import DeploymentTarget, prepare_revision
+from .source import (
+    DeploymentTarget,
+    prepare_revision,
+    select_historical_source_repo,
+)
 from .submission import (
     _prepared_manifest,
     _reachable_targets,
@@ -81,6 +85,17 @@ def add(args: argparse.Namespace) -> dict[str, Any]:
             f"test workload server {args.server!r} is not in scheduling.testing.servers"
         )
 
+    source_override = getattr(args, "source_repo", None)
+    source = select_historical_source_repo(
+        config.local_repo,
+        (
+            resolve_source_repo(config.local_repo, source_override)
+            if source_override is not None
+            else None
+        ),
+        revisions=(revision,),
+    )
+
     pool = probe_project_pool(
         config,
         args.server_registry.expanduser(),
@@ -103,10 +118,9 @@ def add(args: argparse.Namespace) -> dict[str, Any]:
             f"test workload server {args.server!r} requires positive testing.slots"
         )
 
-    source_repo = resolve_source_repo(config.local_repo, args.source_repo)
     target = targets[0]
     preparation = prepare_revision(
-        source_repo,
+        source.source_repo,
         project_id=config.project_id,
         targets=[
             DeploymentTarget(
@@ -150,6 +164,7 @@ def add(args: argparse.Namespace) -> dict[str, Any]:
         "revision": revision,
         "requested_server": args.server,
         "prepared_servers": prepared_servers,
+        "source": source.audit(),
         "outcome": {
             "action": status,
             "added_servers": added_servers,

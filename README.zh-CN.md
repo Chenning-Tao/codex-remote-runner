@@ -91,7 +91,9 @@ Remote Runner 使用两个 YAML 文件：
 为一个已经配置的项目打开网页控制台：
 
 ```bash
-remote-runner web --project-config /absolute/path/to/.remote-runner.yaml
+remote-runner web \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --source-repo /absolute/path/to/clean/worktree
 ```
 
 控制台绑定在 `127.0.0.1`，可在服务器详情中直接设置控制器全局共享的
@@ -105,6 +107,13 @@ Standard/Test 并发任务数，也可以在排队任务详情中切换任务类
 共享登录密钥、历史记录、运行目录和输出仍会保留。
 
 该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示 controller snapshot。服务器列表会在远端主机提供数据时显示实时负载和物理内存使用量。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置。详情栏可以停止一个精确的排队中或运行中任务，也可以修改排队任务的类型、优先级和可用服务器；队列表格还可以跨页勾选多个任务，批量修改任务类型、优先级，并可选地统一为同一组兼容服务器。未选择的设置保持不变。如果新选择的兼容服务器尚未准备，Web 进程会先为任务的精确 revision 完成准备，再启用该服务器。队列写操作使用各任务自己的 controller revision 和有时限的准备租约，旧快照修改或已经进入调度的任务会被拒绝；批量操作会明确报告部分失败并保留失败项。
+
+当队列操作可能需要准备新服务器时，建议用 `--source-repo` 明确指定干净的本地
+worktree；后端只会从中推送每个 queued historical revision 的精确 commit。若省略
+该参数且配置的 `source.local_repo` dirty，历史队列扩容可以选择同一 Git common
+directory 已注册的 clean linked worktree。后端会逐个验证所需 commit 对象，并在
+结构化准备结果中报告所选路径和选择方式。整个过程不会 stash、commit、reset，
+也不会提交未提交文件；找不到可信 clean source 时准备失败，原队列设置保持不变。
 
 ## 运行
 

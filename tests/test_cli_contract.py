@@ -100,12 +100,16 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
     assert "--run-id" in prune_outputs_help
     assert "--server" in prune_outputs_help
     assert "--apply" in prune_outputs_help
-    assert "--server-registry" in help_text("sync-pool")
+    sync_pool_help = help_text("sync-pool")
+    assert "--server-registry" in sync_pool_help
+    assert "--source-repo" in sync_pool_help
     add_server_help = help_text("add-server")
     assert "--run-id" in add_server_help
     assert "--server" in add_server_help
+    assert "--source-repo" in add_server_help
     web_help = help_text("web")
     assert "--server-registry" in web_help
+    assert "--source-repo" in web_help
     assert "--port" in web_help
     assert "--no-open" in web_help
     assert "--server" in help_text("drain-server")

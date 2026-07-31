@@ -104,6 +104,7 @@ def request_queue_update(
         )
     )
 
+    source_preparations: list[dict[str, Any]] = []
     try:
         for server in missing:
             addition_args = argparse.Namespace(**vars(args))
@@ -111,19 +112,25 @@ def request_queue_update(
             addition_args.server = server
             addition_args.placement_token = token
             addition_args.target_workload_class = workload_class
-            server_addition.add(addition_args)
+            addition = server_addition.add(addition_args)
+            source = addition.get("source")
+            if isinstance(source, dict):
+                source_preparations.append({**source, "server": server})
         committed_payload = {
             **payload,
             "expected_revision": reserved_revision,
             "placement_token": token,
         }
-        return call_controller(
+        result = call_controller(
             config,
             "update-queued-job",
             timeout=args.timeout,
             action_args=("--run-id", validated_run_id),
             payload=committed_payload,
         )
+        if source_preparations:
+            result = {**result, "source_preparations": source_preparations}
+        return result
     except (OSError, RuntimeError, ValueError) as exc:
         try:
             call_controller(

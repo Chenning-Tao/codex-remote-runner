@@ -204,7 +204,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SERVER_REGISTRY,
     )
     web_parser.add_argument("--timeout", type=int, default=8)
-    web_parser.add_argument("--source-repo", type=Path)
+    web_parser.add_argument(
+        "--source-repo",
+        type=Path,
+        help="absolute clean Git worktree for queued historical revision preparation",
+    )
     web_parser.add_argument("--ssh-profile", default="auto")
     web_parser.add_argument("--prepare-timeout", type=_positive_int, default=60)
     web_parser.add_argument(
@@ -315,7 +319,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="prepare new automatic servers for queued all-server jobs",
     )
     _add_project_config(pool_sync_parser)
-    pool_sync_parser.add_argument("--source-repo", type=Path)
+    pool_sync_parser.add_argument(
+        "--source-repo",
+        type=Path,
+        help="absolute clean Git worktree containing every queued historical revision",
+    )
     pool_sync_parser.add_argument(
         "--server-registry",
         type=Path,
@@ -330,7 +338,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow one additional server for a queued run",
     )
     _add_project_config(add_server_parser)
-    add_server_parser.add_argument("--source-repo", type=Path)
+    add_server_parser.add_argument(
+        "--source-repo",
+        type=Path,
+        help="absolute clean Git worktree containing the queued historical revision",
+    )
     add_server_parser.add_argument(
         "--server-registry",
         type=Path,
