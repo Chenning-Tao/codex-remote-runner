@@ -24,10 +24,6 @@ remote:
     python: /srv/example/venv/bin/python
     output_root: /srv/archive/example
 
-parallelism:
-  default_arg: --num-workers
-  default_value: selected_server.cores
-
 scheduling:
   strategy: max_available_cores
   lease_seconds: 120

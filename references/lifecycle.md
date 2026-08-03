@@ -1,372 +1,81 @@
 # Lifecycle And Failure Handling
 
-Read this reference when interpreting monitor output, diagnosing transport,
-stopping work, or cleaning records.
-
-## Contents
-
-- [State Interpretation](#state-interpretation)
-- [Waiting For Terminal State](#waiting-for-terminal-state)
-- [Attached Codex Reporting](#attached-codex-reporting)
-- [Structured Workload Progress](#structured-workload-progress)
-- [Transport Diagnostics](#transport-diagnostics)
-- [Stop](#stop)
-- [Server Drain](#server-drain)
-- [Cleanup](#cleanup)
-- [Task Purge](#task-purge)
-- [Failed Run Purge](#failed-run-purge)
-- [Succeeded Output Sync](#succeeded-output-sync)
-- [Synchronized Source Output Pruning](#synchronized-source-output-pruning)
-
-## State Interpretation
-
-Queue state and execution authority are separate. A queued record may be
-`queued`, `dispatching`, `dispatched`, `failed`, or `stopped`; an execution may
-be `registered`, `running`, `succeeded`, `failed`, or `stopped`.
-
-Current records expose `workload_class` as `standard` or `test`. Historical
-records without it are standard. Live slot accounting counts only verified
-runner-owned processes whose remote status declares the test class.
-
-Treat `unknown`, `unreachable`, and `unsupported` only as observations. They do
-not overwrite authoritative state. A selected task with no matches returns an
-empty result rather than falling back to all records.
-
-The controller polls while durable work exists. Manual monitor is immediate and
-recovers its private dispatcher when necessary.
-
-An unfiltered monitor response is a bounded project overview. Its summary counts
-all authoritative records, while its queue and execution arrays contain at most
-20 compact active records each. `matched`, `returned`, and `omitted` make any
-truncation explicit.
-
-A task selector returns every queue and execution record for that task,
-including terminal records and full payloads, plus a task-scoped summary. A run
-selector returns the exact queue and execution record. There is no global
-full-history monitor mode; drill down from the overview by task or run.
-An exact run query also reports `output_sync.status`: `not_enqueued` while the
-run has not produced a sync intent, `pending` or `retryable` during archival,
-and `completed` only after the checksum-verified target receipt is committed.
-
-## Waiting For Terminal State
-
-Use the public wait command when the caller needs an automatic completion report:
-
-```bash
-remote-runner wait \
-  --project-config /absolute/path/to/.remote-runner.yaml \
-  --run-id rr-0123456789abcdef \
-  --until reportable
-```
-
-The first query performs an immediate monitor reconciliation and recovers the
-dispatcher when necessary. Later queries use bounded controller-local long polls and
-an opaque run-view etag, so waiting does not add a second high-frequency probe loop
-against compute servers. Each bounded poll can reconnect independently after an SSH
-failure.
-
-The aggregate run view keeps queue and execution authority separate. A current
-execution in `succeeded`, `failed`, or `stopped` is terminal. A queue-only `failed` or
-`stopped` record is terminal. `dispatched` without an execution, a terminal queue
-with an active execution, historical execution records, and other inconsistent
-combinations are `attention_required`, not completion. Missing and purged records
-also stop the wait without claiming a workload outcome. All three conditions return
-immediately with a nonzero exit so the caller can report or escalate them instead of
-silently polling forever.
-
-An active execution whose launch outcome remains unknown is also
-`attention_required`. Monitoring records the same condition when SSH is reachable and
-a stored running execution has neither its exact process group nor tmux session. This
-does not invent a terminal outcome: it exposes the verified authority/runtime
-conflict so an attached wait cannot remain pending forever. Unreachable or incomplete
-observations remain non-authoritative and do not trigger this condition.
-
-With the default `--until execution-terminal`, observing any authoritative terminal
-outcome is a successful wait operation, so the CLI exits zero even when the workload
-outcome is `failed` or `stopped`. Use `--until reportable` for user-facing completion:
-a succeeded output-backed run remains attached while output sync is `pending`,
-`retryable`, or `waiting_for_succeeded_state`, and completes only at `completed`.
-Runs with no sync intent, plus failed and stopped runs, return at execution terminal.
-Cancelled or unknown sync for a succeeded run returns `attention_required`.
-
-A wait deadline exits nonzero and leaves the durable run untouched. The final JSON
-reports `wait_status`, transport retry counts, and the aggregate `run_view`. State
-changes and unchanged long-poll timeouts are status-only stderr output; they are not
-completion signals. `run --wait` performs submission and the same wait in one command,
-printing the submitted run ID to stderr before waiting so an interruption can always
-resume that exact run instead of resubmitting it.
-
-Execution completion does not imply synchronized output availability. The final run
-view includes current output-sync status; select `--until reportable` whenever the
-consumer needs synchronized output before reporting or analysis. Progress remains a
-latest observation rather than a replayable controller event stream.
-
-## Attached Codex Reporting
-
-Keep `remote-runner run --wait` or `remote-runner wait` as an unfinished tool call in
-the originating Codex App turn. The CLI does not call Codex when the run finishes. It
-first reads the exact aggregate run view, then holds bounded controller `wait-run`
-requests keyed by that view's etag. The controller returns early when the view changes.
-An unchanged timeout only renews the CLI-to-controller transport; it does not complete
-the tool call, invoke the model, or add another compute-server probe loop.
-
-Only process exit plus the final authoritative stdout JSON is the completion signal.
-The App's normal tool-completion event then resumes the originating Codex turn. Codex
-can inspect existing logs or synchronized artifacts and produce the final response.
-That response is eligible for the App's ordinary unread and notification behavior.
-Remote Runner does not own or guarantee those UI signals. The App decides them from
-its own focus and notification state.
-
-Waiting therefore needs no model heartbeat. Do not react to stderr status by issuing
-`monitor` calls, and do not add a shell callback, standalone App Server, private App
-IPC, desktop database or cache write, deep link, or scheduled model/tool poll to bridge
-completion back into Codex.
-
-With neither `--max-wait` nor `--connection-grace`, the attached wait has no total
-duration limit and retries controller transport failures indefinitely with bounded
-backoff. These options are explicit local escape hatches: they end only the wait and
-never stop or alter the durable remote run. `Ctrl-C`, App termination, sleep, or a lost
-tool session likewise leaves the run intact; reattach using the same exact run ID.
-
-Use `--until reportable` for App-facing reports. A succeeded output-backed run remains
-attached until checksum-verified output synchronization is `completed`; failed and
-stopped runs return at terminal authority; missing, purged, and inconsistent authority
-return explicit attention states. For a cohort, submit all runs concurrently and then
-wait for every exact run ID before producing one combined report. If the originating
-App turn or tool session ends, state clearly that the run remains durable but no
-automatic App follow-up will occur; reattach with the exact run ID.
-
-## Structured Workload Progress
-
-Long-running producers emit one flushed line per update or heartbeat:
-
-```text
-[REMOTE_RUNNER_PROGRESS] {"schema_version":1,"scope":"c1_segment","stage":"decode","current":8000,"total":18000,"unit":"shots","elapsed_seconds":3600.0,"eta_seconds":4500.0,"sequence":12,"reported_at":"2026-07-21T12:00:00Z","heartbeat":false,"detail":{"errors":110,"segment_index":2}}
-```
-
-Version 1 has the following exact fields:
-
-- `schema_version`: integer `1`.
-- `scope`, `stage`, and `unit`: lowercase tokens matching
-  `[a-z][a-z0-9_.-]{0,63}`.
-- `current`: a nonnegative integer or `null`.
-- `total`: a positive integer or `null`; when set, `current` must be set and no
-  greater than `total`.
-- `elapsed_seconds`: a finite nonnegative number.
-- `eta_seconds`: a finite nonnegative number or `null`. Producers use `null`
-  rather than extrapolating against an unrelated safety ceiling.
-- `sequence`: a nonnegative integer that increases for each producer emission.
-- `reported_at`: an RFC 3339 UTC timestamp ending in `Z`.
-- `heartbeat`: a boolean distinguishing a repeated liveness record from a new
-  counter update.
-- `detail`: an optional object containing at most 32 lowercase keys and JSON
-  scalar values. Strings are limited to 256 characters.
-
-After a phase starts, producers should leave no more than 30 seconds between
-flushed events. This cadence updates the workload log only. It does not change
-the controller polling interval or create controller-side progress history.
-
-The monitor validates the newest prefixed line in its log window. A malformed
-newest event reports `progress.kind=invalid_progress`; absence of a valid v1
-line reports `unknown_eta`. Legacy `[PROGRESS]`, `shots=...`, and free-text
-`ETA=` records are intentionally not interpreted. Progress is observation only:
-it cannot mark a run succeeded, failed, stopped, or stale.
-
-## Transport Diagnostics
-
-All runner SSH uses BatchMode, configured aliases, bounded timeouts, and private
-stdin for commands or manifests.
-
-If SSH reports `Operation not permitted` while
-`CODEX_SANDBOX_NETWORK_DISABLED=1`, the local Codex execution sandbox blocked
-the nested network call. Rerun the same `remote-runner` command with network
-approval. An IP displayed by OpenSSH may simply be the configured alias after
-resolution; it does not show that SSH config was bypassed.
-
-Preserve genuine timeout, refusal, DNS, and authentication errors with their
-original stderr. When an SSH disconnect occurs after launch, stop, or cleanup
-may have started, preserve authority and report an unknown outcome.
-
-## Stop
-
-Stopping queued work cancels it before launch. Stopping running work proves the
-runner-owned process group, sends TERM, waits, and escalates only when needed.
-If ownership or termination cannot be verified, do not claim `stopped`.
-
-Retry a stop that collides with the narrow controller dispatch transaction only
-after that transaction resolves. Never preempt already running work through
-queue priority.
-
-## Server Drain
-
-Use `drain-server --server NAME` before server maintenance or retirement. The
-controller persists the drain at scheduler scope and excludes that server from new
-dispatches across every project under the controller root. This applies to existing
-queued jobs even when their immutable prepared-server snapshots contain the server.
-
-A drain does not stop or migrate executions already running there. A dispatch lease
-acquired immediately before the drain is already in flight; no lease can be acquired
-after the drain is committed. Use normal monitoring and stopping rules for existing
-executions. `resume-server --server NAME` removes the persistent drain and wakes the
-invoking project's dispatcher when matching work is queued.
-
-Use `retire-server --server NAME` for permanent removal from scheduling and managed
-connection configuration. It is an authoritative assessment and dry run unless
-`--apply` is present. The controller checks all projects under its root, the target's
-actual runner processes, frozen queue candidates, and output-sync state. Apply first
-commits the controller-wide drain, repeats the assessment, revokes dedicated source
-authorization when reachable, and removes project, global, local SSH, archive source,
-exclusive key-pair, and known-host entries from the previewed cleanup inventory.
-
-The command does not stop active work or delete remote runtime/output data; those
-conditions block retirement. Failed and stopped output paths are attention items so
-the operator can decide whether destroying the instance would discard anything still
-useful. An unreachable server is never treated as proof of safety. Use
-`--allow-unreachable` only after the instance is already offline; all other blockers
-remain authoritative. If a configuration file changes concurrently or a later phase
-fails, the drain and completed revocations remain in place and the command reports
-the exact partial state instead of overwriting newer configuration or claiming full
-completion.
-
-Controller-owned purge and synchronized-output pruning use maintenance leases. These
-remain available while a server is drained, share the same server-wide exclusion as
-dispatch leases, and never make the server eligible for new workload placement.
-
-## Cleanup
-
-Cleanup is dry-run by default. Review candidates, then pass `--apply` explicitly.
-Use `--run-id` to constrain deletion to one reviewed stopped record.
-
-For executions, cleanup requires authoritative stopped state, matching remote
-stopped evidence, and absence of the exact tmux session and process group. It
-removes only the remote `~/.rr/<run-id>` runtime and stopped controller record.
-It never deletes outputs, source worktrees, succeeded/failed records, or legacy
-evidence.
-
-## Task Purge
-
-Task purge is separate from stopped cleanup. Use it only after the user explicitly
-states that one exact stored task and all of its results are no longer
-needed. The dry run returns the correlated queue/execution inventory without
-changing state; `--apply` is the destructive step.
-
-The controller writes a permanent task tombstone before stopping work. New
-submissions and dispatch transitions for that exact task are rejected. Queued and
-running executions are stopped through controller authority; a dispatch collision
-or unknown stop outcome keeps the purge incomplete and retryable.
-
-After terminal and output-overlap checks, queue and execution records move into
-controller-owned staging so normal monitoring no longer returns them. A durable
-plan retains the coordinates needed for verified runtime, declared output,
-`artifacts/<run-id>`, receipt, and output-sync deletion. Runtime deletion requires
-matching remote terminal evidence plus absence of the exact tmux session and
-process group; output deletion rejects roots and symlinks.
-
-Each completed phase is idempotent. After remote cleanup, the event log is compacted
-under its lock, staged records are destroyed, and the tombstone becomes permanent.
-Transport ambiguity reports `attention_required`; retry the same command rather
-than claiming completion.
-
-A task containing any run referenced by an ingested experiment result is blocked
-before its purge tombstone is created. Keep the task until experiment-aware
-provenance tombstones can preserve the result's immutable run evidence.
-
-Remote worktrees are revision caches, not inherently task-owned. Purge removes a
-worktree only when no retained queue or execution references it and while holding a
-server dispatch lease. Shared or unprovable worktrees remain and are reported.
-Remote Git refs remain available for prepared manifests and require a separate
-source-cache garbage collection protocol.
-
-## Failed Run Purge
-
-Failed run purge is narrower than task purge and does not tombstone the
-containing task. It accepts one exact current run ID, is a dry run by
-default, and requires an explicit provenance policy on every invocation:
-
-```bash
-remote-runner purge-run \
-  --project-config /absolute/path/to/.remote-runner.yaml \
-  --run-id rr-0123456789abcdef \
-  --replacement-run-id rr-fedcba9876543210
-```
-
-Use `--no-replacement` instead only when the failed attempt was intentionally
-abandoned. The controller never infers a replacement from labels, timestamps,
-paths, tags, or task membership. Repeat the reviewed command with `--apply` to
-mutate state.
-
-An execution target must be authoritatively `failed`; a queue-only target must
-have a failed queue authority. Active, stopped, succeeded, legacy, malformed,
-or inconsistent records are rejected and are never converted into an eligible
-state. A named replacement must be a retained succeeded current execution in
-the same exact task. Its source revision, submitted-command digest, workload
-class, result intent/tags, and output metadata must match. Placement, resolved
-worker command, and physical output path may differ. This proves equality only
-for immutable inputs stored by remote-runner, not undeclared external inputs.
-
-Apply creates a permanent minimal run tombstone and a resumable per-run plan,
-then stages only the selected queue/execution evidence. It reuses task-purge's
-server-aware output-overlap, verified remote cleanup, worktree-reference, and
-event-compaction rules. Any exact, parent, or child overlap with a retained run
-blocks output deletion. Failed-state output-sync cancellation records may be
-removed, but evidence of a synchronized succeeded artifact blocks the purge.
-
-The completed tombstone preserves the deleted run ID, exact task, reason,
-provenance digests, and replacement/no-replacement decision. It stays outside
-normal monitoring, prevents run-ID reuse, and prevents an individually named
-replacement from later being purged. Successful task siblings, shared
-worktrees, and all Git refs remain.
-
-A failed run referenced by an ingested experiment result is not currently
-purgeable, even when the result has not been accepted. The preview and apply paths
-fail closed until experiment-aware provenance tombstones are available.
-
-Transport ambiguity returns `attention_required`; retry the exact same command,
-reason, and replacement policy. Once records have been staged, an older
-controller release cannot resume the new plan. Reinstall this or a newer
-release and retry. No rollback can restore output already verified and deleted.
-
-## Succeeded Output Sync
-
-When project `output_sync` is configured, a transition to authoritative
-`succeeded` writes one durable outbox intent for every run with a resolved output
-path. The state transition does not wait for network transfer. A separate controller
-worker notifies the configured target, and the target pulls the named
-source path into an isolated staging directory.
-
-The target commits `artifacts/<run-id>` only after a second rsync checksum dry-run
-reports no tree differences. It then writes a target receipt; only that verified
-receipt lets the controller remove the pending intent. Repeated notifications are
-safe: an existing target is checksummed again and acknowledged without another
-copy. Interrupted staging remains resumable.
-
-Failed and stopped runs are not enqueued. A succeeded run without an output path has
-nothing to synchronize. Sync failures remain retryable outbox state and never
-rewrite controller run authority. Canonical result publication remains a separate,
-explicit workflow.
-
-## Synchronized Source Output Pruning
-
-Use `prune-outputs` to reclaim compute-server storage without discarding the
-synchronized artifact or run history. It is a dry run by default, accepts an
-optional exact `--run-id`, and accepts repeated `--server` filters; `--apply`
-performs deletion.
-
-When `output_sync.prune_after_sync.servers` is configured, the output-sync worker
-applies the same guarded deletion automatically after archive verification and
-experiment-result ingestion. It retries lease, transport, and eligibility failures
-without weakening the completed synchronization receipt. Servers not in the
-explicit allow-list retain their source outputs.
-
-Only current, authoritatively succeeded runs with a completed checksum-verified
-sync receipt are eligible. The receipt identity, source server, source path, and
-revision must still match the retained execution manifest. Legacy outputs
-without a configured `output_root` and paths that overlap retained runs are
-blocked. Remote deletion requires a strict child of `output_root` and rejects
-protected runtime/worktree paths or any symlink traversal.
-
-After remote deletion, the completed receipt records the result and deletion
-time while preserving `artifacts/<run-id>`, the target receipt, controller run
-records, logs, and source worktrees. Repeating the command is idempotent. A
-transport-ambiguous result remains unmarked and should be retried; an already
-absent source path is then recorded as successfully reconciled.
+## State And Queries
+
+Queue and execution authority remain separate. Unfiltered monitor responses are bounded
+overviews; use an exact run ID or task ID for detail. Normal queries do not load all
+terminal history. Missing and internally purged run IDs are both reported as missing;
+minimal replay-prevention state is not model- or Web-facing.
+
+`unknown`, `unreachable`, and `unsupported` are observations and never overwrite an
+authoritative run state.
+
+## Explicit Waits
+
+Submission is detached by default. Use `wait` or `run --wait` only when requested.
+Waiting uses bounded controller-local long polls keyed by the exact run-view etag.
+Unchanged timeouts renew CLI transport without a model turn or compute-server polling
+loop. Final process exit and stdout JSON are the completion signal.
+
+`--until reportable` waits for checksum-verified output only when the execution outcome
+is `succeeded`. Failed and stopped runs return at execution terminal state; their
+checkpoint synchronization can continue independently.
+
+## Stop And Cleanup
+
+Stop one exact queued or running run through controller authority. Cleanup remains a
+dry run by default and removes only verified stopped runtime/records selected by the
+operator. Transport ambiguity is reported rather than converted into success.
+
+## Purge
+
+`purge-run` selects one exact failed run. It requires no replacement and makes no claim
+about scientific equivalence. `purge-task` preview expands to exact run IDs and freezes
+those IDs in its resumable plan. It creates no permanent task-name tombstone, so later
+runs may reuse the same task ID.
+
+`--apply` deletes controller queue/execution/event records. Artifact bytes are separate:
+add `--delete-artifacts --apply` to delete exclusively owned runtime, output, archive,
+receipt, and worktree data. Artifact deletion remains guarded by path normalization,
+overlap detection, terminal authority, and server maintenance leases.
+
+A minimal internal run-ID tombstone may prevent replay or ID reuse. It contains no
+replacement or scientific provenance and is invisible to status, Web, and run views.
+
+## Output Synchronization
+
+Every terminal run with a declared output path may enqueue transfer, including
+`failed` and `stopped` checkpoints. The target pulls one exact source path, verifies the
+transfer with an rsync checksum dry run, commits `artifacts/<run-id>`, and writes a
+receipt containing the original `authoritative_status`.
+
+Synchronization proves byte transport, path identity, checksum, and receipt. It never
+changes execution status and never declares scientific validity, eligibility, or an
+official result. Pruning source output requires a matching completed receipt and keeps
+the archive plus run history.
+
+## Boundary Migration
+
+The controller release that removes experiment management performs one bounded,
+idempotent migration during activation. With dispatch leases excluded and controller
+workers stopped, it moves the legacy experiment registry as opaque bytes into private
+controller `retired-state` storage. Normal status, Web, run views, and model-facing
+context never read that archive.
+The move holds the legacy registry lock and leaves a minimal private retirement
+marker at the former path, preventing an in-flight old binary from resurrecting the
+removed subsystem. Normal controller readers never expose the marker.
+
+Schema-1 pending output-sync intents are upgraded under the output-sync worker lock.
+The migration verifies the exact succeeded run record and shared transport identity,
+then drops retired scientific fields and records `authoritative_status=succeeded`.
+It never infers validity from the archived data. Identity mismatches, symlinks, or
+dual source/destination registries stop activation without overwriting either side;
+rerunning activation resumes already completed per-project and per-intent work.
+
+## Drain And Retirement
+
+Drain/resume controls controller-wide admission without stopping active work. Retirement
+uses one bounded preflight and an explicit preview/apply flow. Apply commits a drain,
+rechecks controller revision/state, and removes project/global runner configuration,
+exact local SSH blocks, known-host entries, and server-exclusive login/archive keys.
+Shared credentials are preserved. Remote Runner does not stop or destroy cloud instances.

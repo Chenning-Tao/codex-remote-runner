@@ -15,18 +15,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 from . import output_sync_remote
-from .experiment_contracts import normalize_run_binding
-from .result_metadata import (
-    LEGACY_RESULT_INTENT,
-    normalize_result_intent,
-    normalize_result_tags,
-)
 
 
 RUN_ID_RE = re.compile(r"^rr-[0-9a-f]{16}$")
 SERVER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 CONFIG_SCHEMA = 1
-INTENT_SCHEMA = 1
+INTENT_SCHEMA = 2
 
 PURGE_TARGET_PROGRAM = r"""import json
 import re
@@ -301,7 +295,8 @@ def _intent_from_manifest(
     manifest: dict[str, Any],
     *,
     state_revision: int,
-    succeeded_at: str,
+    authoritative_status: str,
+    terminal_at: str,
 ) -> dict[str, Any] | None:
     output_path = manifest.get("output_path")
     if output_path is None:
@@ -323,38 +318,29 @@ def _intent_from_manifest(
         "revision": revision,
         "task_id": str(manifest["task_id"]),
         "label": str(manifest["label"]),
-        "result_intent": normalize_result_intent(
-            manifest.get("result_intent", LEGACY_RESULT_INTENT),
-            allow_unclassified=True,
-            field="output-sync result_intent",
-        ),
-        "result_tags": normalize_result_tags(
-            manifest.get("result_tags", {}), field="output-sync result_tags"
-        ),
         "output_metadata": metadata,
-        "succeeded_at": succeeded_at,
+        "authoritative_status": authoritative_status,
+        "terminal_at": terminal_at,
         "state_revision": state_revision,
     }
-    raw_binding = manifest.get("experiment_binding")
-    if raw_binding is not None:
-        binding = normalize_run_binding(raw_binding)
-        if binding["run_id"] != run_id or binding["source_revision"] != revision:
-            raise ValueError("output-sync experiment binding identity mismatch")
-        intent["experiment_binding"] = binding
     return intent
 
 
-def enqueue_succeeded_output(
+def enqueue_terminal_output(
     registry_root: Path,
     manifest: dict[str, Any],
     *,
     state_revision: int,
-    succeeded_at: str,
+    authoritative_status: str,
+    terminal_at: str,
 ) -> Path | None:
+    if authoritative_status not in {"succeeded", "failed", "stopped"}:
+        raise ValueError("output-sync intent requires a terminal execution status")
     intent = _intent_from_manifest(
         manifest,
         state_revision=state_revision,
-        succeeded_at=succeeded_at,
+        authoritative_status=authoritative_status,
+        terminal_at=terminal_at,
     )
     if intent is None:
         return None
@@ -375,6 +361,7 @@ def enqueue_succeeded_output(
 def validate_intent(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict) or raw.get("schema_version") != INTENT_SCHEMA:
         raise ValueError("unsupported output-sync intent schema")
+    raw = dict(raw)
     run_id = _text(raw.get("run_id"), "intent.run_id")
     if RUN_ID_RE.fullmatch(run_id) is None:
         raise ValueError("output-sync intent has invalid run_id")
@@ -382,24 +369,12 @@ def validate_intent(raw: Any) -> dict[str, Any]:
     if SERVER_RE.fullmatch(source_server) is None:
         raise ValueError("output-sync intent has invalid source_server")
     _absolute_path(raw.get("source_path"), "intent.source_path")
-    for field in ("revision", "task_id", "label", "succeeded_at"):
+    for field in ("revision", "task_id", "label", "terminal_at"):
         _text(raw.get(field), f"intent.{field}")
-    raw["result_intent"] = normalize_result_intent(
-        raw.get("result_intent", LEGACY_RESULT_INTENT),
-        allow_unclassified=True,
-        field="intent.result_intent",
-    )
-    raw["result_tags"] = normalize_result_tags(
-        raw.get("result_tags", {}), field="intent.result_tags"
-    )
+    if raw.get("authoritative_status") not in {"succeeded", "failed", "stopped"}:
+        raise ValueError("intent.authoritative_status must be terminal")
     if not isinstance(raw.get("output_metadata"), dict):
         raise ValueError("output-sync intent output_metadata must be a mapping")
-    raw_binding = raw.get("experiment_binding")
-    if raw_binding is not None:
-        binding = normalize_run_binding(raw_binding)
-        if binding["run_id"] != run_id or binding["source_revision"] != raw["revision"]:
-            raise ValueError("output-sync intent experiment binding identity mismatch")
-        raw["experiment_binding"] = binding
     state_revision = raw.get("state_revision")
     if (
         isinstance(state_revision, bool)
@@ -408,6 +383,138 @@ def validate_intent(raw: Any) -> dict[str, Any]:
     ):
         raise ValueError("output-sync intent state_revision must be positive")
     return dict(raw)
+
+
+def _legacy_intent_payload(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        raise ValueError("unsupported legacy output-sync intent schema")
+    run_id = _text(raw.get("run_id"), "legacy intent.run_id")
+    if RUN_ID_RE.fullmatch(run_id) is None:
+        raise ValueError("legacy output-sync intent has invalid run_id")
+    source_server = _text(
+        raw.get("source_server"), "legacy intent.source_server"
+    )
+    if SERVER_RE.fullmatch(source_server) is None:
+        raise ValueError("legacy output-sync intent has invalid source_server")
+    source_path = _absolute_path(
+        raw.get("source_path"), "legacy intent.source_path"
+    )
+    revision = _text(raw.get("revision"), "legacy intent.revision")
+    task_id = _text(raw.get("task_id"), "legacy intent.task_id")
+    label = _text(raw.get("label"), "legacy intent.label")
+    succeeded_at = _text(
+        raw.get("succeeded_at"), "legacy intent.succeeded_at"
+    )
+    output_metadata = raw.get("output_metadata")
+    if not isinstance(output_metadata, dict):
+        raise ValueError("legacy output-sync intent output_metadata must be a mapping")
+    state_revision = raw.get("state_revision")
+    if (
+        isinstance(state_revision, bool)
+        or not isinstance(state_revision, int)
+        or state_revision < 1
+    ):
+        raise ValueError("legacy output-sync intent state_revision must be positive")
+    return {
+        "run_id": run_id,
+        "source_server": source_server,
+        "source_path": source_path,
+        "revision": revision,
+        "task_id": task_id,
+        "label": label,
+        "output_metadata": dict(output_metadata),
+        "succeeded_at": succeeded_at,
+        "state_revision": state_revision,
+    }
+
+
+def migrate_legacy_pending_intents(execution_paths: Any) -> dict[str, Any]:
+    """Upgrade schema-1 transport intents without retaining scientific metadata."""
+    from .execution_registry import load_current_run, registry_kind
+
+    paths = output_sync_paths(execution_paths.registry_root)
+    if paths.pending_dir.is_symlink():
+        raise ValueError("output-sync pending directory must not be a symlink")
+    if not paths.pending_dir.is_dir():
+        return {"scanned": 0, "migrated_run_ids": []}
+
+    migrated: list[str] = []
+    scanned = 0
+    with worker_lock(execution_paths.registry_root):
+        for path in sorted(paths.pending_dir.glob("rr-*.json")):
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(
+                    f"output-sync pending intent must be a regular file: {path.name}"
+                )
+            raw = _read_json(path)
+            scanned += 1
+            if raw.get("schema_version") == INTENT_SCHEMA:
+                current = validate_intent(raw)
+                if path.name != f"{current['run_id']}.json":
+                    raise ValueError(
+                        f"output-sync pending intent identity mismatch: {path.name}"
+                    )
+                continue
+
+            legacy = _legacy_intent_payload(raw)
+            run_id = str(legacy["run_id"])
+            if path.name != f"{run_id}.json":
+                raise ValueError(
+                    f"legacy output-sync pending intent identity mismatch: {path.name}"
+                )
+            if registry_kind(execution_paths, run_id) != "current":
+                raise ValueError(
+                    f"legacy output-sync run is not a current registry record: {run_id}"
+                )
+            manifest, state = load_current_run(execution_paths, run_id)
+            if state["status"] != "succeeded":
+                raise ValueError(
+                    f"legacy output-sync run is not succeeded: {run_id}"
+                )
+            revision = (
+                manifest.get("source_revision")
+                or manifest.get("expected_revision")
+                or "unknown"
+            )
+            terminal_at = str(state.get("finished_at") or state["updated_at"])
+            expected = {
+                "source_server": manifest["server"],
+                "source_path": manifest.get("output_path"),
+                "revision": revision,
+                "task_id": manifest["task_id"],
+                "label": manifest["label"],
+                "output_metadata": manifest["output_metadata"],
+                "succeeded_at": terminal_at,
+                "state_revision": state["revision"],
+            }
+            mismatches = sorted(
+                field
+                for field, expected_value in expected.items()
+                if legacy[field] != expected_value
+            )
+            if mismatches:
+                raise ValueError(
+                    "legacy output-sync intent does not match execution record "
+                    f"{run_id}: {', '.join(mismatches)}"
+                )
+            upgraded = validate_intent(
+                {
+                    "schema_version": INTENT_SCHEMA,
+                    "run_id": run_id,
+                    "source_server": legacy["source_server"],
+                    "source_path": legacy["source_path"],
+                    "revision": legacy["revision"],
+                    "task_id": legacy["task_id"],
+                    "label": legacy["label"],
+                    "output_metadata": legacy["output_metadata"],
+                    "authoritative_status": "succeeded",
+                    "terminal_at": terminal_at,
+                    "state_revision": legacy["state_revision"],
+                }
+            )
+            _write_json_atomic(path, upgraded)
+            migrated.append(run_id)
+    return {"scanned": scanned, "migrated_run_ids": migrated}
 
 
 def list_pending(registry_root: Path) -> list[dict[str, Any]]:
@@ -505,13 +612,10 @@ def invoke_target(
         "revision": intent["revision"],
         "task_id": intent["task_id"],
         "label": intent["label"],
-        "result_intent": intent["result_intent"],
-        "result_tags": intent["result_tags"],
         "output_metadata": intent["output_metadata"],
-        "succeeded_at": intent["succeeded_at"],
+        "authoritative_status": intent["authoritative_status"],
+        "terminal_at": intent["terminal_at"],
     }
-    if intent.get("experiment_binding") is not None:
-        payload["experiment_binding"] = intent["experiment_binding"]
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).decode("ascii")
@@ -677,79 +781,6 @@ def purge_run_sync_state(
     return results
 
 
-def _failed_run_sync_state_unlocked(
-    paths: OutputSyncPaths,
-    run_id: str,
-) -> dict[str, Any]:
-    evidence: list[str] = []
-    for name, directory in (
-        ("pending", paths.pending_dir),
-        ("state", paths.state_dir),
-    ):
-        path = directory / f"{run_id}.json"
-        if path.is_symlink():
-            raise ValueError(f"output-sync {name} path is a symlink: {run_id}")
-        if path.is_file():
-            evidence.append(name)
-        elif path.exists():
-            raise ValueError(f"output-sync {name} path is not a regular file: {run_id}")
-
-    completed = paths.completed_dir / f"{run_id}.json"
-    if completed.is_symlink():
-        raise ValueError(f"output-sync completed path is a symlink: {run_id}")
-    if completed.is_file():
-        value = _read_json(completed)
-        receipt = value.get("receipt")
-        if (
-            not isinstance(receipt, dict)
-            or receipt.get("run_id") != run_id
-            or receipt.get("disposition") != "cancelled_before_sync"
-            or receipt.get("authoritative_status") != "failed"
-        ):
-            raise ValueError(
-                "failed run has output-sync evidence that is not a failed-state "
-                "cancellation"
-            )
-        evidence.append("completed_cancelled")
-    elif completed.exists():
-        raise ValueError(f"output-sync completed path is not a regular file: {run_id}")
-    return {"run_id": run_id, "evidence": evidence}
-
-
-def inspect_failed_run_sync_state(
-    registry_root: Path,
-    run_id: str,
-) -> dict[str, Any]:
-    if RUN_ID_RE.fullmatch(run_id) is None:
-        raise ValueError("invalid failed-run output-sync id")
-    paths = output_sync_paths(registry_root)
-    return _failed_run_sync_state_unlocked(paths, run_id)
-
-
-def purge_failed_run_sync_state(
-    registry_root: Path,
-    run_id: str,
-) -> dict[str, Any]:
-    if RUN_ID_RE.fullmatch(run_id) is None:
-        raise ValueError("invalid failed-run output-sync id")
-    paths = output_sync_paths(registry_root)
-    with worker_lock(registry_root):
-        result = _failed_run_sync_state_unlocked(paths, run_id)
-        removed: list[str] = []
-        for name, directory in (
-            ("pending", paths.pending_dir),
-            ("completed", paths.completed_dir),
-            ("state", paths.state_dir),
-        ):
-            path = directory / f"{run_id}.json"
-            if path.is_file():
-                path.unlink()
-                removed.append(name)
-                _fsync_directory(directory)
-        result["removed_controller_state"] = removed
-        return result
-
-
 def _complete_intent(
     registry_root: Path,
     intent: dict[str, Any],
@@ -805,28 +836,18 @@ def process_pending_once(
                 if registry_kind(execution_paths, run_id) != "current":
                     raise ValueError("output-sync run is not a current registry record")
                 manifest, state = load_current_run(execution_paths, run_id)
-                if state["status"] in {"failed", "stopped"}:
-                    receipt = {
-                        "schema_version": 1,
-                        "run_id": run_id,
-                        "disposition": "cancelled_before_sync",
-                        "authoritative_status": state["status"],
-                        "source_deletion_performed": False,
-                    }
-                    _complete_intent(execution_paths.registry_root, intent, receipt)
-                    result["status"] = "cancelled"
-                    results.append(result)
-                    continue
-                if state["status"] != "succeeded":
+                if state["status"] not in {"succeeded", "failed", "stopped"}:
                     _record_attempt(
                         execution_paths.registry_root,
                         run_id,
-                        status="waiting_for_succeeded_state",
+                        status="waiting_for_terminal_state",
                         error=None,
                     )
                     result["status"] = "waiting"
                     results.append(result)
                     continue
+                if state["status"] != intent["authoritative_status"]:
+                    raise ValueError("output-sync execution status changed after enqueue")
                 if manifest.get("output_path") != intent["source_path"]:
                     raise ValueError("output-sync source path changed after enqueue")
                 if manifest.get("server") != intent["source_server"]:
@@ -878,7 +899,7 @@ def sync_status(registry_root: Path) -> dict[str, Any]:
         ),
         "retryable": sum(item.get("status") == "retryable" for item in states),
         "waiting": sum(
-            item.get("status") == "waiting_for_succeeded_state" for item in states
+            item.get("status") == "waiting_for_terminal_state" for item in states
         ),
     }
 
@@ -895,13 +916,8 @@ def run_sync_status(registry_root: Path, run_id: str) -> dict[str, Any]:
         receipt = completed.get("receipt")
         if completed.get("run_id") != run_id or not isinstance(receipt, dict):
             raise ValueError(f"completed output-sync receipt is invalid: {run_id}")
-        status = (
-            "cancelled"
-            if receipt.get("disposition") == "cancelled_before_sync"
-            else "completed"
-        )
         return {
-            "status": status,
+            "status": "completed",
             "confirmed_at": completed.get("confirmed_at"),
             "receipt": receipt,
         }
@@ -916,7 +932,7 @@ def run_sync_status(registry_root: Path, run_id: str) -> dict[str, Any]:
     attempt_status = attempt.get("status")
     status = (
         str(attempt_status)
-        if attempt_status in {"retryable", "waiting_for_succeeded_state"}
+        if attempt_status in {"retryable", "waiting_for_terminal_state"}
         else "pending"
     )
     return {

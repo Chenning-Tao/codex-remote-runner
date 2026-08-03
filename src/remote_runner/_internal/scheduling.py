@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import shlex
 from dataclasses import dataclass
 
 
 QUEUE_PRIORITIES = ("normal", "urgent")
 _QUEUE_PRIORITY_RANK = {name: rank for rank, name in enumerate(QUEUE_PRIORITIES)}
 WORKLOAD_CLASSES = ("standard", "test")
-WORKER_POLICIES = ("auto", "exact")
 
 
 def normalize_minimum_cores(value: object) -> int:
@@ -32,17 +30,6 @@ def normalize_workload_class(value: object) -> str:
         choices = ", ".join(WORKLOAD_CLASSES)
         raise ValueError(f"workload class must be one of: {choices}")
     return value
-
-
-def normalize_worker_policy(value: object) -> str:
-    if not isinstance(value, str) or value not in WORKER_POLICIES:
-        choices = ", ".join(WORKER_POLICIES)
-        raise ValueError(f"worker policy must be one of: {choices}")
-    return value
-
-
-def default_worker_policy(workload_class: object) -> str:
-    return "exact" if normalize_workload_class(workload_class) == "test" else "auto"
 
 
 @dataclass(frozen=True)
@@ -89,59 +76,3 @@ def should_queue(candidates: list[CapacityCandidate], *, active_runner_work: boo
     if not candidates:
         raise ValueError("at least one capacity candidate is required")
     return active_runner_work and all(candidate.available_cores <= 0 for candidate in candidates)
-
-
-def _worker_value(tokens: list[str], worker_arg: str) -> int | None:
-    prefix = worker_arg + "="
-    found: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token == worker_arg:
-            if index + 1 >= len(tokens):
-                raise ValueError(f"worker argument {worker_arg!r} has no value")
-            found.append(tokens[index + 1])
-            index += 2
-            continue
-        if token.startswith(prefix):
-            found.append(token[len(prefix) :])
-        index += 1
-    if not found:
-        return None
-    if len(found) != 1:
-        raise ValueError(f"worker argument {worker_arg!r} appears more than once")
-    try:
-        value = int(found[0])
-    except ValueError as exc:
-        raise ValueError(f"worker argument {worker_arg!r} must be an integer") from exc
-    if value <= 0:
-        raise ValueError(f"worker argument {worker_arg!r} must be positive")
-    return value
-
-
-def resolve_worker_command(
-    command: str,
-    *,
-    worker_arg: str,
-    configured_cores: int,
-) -> tuple[str, int, bool]:
-    if not command.strip() or "\x00" in command:
-        raise ValueError("command must be non-empty shell text without NUL bytes")
-    if not worker_arg.startswith("--") or any(char.isspace() for char in worker_arg):
-        raise ValueError("worker argument must be one long option without whitespace")
-    if configured_cores <= 0:
-        raise ValueError("configured cores must be positive")
-    try:
-        tokens = shlex.split(command, posix=True)
-    except ValueError as exc:
-        raise ValueError(f"command cannot be parsed for worker resolution: {exc}") from exc
-    explicit = _worker_value(tokens, worker_arg)
-    if explicit is not None:
-        return command, explicit, False
-    if "\n" in command or "\r" in command:
-        raise ValueError(
-            "automatic worker resolution requires a single-line command; "
-            "supply the worker argument explicitly for shell scripts"
-        )
-    resolved = f"{command.rstrip()} {shlex.quote(worker_arg)} {configured_cores}"
-    return resolved, configured_cores, True

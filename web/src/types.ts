@@ -54,9 +54,7 @@ export interface QueueJob {
   run_id?: string;
   label?: string;
   task_id?: string;
-  result_intent?: string;
   workload_class?: string;
-  worker_policy?: "auto" | "exact";
   queue_priority?: string;
   queue_position?: number;
   minimum_cores?: number;

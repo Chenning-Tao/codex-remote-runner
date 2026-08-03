@@ -41,15 +41,13 @@ def make_synchronized_run(tmp_path: Path) -> tuple[ControllerPaths, ProjectPaths
             project_config=paths.config_path,
             label="prune-test",
             task_id="task-1",
-            result_intent="candidate",
-            result_tags={},
             workload_class="standard",
             server="TENCENT",
             ssh="tencent",
             ssh_profile="intranet",
             configured_cores=8,
             minimum_cores=1,
-            workers=None,
+            assigned_cores=8,
             command="true\n",
             remote_workdir=str(worktree),
             project_python=sys.executable,
@@ -57,7 +55,6 @@ def make_synchronized_run(tmp_path: Path) -> tuple[ControllerPaths, ProjectPaths
             source_revision=REVISION,
             prepared_servers=["TENCENT"],
             submitted_command="true",
-            worker_defaulted=False,
             require_clean_worktree=True,
             output_root=OUTPUT_ROOT,
             output_relpath="run",
@@ -105,9 +102,8 @@ def make_synchronized_run(tmp_path: Path) -> tuple[ControllerPaths, ProjectPaths
             "target_path": f"/srv/archive/artifacts/{RUN_ID}",
             "revision": REVISION,
             "task_id": "task-1",
-            "result_intent": "candidate",
-            "result_tags": {},
-            "succeeded_at": intent["succeeded_at"],
+            "authoritative_status": "succeeded",
+            "terminal_at": intent["terminal_at"],
             "archived_at": "2026-07-24T00:01:00Z",
             "verification": "rsync_checksum_dry_run",
             "disposition": "copied_and_verified",
@@ -223,12 +219,6 @@ def test_output_sync_worker_prunes_configured_source_after_archival(
             or {"ok": True, "action": "removed_directory", "message": None}
         ),
     )
-    monkeypatch.setattr(
-        output_sync_worker,
-        "ingest_completed_sync_results",
-        lambda _paths: {"processed": 0},
-    )
-
     result = output_sync_worker.run_worker(
         paths,
         timeout=8,

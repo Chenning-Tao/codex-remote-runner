@@ -26,7 +26,6 @@ from .execution_registry import (
 )
 from .progress import parse_progress
 from .remote_shell import shell_quote_remote_path, ssh_capture
-from .result_metadata import legacy_result_metadata, stored_result_metadata
 from .tmux import exact_tmux_target, run_tmux_session
 
 
@@ -237,8 +236,6 @@ def _current_row(paths: ProjectPaths, run_id: str) -> dict[str, Any]:
         "server": manifest["server"],
         "ssh": manifest["ssh"],
         "task_id": manifest["task_id"],
-        "result_intent": manifest["result_intent"],
-        "result_tags": manifest["result_tags"],
         "workload_class": manifest.get("workload_class", "standard"),
         **_current_state_projection(state),
         "tmux_session": run_tmux_session(run_id),
@@ -278,10 +275,6 @@ def _historical_row(
             else remote_status_path_for_log(remote_log)
         )
     stored_status = state.get("status", manifest.get("status"))
-    try:
-        result_intent, result_tags = stored_result_metadata(manifest)
-    except ValueError:
-        result_intent, result_tags = legacy_result_metadata()
     return {
         "run_id": run_id,
         "label": manifest.get("label", run_id),
@@ -290,8 +283,6 @@ def _historical_row(
         "server": manifest.get("server"),
         "ssh": manifest.get("ssh"),
         "task_id": manifest.get("task_id"),
-        "result_intent": result_intent,
-        "result_tags": result_tags,
         "workload_class": manifest.get("workload_class", "standard"),
         "authoritative_status": None,
         "stored_status": stored_status,
@@ -310,6 +301,7 @@ def load_registry_rows(
     paths: ProjectPaths,
     *,
     only_run_id: str | None = None,
+    active_only: bool = False,
 ) -> list[dict[str, Any]]:
     if not paths.runs_dir.exists():
         return []
@@ -331,6 +323,8 @@ def load_registry_rows(
             )
             continue
         if flat.exists():
+            if active_only:
+                continue
             try:
                 rows.append(_historical_row(run_id, "legacy", flat, load_yaml(flat)))
             except (OSError, RuntimeError, ValueError) as exc:
@@ -339,16 +333,28 @@ def load_registry_rows(
 
         manifest_path = directory / "manifest.yaml"
         if not manifest_path.is_file():
+            if active_only:
+                continue
             rows.append(
                 _unsupported(run_id, "directory", directory, "missing manifest.yaml")
             )
             continue
+        if active_only:
+            state_path = directory / "state.yaml"
+            try:
+                state = load_yaml(state_path) if state_path.is_file() else {}
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if state.get("status") in TERMINAL_STATUSES:
+                continue
         try:
             manifest = load_yaml(manifest_path)
             schema = manifest.get("schema_version")
             if schema in {PREVIOUS_MANIFEST_SCHEMA, CURRENT_MANIFEST_SCHEMA}:
                 rows.append(_current_row(paths, run_id))
             elif schema == 2:
+                if active_only:
+                    continue
                 state_path = directory / "state.yaml"
                 state = load_yaml(state_path) if state_path.is_file() else {}
                 rows.append(
@@ -677,9 +683,6 @@ def query_controller(args: argparse.Namespace) -> dict[str, Any]:
         action_args += ("--run-id", args.run_id)
     elif args.task_id is not None:
         action_args += ("--task-id", args.task_id)
-    result_intent = getattr(args, "result_intent", None)
-    if result_intent is not None:
-        action_args += ("--result-intent", result_intent)
     return call_controller(
         config,
         "status",

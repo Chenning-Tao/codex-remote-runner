@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def test_release_source_requires_one_clean_full_revision(tmp_path: Path) -> None
         release.resolve_clean_revision(repo)
 
 
-def test_release_constraints_include_human_interface_extras(
+def test_release_constraints_include_web_extra(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -85,7 +86,7 @@ def test_release_constraints_include_human_interface_extras(
         for index, value in enumerate(export)
         if value == "--extra"
     ]
-    assert extras == ["tui", "web"]
+    assert extras == ["web"]
 
 
 def test_local_tool_install_is_non_editable_and_constrained(
@@ -137,7 +138,7 @@ def test_local_tool_install_is_non_editable_and_constrained(
             "3.12",
             "--constraints",
             str(constraints),
-            f"{wheel}[tui,web]",
+            f"{wheel}[web]",
         ],
         ["uv", "tool", "dir"],
         ["uv", "tool", "dir", "--bin"],
@@ -145,7 +146,6 @@ def test_local_tool_install_is_non_editable_and_constrained(
             str(tool_dir / "codex-remote-runner" / "bin" / "python"),
             "-c",
             (
-                "import rich; import textual; import remote_runner.tui; "
                 "from remote_runner.web_app import STATIC_ROOT; "
                 "assert (STATIC_ROOT / 'index.html').is_file()"
             ),
@@ -277,6 +277,30 @@ def staged_release(controller_root: Path, revision: str) -> Path:
     return release_root
 
 
+def test_release_activation_stops_dispatch_and_output_sync_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(release_gate, "resolve_tmux_executable", lambda: "tmux")
+
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(release_gate.subprocess, "run", run)
+
+    assert release_gate._stop_controller_workers(["example"]) == {
+        "dispatchers": ["example"],
+        "output_sync_workers": ["example"],
+    }
+    assert calls == [
+        ["tmux", "has-session", "-t", "=rr-dispatch-example"],
+        ["tmux", "kill-session", "-t", "=rr-dispatch-example"],
+        ["tmux", "has-session", "-t", "=rr-output-sync-example"],
+        ["tmux", "kill-session", "-t", "=rr-output-sync-example"],
+    ]
+
+
 def test_active_dispatch_lease_blocks_release_activation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -294,7 +318,7 @@ def test_active_dispatch_lease_blocks_release_activation(
     )
     monkeypatch.setattr(
         release_gate,
-        "_stop_dispatchers",
+        "_stop_controller_workers",
         lambda _projects: pytest.fail("dispatcher must not stop while a lease is active"),
     )
 
@@ -304,7 +328,7 @@ def test_active_dispatch_lease_blocks_release_activation(
     assert not (root / "runner" / "current").exists()
 
 
-def test_release_activation_switches_only_runner_pointer(
+def test_release_activation_switches_runner_pointer_and_migrates_retired_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -316,7 +340,17 @@ def test_release_activation_switches_only_runner_pointer(
     project.mkdir(parents=True)
     evidence = project / "evidence.bin"
     evidence.write_bytes(b"durable-state")
-    monkeypatch.setattr(release_gate, "_stop_dispatchers", lambda projects: list(projects))
+    legacy = project / ".remote-runner" / "experiments"
+    legacy.mkdir(parents=True)
+    (legacy / "registry.sqlite3").write_bytes(b"opaque-history")
+    monkeypatch.setattr(
+        release_gate,
+        "_stop_controller_workers",
+        lambda projects: {
+            "dispatchers": list(projects),
+            "output_sync_workers": list(projects),
+        },
+    )
 
     result = release_gate.activate_release(root, revision)
 
@@ -325,7 +359,66 @@ def test_release_activation_switches_only_runner_pointer(
     assert current.readlink() == Path("releases") / revision
     assert result["revision"] == revision
     assert result["projects"] == ["example"]
+    assert result["stopped_dispatchers"] == ["example"]
+    assert result["stopped_output_sync_workers"] == ["example"]
     assert evidence.read_bytes() == b"durable-state"
+    assert legacy.is_file()
+    retired = (
+        root
+        / "retired-state"
+        / "experiment-registry-v1"
+        / "example"
+        / "registry.sqlite3"
+    )
+    assert retired.read_bytes() == b"opaque-history"
+    assert json.loads(legacy.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "status": "retired",
+        "destination": str(retired.parent),
+    }
+    assert result["state_migrations"] == [
+        {
+            "project_id": "example",
+            "output_sync": {"scanned": 0, "migrated_run_ids": []},
+            "retired_experiment_registry": {
+                "status": "archived",
+                "destination": str(retired.parent),
+            },
+        }
+    ]
+
+
+def test_retired_experiment_registry_migration_is_idempotent(tmp_path: Path) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    source = paths.registry_root / "experiments"
+    source.mkdir(parents=True)
+    (source / "journal").mkdir()
+    (source / "journal" / "event.json").write_bytes(b"opaque-event")
+
+    first = release_gate._archive_legacy_experiment_registry(paths)
+    second = release_gate._archive_legacy_experiment_registry(paths)
+
+    destination = (
+        paths.root / "retired-state" / "experiment-registry-v1" / "example"
+    )
+    assert first == {"status": "archived", "destination": str(destination)}
+    assert second == {"status": "already_migrated", "destination": str(destination)}
+    assert (destination / "journal" / "event.json").read_bytes() == b"opaque-event"
+    assert (paths.registry_root / "experiments").is_file()
+
+
+def test_retired_experiment_registry_migration_rejects_conflict(
+    tmp_path: Path,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    (paths.registry_root / "experiments").mkdir(parents=True)
+    destination = (
+        paths.root / "retired-state" / "experiment-registry-v1" / "example"
+    )
+    destination.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="both exist"):
+        release_gate._archive_legacy_experiment_registry(paths)
 
 
 def test_release_activation_rejects_mismatched_receipt(

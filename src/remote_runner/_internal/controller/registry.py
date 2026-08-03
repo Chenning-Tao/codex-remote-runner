@@ -23,23 +23,15 @@ from ..execution_registry import (
     validate_current_run_id,
     write_yaml,
 )
-from ..experiment_contracts import normalize_run_binding
 from ..output_paths import (
     normalize_absolute_output_path,
     normalize_output_relpath,
     normalize_output_root,
 )
 from ..output_sync import validate_config_payload
-from ..result_metadata import (
-    LEGACY_RESULT_INTENT,
-    normalize_result_intent,
-    normalize_result_tags,
-)
 from ..scheduling import (
-    default_worker_policy,
     normalize_minimum_cores,
     normalize_queue_priority,
-    normalize_worker_policy,
     normalize_workload_class,
     queue_priority_rank,
 )
@@ -63,7 +55,6 @@ class ControllerPaths:
     config_path: Path
     registry_root: Path
     queue_dir: Path
-    task_tombstones_dir: Path
     task_purges_dir: Path
     run_tombstones_dir: Path
     run_purges_dir: Path
@@ -106,7 +97,6 @@ def controller_paths(root: Path, project_id: str) -> ControllerPaths:
         config_path=project_root / ".remote-runner.yaml",
         registry_root=registry_root,
         queue_dir=registry_root / "queue",
-        task_tombstones_dir=registry_root / "task-tombstones",
         task_purges_dir=registry_root / "task-purges",
         run_tombstones_dir=registry_root / "run-tombstones",
         run_purges_dir=registry_root / "run-purges",
@@ -362,12 +352,6 @@ def task_identity_digest(task_id: object) -> str:
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
-def task_tombstone_path(paths: ControllerPaths, task_id: object) -> Path:
-    if paths.task_tombstones_dir.is_symlink():
-        raise ValueError("task tombstones root must not be a symlink")
-    return paths.task_tombstones_dir / f"{task_identity_digest(task_id)}.yaml"
-
-
 def task_purge_dir(paths: ControllerPaths, task_id: object) -> Path:
     if paths.task_purges_dir.is_symlink():
         raise ValueError("task purges root must not be a symlink")
@@ -405,40 +389,12 @@ def _load_run_tombstone_unlocked(
     if path.is_symlink():
         raise ValueError(f"run tombstone must not be a symlink: {path}")
     tombstone = load_yaml(path)
-    if tombstone.get("schema_version") != 1:
+    if tombstone.get("schema_version") not in {1, 2}:
         raise ValueError(f"unsupported run tombstone schema: {path}")
     if tombstone.get("run_id") != validated:
         raise ValueError(f"run tombstone identity mismatch: {path}")
-    validate_task_identity(tombstone.get("task_id"))
     if tombstone.get("status") not in {"purging", "purged"}:
         raise ValueError(f"invalid run tombstone status: {path}")
-    policy = tombstone.get("replacement_policy")
-    replacement_run_id = tombstone.get("replacement_run_id")
-    if policy == "replacement":
-        if not isinstance(replacement_run_id, str):
-            raise ValueError(f"replacement tombstone has no run id: {path}")
-        validate_current_run_id(replacement_run_id)
-    elif policy == "explicit_none":
-        if replacement_run_id is not None:
-            raise ValueError(f"explicit-none tombstone has a replacement: {path}")
-    else:
-        raise ValueError(f"invalid run tombstone replacement policy: {path}")
-    for field in ("target_provenance_sha256",):
-        value = tombstone.get(field)
-        if not isinstance(value, str) or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}", value
-        ):
-            raise ValueError(f"invalid run tombstone {field}: {path}")
-    replacement_digest = tombstone.get("replacement_provenance_sha256")
-    if policy == "replacement" and replacement_digest is None:
-        raise ValueError(f"replacement tombstone has no provenance digest: {path}")
-    if policy == "explicit_none" and replacement_digest is not None:
-        raise ValueError(f"explicit-none tombstone has replacement provenance: {path}")
-    if replacement_digest is not None and (
-        not isinstance(replacement_digest, str)
-        or not re.fullmatch(r"sha256:[0-9a-f]{64}", replacement_digest)
-    ):
-        raise ValueError(f"invalid replacement provenance digest: {path}")
     return tombstone
 
 
@@ -450,115 +406,23 @@ def load_run_tombstone(
         return _load_run_tombstone_unlocked(paths, run_id)
 
 
-def _purging_run_for_task_unlocked(
-    paths: ControllerPaths,
-    task_id: str,
-) -> str | None:
-    if not paths.run_tombstones_dir.is_dir():
-        return None
-    if paths.run_tombstones_dir.is_symlink():
-        raise ValueError("run tombstones root must not be a symlink")
-    for path in sorted(paths.run_tombstones_dir.glob("rr-*.yaml")):
-        run_id = path.stem
-        tombstone = _load_run_tombstone_unlocked(paths, run_id)
-        if (
-            tombstone is not None
-            and tombstone["status"] == "purging"
-            and tombstone["task_id"] == task_id
-        ):
-            return run_id
-    return None
-
-
-def _replacement_dependent_unlocked(
-    paths: ControllerPaths,
-    run_id: str,
-) -> str | None:
-    validated = validate_current_run_id(run_id)
-    if not paths.run_tombstones_dir.is_dir():
-        return None
-    if paths.run_tombstones_dir.is_symlink():
-        raise ValueError("run tombstones root must not be a symlink")
-    for path in sorted(paths.run_tombstones_dir.glob("rr-*.yaml")):
-        tombstone = _load_run_tombstone_unlocked(paths, path.stem)
-        if tombstone is not None and tombstone.get("replacement_run_id") == validated:
-            return str(tombstone["run_id"])
-    return None
-
-
-def replacement_dependent(
-    paths: ControllerPaths,
-    run_id: str,
-) -> str | None:
-    with _queue_lock(paths):
-        return _replacement_dependent_unlocked(paths, run_id)
-
-
 def create_run_tombstone(
     paths: ControllerPaths,
     run_id: str,
     *,
-    task_id: object,
-    reason: str,
-    replacement_policy: str,
-    replacement_run_id: str | None,
-    target_provenance_sha256: str,
-    replacement_provenance_sha256: str | None,
     now: str | None = None,
 ) -> dict[str, Any]:
     validated_run_id = validate_current_run_id(run_id)
-    identity = validate_task_identity(task_id)
-    if (
-        not isinstance(reason, str)
-        or not reason.strip()
-        or "\x00" in reason
-        or "\n" in reason
-        or "\r" in reason
-        or len(reason) > 512
-    ):
-        raise ValueError("run purge reason must be a single line of at most 512 chars")
-    if replacement_policy == "replacement":
-        validated_replacement = validate_current_run_id(str(replacement_run_id))
-        if replacement_provenance_sha256 is None:
-            raise ValueError("replacement purge policy requires provenance evidence")
-    elif replacement_policy == "explicit_none":
-        if replacement_run_id is not None or replacement_provenance_sha256 is not None:
-            raise ValueError("explicit-none purge policy cannot include a replacement")
-        validated_replacement = None
-    else:
-        raise ValueError("invalid run purge replacement policy")
-    for value in (target_provenance_sha256, replacement_provenance_sha256):
-        if value is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
-            raise ValueError("run purge provenance digest must be sha256")
     with _queue_lock(paths):
         existing = _load_run_tombstone_unlocked(paths, validated_run_id)
         if existing is not None:
             return existing
-        if _load_task_tombstone_unlocked(paths, identity) is not None:
-            raise RuntimeError("cannot purge one run while its task is purging")
-        dependent = _replacement_dependent_unlocked(paths, validated_run_id)
-        if dependent is not None:
-            raise RuntimeError(
-                f"run is retained as replacement provenance for {dependent}"
-            )
-        if (
-            validated_replacement is not None
-            and _load_run_tombstone_unlocked(paths, validated_replacement) is not None
-        ):
-            raise RuntimeError("replacement run is already purging or purged")
         tombstone = {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": validated_run_id,
-            "task_id": identity,
             "status": "purging",
-            "reason": reason,
-            "replacement_policy": replacement_policy,
-            "replacement_run_id": validated_replacement,
-            "target_provenance_sha256": target_provenance_sha256,
-            "replacement_provenance_sha256": replacement_provenance_sha256,
             "created_at": now or utc_now(),
             "completed_at": None,
-            "resource_summary": None,
         }
         write_yaml(run_tombstone_path(paths, validated_run_id), tombstone)
         return tombstone
@@ -568,7 +432,6 @@ def complete_run_tombstone(
     paths: ControllerPaths,
     run_id: str,
     *,
-    resource_summary: dict[str, Any],
     now: str | None = None,
 ) -> dict[str, Any]:
     validated = validate_current_run_id(run_id)
@@ -582,98 +445,8 @@ def complete_run_tombstone(
             **tombstone,
             "status": "purged",
             "completed_at": now or utc_now(),
-            "resource_summary": resource_summary,
         }
         write_yaml(run_tombstone_path(paths, validated), updated)
-        return updated
-
-
-def _load_task_tombstone_unlocked(
-    paths: ControllerPaths,
-    task_id: object,
-) -> dict[str, Any] | None:
-    identity = validate_task_identity(task_id)
-    path = task_tombstone_path(paths, identity)
-    if not path.is_file():
-        return None
-    if path.is_symlink():
-        raise ValueError(f"task tombstone must not be a symlink: {path}")
-    tombstone = load_yaml(path)
-    if tombstone.get("schema_version") != 1:
-        raise ValueError(f"unsupported task tombstone schema: {path}")
-    if tombstone.get("task_id") != identity:
-        raise ValueError(f"task tombstone identity mismatch: {path}")
-    return tombstone
-
-
-def load_task_tombstone(
-    paths: ControllerPaths,
-    task_id: object,
-) -> dict[str, Any] | None:
-    with _queue_lock(paths):
-        return _load_task_tombstone_unlocked(paths, task_id)
-
-
-def is_task_tombstoned(paths: ControllerPaths, task_id: object) -> bool:
-    identity = validate_task_identity(task_id)
-    return task_tombstone_path(paths, identity).is_file()
-
-
-def create_task_tombstone(
-    paths: ControllerPaths,
-    task_id: object,
-    *,
-    reason: str,
-    now: str | None = None,
-) -> dict[str, Any]:
-    identity = validate_task_identity(task_id)
-    if (
-        not isinstance(reason, str)
-        or not reason.strip()
-        or "\x00" in reason
-        or "\n" in reason
-        or "\r" in reason
-        or len(reason) > 512
-    ):
-        raise ValueError("task purge reason must be a single line of at most 512 chars")
-    with _queue_lock(paths):
-        existing = _load_task_tombstone_unlocked(paths, identity)
-        if existing is not None:
-            return existing
-        purging_run = _purging_run_for_task_unlocked(paths, identity)
-        if purging_run is not None:
-            raise RuntimeError(
-                f"cannot purge a task while one of its runs is purging: {purging_run}"
-            )
-        tombstone = {
-            "schema_version": 1,
-            "task_id": identity,
-            "status": "purging",
-            "reason": reason,
-            "created_at": now or utc_now(),
-            "completed_at": None,
-        }
-        write_yaml(task_tombstone_path(paths, identity), tombstone)
-        return tombstone
-
-
-def complete_task_tombstone(
-    paths: ControllerPaths,
-    task_id: object,
-    *,
-    now: str | None = None,
-) -> dict[str, Any]:
-    identity = validate_task_identity(task_id)
-    with _queue_lock(paths):
-        tombstone = _load_task_tombstone_unlocked(paths, identity)
-        if tombstone is None:
-            raise FileNotFoundError(f"task tombstone does not exist: {identity}")
-        updated = {
-            **tombstone,
-            "status": "purged",
-            "completed_at": now or utc_now(),
-        }
-        write_yaml(task_tombstone_path(paths, identity), updated)
         return updated
 
 
@@ -694,7 +467,6 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
         "task_id",
         "submitted_command",
         "submitted_command_sha256",
-        "worker_arg",
         "created_at",
     ):
         value = job.get(field)
@@ -728,24 +500,6 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
         job["workload_class"] = "standard"
     else:
         job["workload_class"] = normalize_workload_class(job["workload_class"])
-    if "worker_policy" not in job:
-        job["worker_policy"] = default_worker_policy(job["workload_class"])
-    else:
-        job["worker_policy"] = normalize_worker_policy(job["worker_policy"])
-    if schema >= QUEUE_SCHEMA:
-        if "result_intent" not in job or "result_tags" not in job:
-            raise ValueError(
-                "queued job result_intent and result_tags fields are required"
-            )
-        job["result_intent"] = normalize_result_intent(
-            job["result_intent"], field="queued job result_intent"
-        )
-        job["result_tags"] = normalize_result_tags(
-            job["result_tags"], field="queued job result_tags"
-        )
-    else:
-        job["result_intent"] = LEGACY_RESULT_INTENT
-        job["result_tags"] = {}
     if "minimum_cores" not in job:
         job["minimum_cores"] = 1
     else:
@@ -868,25 +622,6 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("queued all-server job requires a portable relative output")
     job["output_relpath"] = output_relpath
     job["output_path"] = output_path
-    raw_binding = job.get("experiment_binding")
-    if raw_binding is None:
-        job["experiment_binding"] = None
-    else:
-        binding = normalize_run_binding(raw_binding)
-        if binding["run_id"] != job["run_id"]:
-            raise ValueError("queued experiment binding run_id mismatch")
-        if binding["source_revision"] != job["revision"]:
-            raise ValueError("queued experiment binding source_revision mismatch")
-        if binding["expects_result_manifest"]:
-            if output_relpath is None or output_sync is None:
-                raise ValueError(
-                    "result-producing experiment binding requires synchronized output"
-                )
-            if job["result_intent"] != "candidate":
-                raise ValueError(
-                    "result-producing experiment binding requires candidate result intent"
-                )
-        job["experiment_binding"] = binding
     return job
 
 
@@ -961,11 +696,6 @@ def submit_job(
     _ensure_controller_tree(paths)
     _private_tree(paths.queue_dir)
     with _queue_lock(paths):
-        tombstone = _load_task_tombstone_unlocked(paths, job["task_id"])
-        if tombstone is not None:
-            raise ValueError(
-                f"task has been purged and cannot accept new runs: {job['task_id']}"
-            )
         if _load_run_tombstone_unlocked(paths, run_id) is not None:
             raise ValueError(f"run id has been purged and cannot be reused: {run_id}")
         destination = _queue_entry_dir(paths, run_id)
@@ -1029,7 +759,6 @@ def list_queued(
         row
         for row in source
         if row[1]["status"] == "queued"
-        and not is_task_tombstoned(paths, row[0]["task_id"])
     ]
     return sorted(
         rows,
@@ -1211,11 +940,7 @@ def update_queued_job(
         if placement_token is not None and not has_active_reservation:
             raise RuntimeError("queue update reservation expired")
 
-        queued_rows = [
-            row
-            for row in list_jobs(paths, statuses={"queued"})
-            if _load_task_tombstone_unlocked(paths, row[0]["task_id"]) is None
-        ]
+        queued_rows = list_jobs(paths, statuses={"queued"})
         updated_job = dict(job)
         changed = has_active_reservation
         ordering_changed = False
@@ -1648,15 +1373,10 @@ def transition_queued_state(
         "stopped": set(),
     }
     with _queue_lock(paths):
-        job, state = load_job(paths, run_id)
+        _job, state = load_job(paths, run_id)
         if int(state["revision"]) != expected_revision:
             raise RuntimeError("queued state revision conflict")
         current = str(state["status"])
-        if (
-            status == "dispatching"
-            and _load_task_tombstone_unlocked(paths, job["task_id"]) is not None
-        ):
-            raise RuntimeError("cannot dispatch a tombstoned task")
         if status != current and status not in allowed[current]:
             raise ValueError(f"illegal queued state transition {current} -> {status}")
         updated = dict(state)

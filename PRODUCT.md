@@ -33,24 +33,22 @@ lifecycle operations across a project-owned server pool.
   tests from the CLI or the Codex skill.
 - A controller coordinates placement and durable state over trusted SSH
   infrastructure.
-- Users inspect the pool through the CLI, Textual TUI, or local web dashboard.
+- Users inspect the pool through the CLI or local web dashboard.
 - Scientific programs may use the existing progress-reporting interface, but
   they are never required to integrate with it.
 - Results may be synchronized to a configured archive target.
-- Projects may publish generic experiment designs that bind exact run revisions
-  to logical points and ingest bounded structured results from verified output
-  synchronization.
+- Workload commands, output metadata, metrics, and scientific decisions remain
+  opaque to Remote Runner.
 
 ## Capabilities and Constraints
 
 - The current web dashboard is single-project and bound to the local machine. It
-  streams the same controller snapshot used by the TUI, can stop one exact
+  streams the controller snapshot, can stop one exact
   queued or running workload after explicit confirmation, and can modify one or
   several selected workloads while they remain queued.
-- The dashboard also has a read-only Experiments section. Its study progress,
-  result tables, curves, point matrix, and detail drawer come from bounded
-  controller queries. Only an explicit accepted-result pointer supplies an
-  official value; stale or merely recent results never fill current views.
+- The dashboard is an operations console for status, stop, queue priority,
+  workload class, eligible servers, batch edits, capacity slots, drain/resume,
+  and guarded retirement. It has no experiment or scientific-result registry.
 - Progress is optional. When a program does not report progress, the interface
   shows authoritative lifecycle state without an empty or fabricated progress
   field.
@@ -58,6 +56,17 @@ lifecycle operations across a project-owned server pool.
   queue-start prediction. The web interface must not imply those predictions.
 - The controller, not the browser, owns queue order, capacity ranking,
   placement, and durable lifecycle state.
+- Submission is detached by default. Explicit waits use controller long polling
+  outside the model; status queries and synchronization never trigger model polling.
+- Commands are executed unchanged. The selected core allocation is exposed as
+  `RR_ASSIGNED_CORES` for the workload to interpret.
+- Output synchronization proves byte transport, path identity, checksum, and
+  receipt. It may preserve failed/stopped checkpoints and never rewrites execution
+  status or declares scientific validity.
+- Controller release activation performs the bounded state migration for this
+  boundary change: removed experiment-registry bytes leave active project state,
+  and legacy pending transfer intents are upgraded only after matching exact run
+  and execution records. Retired bytes are not exposed through normal APIs or Web.
 - The current release targets macOS and Linux and trusted project
   infrastructure, not hostile multi-tenant scheduling.
 - Queued workloads support controller-owned manual ordering, `urgent`/`normal`
@@ -111,8 +120,8 @@ lifecycle operations across a project-owned server pool.
 2. Keep research code integration optional and non-invasive.
 3. Make exact runs and their server placement easy to recover and inspect.
 4. Keep lifecycle behavior reproducible, durable, and explicit.
-5. Add control and research-management features without weakening the existing
-   controller ownership model.
+5. Keep scientific workflow and cross-session decisions outside the runner;
+   external systems cite exact run IDs instead of copying run records.
 
 ## Accessibility & Inclusion
 

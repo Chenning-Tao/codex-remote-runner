@@ -10,7 +10,7 @@ from ..execution_registry import (
     validate_current_run_id,
 )
 from ..output_sync import run_sync_status
-from .registry import ControllerPaths, load_job, load_run_tombstone
+from .registry import ControllerPaths, load_job
 
 
 RUN_VIEW_SCHEMA_VERSION = 1
@@ -34,7 +34,6 @@ def _queue_projection(
         "error": state.get("error"),
         "label": job["label"],
         "task_id": job["task_id"],
-        "result_intent": job["result_intent"],
         "workload_class": job["workload_class"],
     }
 
@@ -55,7 +54,6 @@ def _execution_projection(row: dict[str, Any]) -> dict[str, Any]:
             "server",
             "label",
             "task_id",
-            "result_intent",
             "workload_class",
         )
     }
@@ -64,7 +62,6 @@ def _execution_projection(row: dict[str, Any]) -> dict[str, Any]:
 def _derive_phase(
     queue: dict[str, Any] | None,
     execution: dict[str, Any] | None,
-    purge: dict[str, Any] | None,
 ) -> tuple[str, str | None, str | None, str | None]:
     queue_status = None if queue is None else queue.get("status")
     execution_kind = None if execution is None else execution.get("registry_kind")
@@ -122,8 +119,6 @@ def _derive_phase(
         )
     if queue is not None:
         return "attention_required", None, None, "queue status is unsupported"
-    if purge is not None:
-        return "purged", None, None, None
     return "missing", None, None, None
 
 
@@ -134,12 +129,10 @@ def derive_run_view(
     queue: dict[str, Any] | None,
     execution: dict[str, Any] | None,
     output_sync: dict[str, Any],
-    purge: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     phase, outcome, terminal_source, attention_reason = _derive_phase(
         queue,
         execution,
-        purge,
     )
     view: dict[str, Any] = {
         "schema_version": RUN_VIEW_SCHEMA_VERSION,
@@ -151,7 +144,6 @@ def derive_run_view(
         "queue": queue,
         "execution": execution,
         "output_sync": output_sync,
-        "purge": purge,
     }
     if attention_reason is not None:
         view["attention_reason"] = attention_reason
@@ -190,5 +182,4 @@ def load_run_view(paths: ControllerPaths, run_id: str) -> dict[str, Any]:
         queue=queue,
         execution=execution,
         output_sync=run_sync_status(paths.registry_root, validated),
-        purge=load_run_tombstone(paths, validated),
     )

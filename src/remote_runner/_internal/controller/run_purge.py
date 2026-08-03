@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import json
-import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -12,14 +10,12 @@ from .. import output_sync
 from ..execution_registry import (
     compact_run_events,
     project_paths,
-    sha256_bytes,
     stage_failed_current_run,
     utc_now,
     validate_current_run_id,
     write_yaml,
 )
 from ..task_purge import purge_remote_run_artifacts, purge_remote_worktree
-from .experiments import experiment_purge_blockers
 from .purge_common import (
     load_purge_inventory,
     output_overlap_blockers,
@@ -32,8 +28,6 @@ from .registry import (
     controller_paths,
     create_run_tombstone,
     load_run_tombstone,
-    load_task_tombstone,
-    replacement_dependent,
     run_purge_dir,
     run_purge_lock,
     stage_failed_queue_entry,
@@ -41,7 +35,6 @@ from .registry import (
 
 
 PLAN_SCHEMA = 1
-_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _validate_reason(value: object) -> str:
@@ -55,21 +48,6 @@ def _validate_reason(value: object) -> str:
     ):
         raise ValueError("run purge reason must be a single line of at most 512 chars")
     return value
-
-
-def _replacement_policy(args: argparse.Namespace, run_id: str) -> dict[str, Any]:
-    replacement = getattr(args, "replacement_run_id", None)
-    no_replacement = getattr(args, "no_replacement", False) is True
-    if (replacement is None) == (not no_replacement):
-        raise ValueError(
-            "run purge requires exactly one of --replacement-run-id or --no-replacement"
-        )
-    if replacement is not None:
-        validated = validate_current_run_id(replacement)
-        if validated == run_id:
-            raise ValueError("a failed run cannot replace itself")
-        return {"policy": "replacement", "replacement_run_id": validated}
-    return {"policy": "explicit_none", "replacement_run_id": None}
 
 
 def _plan_path(paths: Any, run_id: str) -> Path:
@@ -118,68 +96,6 @@ def _unsupported_rows(inventory: dict[str, Any], run_id: str) -> list[dict[str, 
         for row in inventory["rows"]
         if str(row.get("run_id")) == run_id and row.get("registry_kind") != "current"
     ]
-
-
-def _source_provenance(source: dict[str, Any], *, kind: str) -> dict[str, Any]:
-    if kind == "queue":
-        revision = source.get("revision")
-    else:
-        revision = source.get("source_revision") or source.get("expected_revision")
-    command_digest = source.get("submitted_command_sha256")
-    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
-        raise ValueError(f"{kind} record has no full source revision provenance")
-    if (
-        not isinstance(command_digest, str)
-        or _SHA256_RE.fullmatch(command_digest) is None
-    ):
-        raise ValueError(f"{kind} record has no submitted-command provenance")
-    output_metadata = source.get("output_metadata")
-    result_tags = source.get("result_tags")
-    if not isinstance(output_metadata, dict) or not isinstance(result_tags, dict):
-        raise ValueError(f"{kind} record has invalid result provenance metadata")
-    provenance = {
-        "task_id": source.get("task_id"),
-        "source_revision": revision,
-        "submitted_command_sha256": command_digest,
-        "workload_class": source.get("workload_class", "standard"),
-        "result_intent": source.get("result_intent", "unclassified"),
-        "result_tags": result_tags,
-        "output_metadata": output_metadata,
-    }
-    for field in ("task_id", "workload_class", "result_intent"):
-        if not isinstance(provenance[field], str) or not provenance[field]:
-            raise ValueError(f"{kind} record has invalid {field} provenance")
-    try:
-        json.dumps(provenance, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{kind} record provenance is not canonical JSON") from exc
-    return provenance
-
-
-def _record_provenance(record: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    values: list[tuple[str, dict[str, Any]]] = []
-    if record["job"] is not None:
-        values.append(("queue", _source_provenance(record["job"], kind="queue")))
-    if record["manifest"] is not None:
-        values.append(
-            ("execution", _source_provenance(record["manifest"], kind="execution"))
-        )
-    if not values:
-        raise FileNotFoundError(
-            f"run has no current controller record: {record['run_id']}"
-        )
-    provenance = values[0][1]
-    for kind, candidate in values[1:]:
-        if candidate != provenance:
-            raise ValueError(
-                f"queue and {kind} immutable provenance disagree for {record['run_id']}"
-            )
-    encoded = json.dumps(
-        provenance,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return provenance, sha256_bytes(encoded)
 
 
 def _target_blockers(
@@ -237,141 +153,37 @@ def _target_blockers(
                     "error": "queue and execution task identity disagree",
                 }
             )
-    task = (
-        manifest.get("task_id")
-        if manifest is not None
-        else None
-        if job is None
-        else job.get("task_id")
-    )
-    if isinstance(task, str) and load_task_tombstone(paths, task) is not None:
-        blockers.append(
-            {"run_id": run_id, "error": "the containing task is purging"}
-        )
-    dependent = replacement_dependent(paths, run_id)
-    if dependent is not None:
-        blockers.append(
-            {
-                "run_id": run_id,
-                "error": "run is retained as replacement provenance",
-                "dependent_run_id": dependent,
-            }
-        )
-    try:
-        blockers.extend(experiment_purge_blockers(paths, [run_id]))
-    except (OSError, RuntimeError, ValueError) as exc:
-        blockers.append(
-            {
-                "run_id": run_id,
-                "error": f"experiment provenance could not be verified: {exc}",
-            }
-        )
     return blockers
-
-
-def _replacement_evidence(
-    paths: Any,
-    inventory: dict[str, Any],
-    target_provenance: dict[str, Any],
-    policy: dict[str, Any],
-) -> tuple[dict[str, Any] | None, str | None, list[dict[str, Any]]]:
-    if policy["policy"] == "explicit_none":
-        return None, None, []
-    replacement_run_id = str(policy["replacement_run_id"])
-    blockers: list[dict[str, Any]] = []
-    if load_run_tombstone(paths, replacement_run_id) is not None:
-        blockers.append(
-            {
-                "run_id": replacement_run_id,
-                "error": "replacement run is already purging or purged",
-            }
-        )
-        return None, None, blockers
-    replacement = _record_for_run(inventory, replacement_run_id)
-    unsupported = _unsupported_rows(inventory, replacement_run_id)
-    if unsupported:
-        blockers.append(
-            {
-                "run_id": replacement_run_id,
-                "error": "replacement run is not a current-schema execution",
-            }
-        )
-        return None, None, blockers
-    if replacement["manifest"] is None or replacement["run_state"] is None:
-        blockers.append(
-            {"run_id": replacement_run_id, "error": "replacement execution is missing"}
-        )
-        return None, None, blockers
-    if replacement["run_state"]["status"] != "succeeded":
-        blockers.append(
-            {
-                "run_id": replacement_run_id,
-                "error": (
-                    "replacement execution is "
-                    f"{replacement['run_state']['status']}, not succeeded"
-                ),
-            }
-        )
-    try:
-        replacement_provenance, replacement_digest = _record_provenance(replacement)
-    except (FileNotFoundError, ValueError) as exc:
-        blockers.append({"run_id": replacement_run_id, "error": str(exc)})
-        return None, None, blockers
-    if replacement_provenance != target_provenance:
-        blockers.append(
-            {
-                "run_id": replacement_run_id,
-                "error": "replacement immutable workload provenance does not match",
-            }
-        )
-    return replacement, replacement_digest, blockers
 
 
 def _inspect(
     paths: Any,
     run_id: str,
-    policy: dict[str, Any],
+    *,
+    delete_artifacts: bool,
 ) -> dict[str, Any]:
     inventory = load_purge_inventory(paths)
     record = _record_for_run(inventory, run_id)
     blockers = _target_blockers(paths, inventory, record)
-    target_provenance: dict[str, Any] | None = None
-    target_digest: str | None = None
-    try:
-        target_provenance, target_digest = _record_provenance(record)
-    except (FileNotFoundError, ValueError) as exc:
-        blockers.append({"run_id": run_id, "error": str(exc)})
-    replacement = None
-    replacement_digest = None
-    if target_provenance is not None:
-        replacement, replacement_digest, replacement_blockers = _replacement_evidence(
-            paths,
-            inventory,
-            target_provenance,
-            policy,
+    if delete_artifacts:
+        blockers.extend(
+            output_overlap_blockers(
+                [record],
+                inventory["all_jobs"],
+                inventory["all_current"],
+            )
         )
-        blockers.extend(replacement_blockers)
-    blockers.extend(
-        output_overlap_blockers(
-            [record],
-            inventory["all_jobs"],
-            inventory["all_current"],
-        )
-    )
-    try:
-        sync_state = output_sync.inspect_failed_run_sync_state(
-            paths.registry_root,
-            run_id,
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        sync_state = None
-        blockers.append({"run_id": run_id, "error": str(exc)})
+    sync_state: dict[str, Any] = {"status": "preserved"}
+    if delete_artifacts:
+        try:
+            sync_state = output_sync.run_sync_status(
+                paths.registry_root,
+                run_id,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            blockers.append({"run_id": run_id, "error": str(exc)})
     return {
         "record": record,
-        "replacement": replacement,
-        "target_provenance": target_provenance,
-        "target_provenance_sha256": target_digest,
-        "replacement_provenance_sha256": replacement_digest,
         "inventory": inventory,
         "output_sync": sync_state,
         "blockers": blockers,
@@ -387,7 +199,7 @@ def _create_plan(
     run_id: str,
     *,
     reason: str,
-    policy: dict[str, Any],
+    delete_artifacts: bool,
     inspected: dict[str, Any],
 ) -> dict[str, Any]:
     record = inspected["record"]
@@ -401,11 +213,7 @@ def _create_plan(
         "run_id": run_id,
         "task_id": task,
         "reason": reason,
-        "replacement_policy": policy["policy"],
-        "replacement_run_id": policy["replacement_run_id"],
-        "target_provenance": inspected["target_provenance"],
-        "target_provenance_sha256": inspected["target_provenance_sha256"],
-        "replacement_provenance_sha256": inspected["replacement_provenance_sha256"],
+        "delete_artifacts": delete_artifacts,
         "created_at": utc_now(),
         "record": record,
         "progress": {
@@ -425,44 +233,17 @@ def _validate_frozen_request(
     plan: dict[str, Any],
     *,
     reason: str,
-    policy: dict[str, Any],
+    delete_artifacts: bool,
 ) -> None:
     if plan["reason"] != reason:
         raise ValueError("run purge reason differs from the frozen plan")
-    if plan["replacement_policy"] != policy["policy"] or plan.get(
-        "replacement_run_id"
-    ) != policy.get("replacement_run_id"):
-        raise ValueError("run purge replacement policy differs from the frozen plan")
+    if plan.get("delete_artifacts", False) is not delete_artifacts:
+        raise ValueError("run purge artifact-deletion choice differs from the frozen plan")
 
 
 def _validate_tombstone_plan(tombstone: dict[str, Any], plan: dict[str, Any]) -> None:
-    for field in (
-        "run_id",
-        "task_id",
-        "reason",
-        "replacement_policy",
-        "replacement_run_id",
-        "target_provenance_sha256",
-        "replacement_provenance_sha256",
-    ):
-        if tombstone.get(field) != plan.get(field):
-            raise ValueError(f"run purge tombstone and plan disagree on {field}")
-
-
-def _validate_tombstone_request(
-    tombstone: dict[str, Any],
-    *,
-    reason: str,
-    policy: dict[str, Any],
-) -> None:
-    if tombstone["reason"] != reason:
-        raise ValueError("run purge reason differs from the stored tombstone")
-    if tombstone["replacement_policy"] != policy["policy"] or tombstone.get(
-        "replacement_run_id"
-    ) != policy.get("replacement_run_id"):
-        raise ValueError(
-            "run purge replacement policy differs from the stored tombstone"
-        )
+    if tombstone.get("run_id") != plan.get("run_id"):
+        raise ValueError("run purge tombstone and plan disagree on run_id")
 
 
 def _stage_record(paths: Any, plan: dict[str, Any]) -> None:
@@ -481,32 +262,6 @@ def _stage_record(paths: Any, plan: dict[str, Any]) -> None:
         _write_plan(paths, run_id, plan)
 
 
-def _validate_frozen_replacement(
-    paths: Any, plan: dict[str, Any]
-) -> list[dict[str, Any]]:
-    if plan["replacement_policy"] == "explicit_none":
-        return []
-    policy = {
-        "policy": plan["replacement_policy"],
-        "replacement_run_id": plan["replacement_run_id"],
-    }
-    inventory = load_purge_inventory(paths)
-    _replacement, digest, blockers = _replacement_evidence(
-        paths,
-        inventory,
-        plan["target_provenance"],
-        policy,
-    )
-    if digest != plan["replacement_provenance_sha256"]:
-        blockers.append(
-            {
-                "run_id": plan["replacement_run_id"],
-                "error": "replacement provenance changed after the plan was frozen",
-            }
-        )
-    return blockers
-
-
 def _attention(
     plan: dict[str, Any],
     failures: list[dict[str, Any]],
@@ -523,41 +278,13 @@ def _attention(
     }
 
 
-def _resource_summary(
-    plan: dict[str, Any],
-    preserved: list[dict[str, Any]],
-) -> dict[str, Any]:
-    run_id = str(plan["run_id"])
-    artifact = plan["progress"]["run_artifacts"].get(run_id)
-    return {
-        "runtime_output": (
-            "not_applicable" if artifact is None else artifact.get("status", "unknown")
-        ),
-        "output_sync_removed": (
-            []
-            if plan["progress"]["output_sync"] is None
-            else plan["progress"]["output_sync"].get("removed_controller_state", [])
-        ),
-        "worktrees_removed": sum(
-            1
-            for value in plan["progress"]["worktrees"].values()
-            if value.get("status") == "complete"
-        ),
-        "worktrees_preserved": len(preserved),
-        "events": plan["progress"]["events"],
-        "git_refs": "preserved",
-    }
-
-
 def _purge_run(args: argparse.Namespace) -> dict[str, Any]:
     run_id = validate_current_run_id(args.run_id)
     reason = _validate_reason(args.reason)
-    policy = _replacement_policy(args, run_id)
+    delete_artifacts = bool(args.delete_artifacts)
     paths = controller_paths(args.controller_root, args.project_id)
     tombstone = load_run_tombstone(paths, run_id)
     plan = _load_plan(paths, run_id)
-    if tombstone is not None:
-        _validate_tombstone_request(tombstone, reason=reason, policy=policy)
     if tombstone is not None and tombstone["status"] == "purged":
         if args.apply:
             with contextlib.suppress(FileNotFoundError):
@@ -566,11 +293,12 @@ def _purge_run(args: argparse.Namespace) -> dict[str, Any]:
             "applied": bool(args.apply),
             "status": "already_purged",
             "run_id": run_id,
-            "task_id": tombstone["task_id"],
         }
 
     if plan is not None:
-        _validate_frozen_request(plan, reason=reason, policy=policy)
+        _validate_frozen_request(
+            plan, reason=reason, delete_artifacts=delete_artifacts
+        )
         if tombstone is None:
             raise ValueError("run purge plan exists without its tombstone")
         _validate_tombstone_plan(tombstone, plan)
@@ -581,25 +309,17 @@ def _purge_run(args: argparse.Namespace) -> dict[str, Any]:
                 "run_id": run_id,
                 "task_id": plan["task_id"],
                 "candidate": _public_candidate(plan["record"]),
-                "replacement": {
-                    "policy": plan["replacement_policy"],
-                    "run_id": plan["replacement_run_id"],
-                    "target_provenance_sha256": plan["target_provenance_sha256"],
-                    "replacement_provenance_sha256": plan[
-                        "replacement_provenance_sha256"
-                    ],
-                },
+                "delete_artifacts": bool(plan.get("delete_artifacts", False)),
             }
     else:
         try:
-            inspected = _inspect(paths, run_id, policy)
+            inspected = _inspect(paths, run_id, delete_artifacts=delete_artifacts)
         except FileNotFoundError:
             if tombstone is not None:
                 return {
                     "applied": bool(args.apply),
                     "status": "attention_required",
                     "run_id": run_id,
-                    "task_id": tombstone["task_id"],
                     "failures": [
                         {
                             "run_id": run_id,
@@ -609,31 +329,21 @@ def _purge_run(args: argparse.Namespace) -> dict[str, Any]:
                 }
             raise
         public = _public_candidate(inspected["record"])
-        replacement_public = {
-            "policy": policy["policy"],
-            "run_id": policy["replacement_run_id"],
-            "target_provenance_sha256": inspected["target_provenance_sha256"],
-            "replacement_provenance_sha256": inspected["replacement_provenance_sha256"],
-            "matches": (
-                policy["policy"] == "explicit_none"
-                or (
-                    inspected["replacement_provenance_sha256"] is not None
-                    and inspected["replacement_provenance_sha256"]
-                    == inspected["target_provenance_sha256"]
-                )
-            ),
-        }
+        record = inspected["record"]
+        task = str(
+            record["manifest"]["task_id"]
+            if record["manifest"] is not None
+            else record["job"]["task_id"]
+        )
         if not args.apply:
             return {
                 "applied": False,
                 "status": "blocked" if inspected["blockers"] else "ready",
                 "run_id": run_id,
-                "task_id": (inspected["target_provenance"] or {}).get(
-                    "task_id"
-                ),
+                "task_id": task,
                 "candidate": public,
-                "replacement": replacement_public,
                 "output_sync": inspected["output_sync"],
+                "delete_artifacts": delete_artifacts,
                 "blockers": inspected["blockers"],
             }
         if inspected["blockers"]:
@@ -642,28 +352,17 @@ def _purge_run(args: argparse.Namespace) -> dict[str, Any]:
                 "status": "blocked",
                 "run_id": run_id,
                 "candidate": public,
-                "replacement": replacement_public,
                 "blockers": inspected["blockers"],
             }
-        target_digest = inspected["target_provenance_sha256"]
-        assert isinstance(target_digest, str)
-        record = inspected["record"]
-        task = str((inspected["target_provenance"] or {})["task_id"])
         tombstone = create_run_tombstone(
             paths,
             run_id,
-            task_id=task,
-            reason=reason,
-            replacement_policy=policy["policy"],
-            replacement_run_id=policy["replacement_run_id"],
-            target_provenance_sha256=target_digest,
-            replacement_provenance_sha256=inspected["replacement_provenance_sha256"],
         )
         plan = _create_plan(
             paths,
             run_id,
             reason=reason,
-            policy=policy,
+            delete_artifacts=delete_artifacts,
             inspected={**inspected, "record": record},
         )
         _validate_tombstone_plan(tombstone, plan)
@@ -677,24 +376,50 @@ def _purge_run(args: argparse.Namespace) -> dict[str, Any]:
             [{"run_id": run_id, "error": str(exc)}],
         )
 
-    replacement_blockers = _validate_frozen_replacement(paths, plan)
-    if replacement_blockers:
-        return _attention(plan, replacement_blockers)
-
     latest = load_purge_inventory(paths)
-    overlap = output_overlap_blockers(
-        [plan["record"]],
-        latest["all_jobs"],
-        latest["all_current"],
+    overlap = (
+        output_overlap_blockers(
+            [plan["record"]],
+            latest["all_jobs"],
+            latest["all_current"],
+        )
+        if plan["delete_artifacts"]
+        else []
     )
     if overlap:
         return _attention(plan, overlap)
 
-    if plan["progress"]["output_sync"] is None:
+    if plan["delete_artifacts"] and plan["progress"]["output_sync"] is None:
         try:
-            plan["progress"]["output_sync"] = output_sync.purge_failed_run_sync_state(
-                paths.registry_root, run_id
+            record = plan["record"]
+            sync_paths = output_sync.output_sync_paths(paths.registry_root)
+            has_sync_state = any(
+                (directory / f"{run_id}.json").is_file()
+                for directory in (
+                    sync_paths.pending_dir,
+                    sync_paths.completed_dir,
+                    sync_paths.state_dir,
+                )
             )
+            target_configs: dict[str, dict[str, Any]] = {}
+            if has_sync_state and record["manifest"] is not None:
+                stored_config = (
+                    None if record["job"] is None else record["job"].get("output_sync")
+                )
+                if stored_config is None:
+                    current_config = output_sync.load_config(paths.registry_root)
+                    if current_config is None:
+                        raise RuntimeError(
+                            f"cannot locate output-sync target config for {run_id}"
+                        )
+                    stored_config = current_config.to_payload()
+                target_configs[run_id] = stored_config
+            plan["progress"]["output_sync"] = output_sync.purge_run_sync_state(
+                paths.registry_root,
+                {run_id},
+                target_configs=target_configs,
+                connect_timeout=args.timeout,
+            )[0]
             _write_plan(paths, run_id, plan)
         except (OSError, RuntimeError, ValueError) as exc:
             return _attention(
@@ -702,18 +427,22 @@ def _purge_run(args: argparse.Namespace) -> dict[str, Any]:
                 [{"run_id": run_id, "error": str(exc)}],
             )
 
-    failures = purge_execution_resources(
-        paths,
-        [plan["record"]],
-        plan["progress"]["run_artifacts"],
-        owner=f"purge-{run_id}",
-        allowed_statuses=frozenset({"failed"}),
-        timeout=args.timeout,
-        remote_purge=purge_remote_run_artifacts,
-        persist=lambda: _write_plan(paths, run_id, plan),
+    failures = (
+        purge_execution_resources(
+            paths,
+            [plan["record"]],
+            plan["progress"]["run_artifacts"],
+            owner=f"purge-{run_id}",
+            allowed_statuses=frozenset({"failed"}),
+            timeout=args.timeout,
+            remote_purge=purge_remote_run_artifacts,
+            persist=lambda: _write_plan(paths, run_id, plan),
+        )
+        if plan["delete_artifacts"]
+        else []
     )
     preserved: list[dict[str, Any]] = []
-    if not failures:
+    if plan["delete_artifacts"] and not failures:
         latest = load_purge_inventory(paths)
         worktree_failures, preserved = purge_worktrees(
             paths,
@@ -762,9 +491,8 @@ def _purge_run(args: argparse.Namespace) -> dict[str, Any]:
             [{"run_id": run_id, "error": str(exc)}],
             preserved=preserved,
         )
-    summary = _resource_summary(plan, preserved)
     try:
-        complete_run_tombstone(paths, run_id, resource_summary=summary)
+        complete_run_tombstone(paths, run_id)
     except (OSError, RuntimeError, ValueError) as exc:
         return _attention(
             plan,
@@ -778,12 +506,7 @@ def _purge_run(args: argparse.Namespace) -> dict[str, Any]:
         "status": "complete",
         "run_id": run_id,
         "task_id": plan["task_id"],
-        "replacement": {
-            "policy": plan["replacement_policy"],
-            "run_id": plan["replacement_run_id"],
-            "target_provenance_sha256": plan["target_provenance_sha256"],
-            "replacement_provenance_sha256": plan["replacement_provenance_sha256"],
-        },
+        "artifacts_deleted": bool(plan["delete_artifacts"]),
         "preserved_resources": preserved,
         "git_refs": "preserved for separate source-cache garbage collection",
     }

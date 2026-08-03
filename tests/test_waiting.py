@@ -52,7 +52,6 @@ def view(
         "queue": None,
         "execution": None,
         "output_sync": {"status": output_sync_status},
-        "purge": None,
     }
 
 
@@ -384,7 +383,7 @@ def test_wait_deadline_returns_last_view_without_stopping_run(
 
 @pytest.mark.parametrize(
     ("phase", "exit_code"),
-    [("attention_required", 4), ("missing", 4), ("purged", 4)],
+    [("attention_required", 4), ("missing", 4)],
 )
 def test_wait_stops_on_attention_or_an_unavailable_run_record(
     tmp_path: Path,

@@ -53,8 +53,10 @@ def _candidate(
         raise ValueError("output-sync receipt has no archived target path")
     if not isinstance(receipt.get("source_deletion_performed"), bool):
         raise ValueError("output-sync receipt has invalid source deletion state")
-    if state.get("status") != "succeeded":
-        raise ValueError("run is no longer authoritatively succeeded")
+    if state.get("status") not in {"succeeded", "failed", "stopped"}:
+        raise ValueError("run is not authoritatively terminal")
+    if state.get("status") != intent.get("authoritative_status"):
+        raise ValueError("run status differs from synchronized intent")
     if manifest.get("server") != intent["source_server"]:
         raise ValueError("run source server differs from synchronized intent")
     if manifest.get("output_path") != intent["source_path"]:

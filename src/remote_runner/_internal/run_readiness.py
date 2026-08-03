@@ -5,13 +5,13 @@ from typing import Any, Literal
 
 
 ReportReadiness = Literal["waiting", "ready", "attention"]
-ATTENTION_PHASES = {"attention_required", "missing", "purged"}
+ATTENTION_PHASES = {"attention_required", "missing"}
 OUTPUT_SYNC_WAITING_STATUSES = {
     "pending",
     "retryable",
-    "waiting_for_succeeded_state",
+    "waiting_for_terminal_state",
 }
-OUTPUT_SYNC_ATTENTION_STATUSES = {"cancelled", "unknown"}
+OUTPUT_SYNC_ATTENTION_STATUSES = {"unknown"}
 OUTPUT_SYNC_READY_STATUSES = {"completed", "not_enqueued"}
 
 

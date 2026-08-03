@@ -156,7 +156,7 @@ def test_unclassified_active_execution_error_remains_active() -> None:
     assert view["phase"] == "running"
 
 
-def test_missing_and_purged_runs_are_distinct() -> None:
+def test_missing_run_is_not_told_about_internal_purge_state() -> None:
     missing = derive_run_view(
         project_id="example",
         run_id=RUN_ID,
@@ -164,17 +164,8 @@ def test_missing_and_purged_runs_are_distinct() -> None:
         execution=None,
         output_sync={"status": "not_enqueued"},
     )
-    purged = derive_run_view(
-        project_id="example",
-        run_id=RUN_ID,
-        queue=None,
-        execution=None,
-        output_sync={"status": "not_enqueued"},
-        purge={"status": "purged"},
-    )
-
     assert missing["phase"] == "missing"
-    assert purged["phase"] == "purged"
+    assert "purge" not in missing
 
 
 def test_etag_is_stable_and_changes_with_authoritative_state() -> None:

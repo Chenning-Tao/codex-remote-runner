@@ -17,14 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .output_sync import enqueue_succeeded_output, is_configured
-from .experiment_contracts import normalize_run_binding
+from .output_sync import enqueue_terminal_output, is_configured
 from .output_paths import validate_resolved_output
-from .result_metadata import (
-    LEGACY_RESULT_INTENT,
-    normalize_result_intent,
-    normalize_result_tags,
-)
 from .scheduling import normalize_workload_class
 
 PROJECT_CONFIG_NAME = ".remote-runner.yaml"
@@ -385,23 +379,6 @@ def validate_current_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     manifest["workload_class"] = normalize_workload_class(
         manifest.get("workload_class", "standard")
     )
-    if schema == CURRENT_MANIFEST_SCHEMA:
-        if "result_intent" not in manifest or "result_tags" not in manifest:
-            raise ValueError(
-                "current manifest result_intent and result_tags fields are required"
-            )
-        manifest["result_intent"] = normalize_result_intent(
-            manifest["result_intent"],
-            allow_unclassified=True,
-            field="manifest result_intent",
-        )
-        manifest["result_tags"] = normalize_result_tags(
-            manifest["result_tags"], field="manifest result_tags"
-        )
-    else:
-        manifest["result_intent"] = LEGACY_RESULT_INTENT
-        manifest["result_tags"] = {}
-
     run_id = validate_current_run_id(_require_text(manifest.get("run_id"), "run_id"))
     for field in (
         "label",
@@ -438,7 +415,10 @@ def validate_current_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         minimum_cores = int(manifest["minimum_cores"])
         if int(manifest["configured_cores"]) < minimum_cores:
             raise ValueError("manifest selected server does not satisfy minimum_cores")
-    _positive_int(manifest.get("workers"), "workers", optional=True)
+    _positive_int(
+        manifest.get("assigned_cores", manifest.get("configured_cores")),
+        "assigned_cores",
+    )
     _optional_text(manifest.get("expected_revision"), "expected_revision")
     if not isinstance(manifest.get("require_clean_worktree"), bool):
         raise ValueError("manifest require_clean_worktree must be boolean")
@@ -467,14 +447,6 @@ def validate_current_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("manifest source_revision must be a full Git SHA")
         if manifest.get("expected_revision") != source_revision:
             raise ValueError("manifest expected_revision must equal source_revision")
-    raw_experiment_binding = manifest.get("experiment_binding")
-    if raw_experiment_binding is not None:
-        experiment_binding = normalize_run_binding(raw_experiment_binding)
-        if experiment_binding["run_id"] != run_id:
-            raise ValueError("manifest experiment binding run_id mismatch")
-        if experiment_binding["source_revision"] != source_revision:
-            raise ValueError("manifest experiment binding source_revision mismatch")
-        manifest["experiment_binding"] = experiment_binding
     prepared_servers = manifest.get("prepared_servers")
     if prepared_servers is not None:
         if (
@@ -493,8 +465,6 @@ def validate_current_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             submitted_command.encode("utf-8")
         ):
             raise ValueError("manifest submitted command digest mismatch")
-    if "worker_defaulted" in manifest and not isinstance(manifest["worker_defaulted"], bool):
-        raise ValueError("manifest worker_defaulted must be boolean")
     return manifest
 
 
@@ -721,16 +691,13 @@ def update_current_state(
         updated["revision"] = before + 1
         updated["updated_at"] = utc_now()
         validate_current_state(updated, run_id)
-        if (
-            state["status"] != "succeeded"
-            and updated["status"] == "succeeded"
-            and is_configured(paths.registry_root)
-        ):
-            enqueue_succeeded_output(
+        if state["status"] not in TERMINAL_STATUSES and updated["status"] in TERMINAL_STATUSES and is_configured(paths.registry_root):
+            enqueue_terminal_output(
                 paths.registry_root,
                 manifest,
                 state_revision=int(updated["revision"]),
-                succeeded_at=str(updated.get("finished_at") or updated["updated_at"]),
+                authoritative_status=str(updated["status"]),
+                terminal_at=str(updated.get("finished_at") or updated["updated_at"]),
             )
         write_yaml(current_state_path(paths, run_id), updated)
         append_run_event(

@@ -23,7 +23,7 @@ from ..execution_registry import (
 )
 from ..output_paths import resolve_output_path
 from ..remote_shell import remote_python_stdin_command, ssh_connection_options
-from ..scheduling import CapacityCandidate, rank_candidates, resolve_worker_command
+from ..scheduling import CapacityCandidate, rank_candidates
 from ..worktree import prepare_remote_worktree
 from .registry import (
     ControllerPaths,
@@ -783,9 +783,7 @@ def _register_execution(
     server: dict[str, Any],
     *,
     workdir: str,
-    resolved_command: str,
-    workers: int | None,
-    worker_defaulted: bool,
+    assigned_cores: int,
     output_root: str | None,
     output_relpath: str | None,
     output_path: str | None,
@@ -795,47 +793,29 @@ def _register_execution(
         project_config=paths.config_path,
         label=job["label"],
         task_id=job["task_id"],
-        result_intent=job["result_intent"],
-        result_tags=job["result_tags"],
         workload_class=job.get("workload_class", "standard"),
         server=server["name"],
         ssh=server["ssh"],
         ssh_profile=server["ssh_profile"],
         configured_cores=server["configured_cores"],
         minimum_cores=job["minimum_cores"],
-        workers=workers,
-        command=resolved_command,
+        assigned_cores=assigned_cores,
+        command=job["submitted_command"],
         remote_workdir=workdir,
         project_python=server["python"],
         source_revision=job["revision"],
         prepared_servers=[item["name"] for item in eligible_prepared_servers(job)],
         submitted_command=job["submitted_command"],
-        worker_defaulted=worker_defaulted,
         expected_revision=job["revision"],
         require_clean_worktree=True,
         output_root=output_root,
         output_relpath=output_relpath,
         output_path=output_path,
         output_metadata=json.dumps(job.get("output_metadata", {}), sort_keys=True),
-        experiment_binding=job.get("experiment_binding"),
         run_id=job["run_id"],
         privacy=job.get("privacy"),
     )
     registration.register(args)
-
-
-def _resolve_job_command(
-    job: dict[str, Any],
-    *,
-    configured_cores: int,
-) -> tuple[str, int | None, bool]:
-    if job["worker_policy"] == "exact":
-        return str(job["submitted_command"]), None, False
-    return resolve_worker_command(
-        str(job["submitted_command"]),
-        worker_arg=str(job["worker_arg"]),
-        configured_cores=configured_cores,
-    )
 
 
 def _resolve_selected_output(
@@ -898,18 +878,12 @@ def _launch_dispatching_job(
             revision=str(job["revision"]),
             timeout=timeout,
         )
-        resolved_command, workers, defaulted = _resolve_job_command(
-            job,
-            configured_cores=selected_capacity.configured_cores,
-        )
         _register_execution(
             paths,
             job,
             selected_server,
             workdir=worktree.workdir,
-            resolved_command=resolved_command,
-            workers=workers,
-            worker_defaulted=defaulted,
+            assigned_cores=selected_capacity.configured_cores,
             output_root=output_root,
             output_relpath=output_relpath,
             output_path=output_path,

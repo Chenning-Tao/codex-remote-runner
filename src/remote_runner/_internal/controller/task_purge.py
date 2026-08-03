@@ -18,7 +18,6 @@ from ..execution_registry import (
 )
 from ..stopping import stop as stop_execution
 from ..task_purge import purge_remote_run_artifacts, purge_remote_worktree
-from .experiments import experiment_purge_blockers
 from .purge_common import (
     load_purge_inventory,
     output_overlap_blockers,
@@ -28,10 +27,7 @@ from .purge_common import (
 )
 from .registry import (
     QUEUE_TERMINAL,
-    complete_task_tombstone,
     controller_paths,
-    create_task_tombstone,
-    load_task_tombstone,
     stage_terminal_queue_entry,
     task_identity_digest,
     task_purge_dir,
@@ -102,17 +98,6 @@ def _current_inventory(paths: Any, task_id: str) -> dict[str, Any]:
                 "queue_state": None if queue is None else queue[1],
                 "manifest": None if execution is None else execution[0],
                 "run_state": None if execution is None else execution[1],
-            }
-        )
-
-    blockers.extend(output_overlap_blockers(records, jobs_by_id, current))
-    try:
-        blockers.extend(experiment_purge_blockers(paths, selected_ids))
-    except (OSError, RuntimeError, ValueError) as exc:
-        blockers.append(
-            {
-                "run_id": "experiment-registry",
-                "error": f"experiment provenance could not be verified: {exc}",
             }
         )
 
@@ -211,12 +196,15 @@ def _create_plan(
     task_id: str,
     reason: str,
     records: list[dict[str, Any]],
+    *,
+    delete_artifacts: bool,
 ) -> dict[str, Any]:
     plan = {
         "schema_version": PLAN_SCHEMA,
         "task_id": task_id,
         "task_digest": task_identity_digest(task_id),
         "reason": reason,
+        "delete_artifacts": delete_artifacts,
         "created_at": utc_now(),
         "records": records,
         "progress": {
@@ -251,7 +239,7 @@ def _purge_output_sync(
             record["manifest"] is not None
             and record["manifest"].get("output_path") is not None
             and record["run_state"] is not None
-            and record["run_state"]["status"] == "succeeded"
+            and record["run_state"]["status"] in TERMINAL_STATUSES
             and (
                 (sync_paths.pending_dir / f"{run_id}.json").is_file()
                 or (sync_paths.completed_dir / f"{run_id}.json").is_file()
@@ -357,6 +345,7 @@ def _stage_records(paths: Any, plan: dict[str, Any]) -> None:
 
 def purge_task(args: argparse.Namespace) -> dict[str, Any]:
     task_id = validate_task_identity(args.task_id)
+    delete_artifacts = bool(args.delete_artifacts)
     if (
         not isinstance(args.reason, str)
         or not args.reason.strip()
@@ -368,20 +357,13 @@ def purge_task(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("task purge reason must be a single line of at most 512 chars")
     paths = controller_paths(args.controller_root, args.project_id)
     existing_plan = _load_plan(paths, task_id)
-    tombstone = load_task_tombstone(paths, task_id)
-    if tombstone is not None and tombstone.get("status") == "purged":
-        with contextlib.suppress(FileNotFoundError):
-            shutil.rmtree(task_purge_dir(paths, task_id))
-        return {
-            "applied": bool(args.apply),
-            "status": "already_purged",
-            "task_id": task_id,
-            "candidate_count": 0,
-        }
-
     inventory = _current_inventory(paths, task_id)
     records = inventory["records"]
     if existing_plan is not None:
+        if existing_plan.get("delete_artifacts", False) is not delete_artifacts:
+            raise ValueError(
+                "task purge artifact-deletion choice differs from the frozen plan"
+            )
         records = existing_plan["records"]
     if not records:
         if inventory["blockers"]:
@@ -407,14 +389,25 @@ def purge_task(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     public = public_records(records)
+    preview_blockers = list(inventory["blockers"])
+    if delete_artifacts:
+        preview_blockers.extend(
+            output_overlap_blockers(
+                records,
+                inventory["all_jobs"],
+                inventory["all_current"],
+            )
+        )
     if not args.apply:
         return {
             "applied": False,
-            "status": "blocked" if inventory["blockers"] else "ready",
+            "status": "blocked" if preview_blockers else "ready",
             "task_id": task_id,
             "candidate_count": len(records),
+            "run_ids": sorted(str(record["run_id"]) for record in records),
+            "delete_artifacts": delete_artifacts,
             "candidates": public,
-            "blockers": inventory["blockers"],
+            "blockers": preview_blockers,
         }
     if inventory["blockers"]:
         return {
@@ -425,7 +418,6 @@ def purge_task(args: argparse.Namespace) -> dict[str, Any]:
             "blockers": inventory["blockers"],
         }
 
-    create_task_tombstone(paths, task_id, reason=args.reason)
     if existing_plan is None:
         stop_failures = _stop_task_records(paths, records, timeout=args.timeout)
         refreshed = _current_inventory(paths, task_id)
@@ -457,6 +449,7 @@ def purge_task(args: argparse.Namespace) -> dict[str, Any]:
             task_id,
             args.reason,
             records,
+            delete_artifacts=delete_artifacts,
         )
         inventory = refreshed
 
@@ -465,10 +458,14 @@ def purge_task(args: argparse.Namespace) -> dict[str, Any]:
     failures: list[dict[str, str]] = []
     preserved: list[dict[str, Any]] = []
     latest_inventory = _current_inventory(paths, task_id)
-    output_blockers = output_overlap_blockers(
-        plan["records"],
-        latest_inventory["all_jobs"],
-        latest_inventory["all_current"],
+    output_blockers = (
+        output_overlap_blockers(
+            plan["records"],
+            latest_inventory["all_jobs"],
+            latest_inventory["all_current"],
+        )
+        if plan["delete_artifacts"]
+        else []
     )
     if output_blockers:
         return {
@@ -488,13 +485,14 @@ def purge_task(args: argparse.Namespace) -> dict[str, Any]:
             "candidate_count": len(records),
             "failures": [{"run_id": "controller-registry", "error": str(exc)}],
         }
-    try:
-        _purge_output_sync(paths, plan, timeout=args.timeout)
-    except (OSError, RuntimeError, ValueError) as exc:
-        failures.append({"run_id": "output-sync", "error": str(exc)})
-    if not failures:
+    if plan["delete_artifacts"]:
+        try:
+            _purge_output_sync(paths, plan, timeout=args.timeout)
+        except (OSError, RuntimeError, ValueError) as exc:
+            failures.append({"run_id": "output-sync", "error": str(exc)})
+    if plan["delete_artifacts"] and not failures:
         failures.extend(_purge_run_resources(paths, plan, timeout=args.timeout))
-    if not failures:
+    if plan["delete_artifacts"] and not failures:
         worktree_failures, preserved = _purge_worktrees(
             paths,
             plan,
@@ -526,7 +524,6 @@ def purge_task(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("task purge staging records path is a symlink")
     with contextlib.suppress(FileNotFoundError):
         shutil.rmtree(records_dir)
-    complete_task_tombstone(paths, task_id)
     with contextlib.suppress(FileNotFoundError):
         shutil.rmtree(purge_root)
     return {
@@ -535,6 +532,7 @@ def purge_task(args: argparse.Namespace) -> dict[str, Any]:
         "task_id": task_id,
         "purged_count": len(records),
         "run_ids": sorted(str(record["run_id"]) for record in records),
+        "artifacts_deleted": bool(plan["delete_artifacts"]),
         "preserved_resources": preserved,
         "git_refs": "preserved for separate source-cache garbage collection",
     }
