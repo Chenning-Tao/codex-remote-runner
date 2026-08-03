@@ -55,10 +55,6 @@ def managed_config(tmp_path: Path) -> Path:
                     "output_root": "/home/other-user/example",
                 },
             },
-            "parallelism": {
-                "default_arg": "--workers",
-                "default_value": "selected_server.cores",
-            },
             "scheduling": {
                 "strategy": "max_available_cores",
                 "lease_seconds": 90,
@@ -84,7 +80,6 @@ def test_loads_managed_config_and_separates_explicit_pool(tmp_path: Path) -> Non
     )
     assert config.remotes["compute-a"].output_root == "/home/user-a/example"
     assert config.remotes["archive"].output_root == "/home/other-user/example"
-    assert config.parallelism.default_arg == "--workers"
     assert config.scheduling.lease_seconds == 90
     assert config.scheduling.testing_servers == ("archive", "compute-a")
     assert config.output_sync is None

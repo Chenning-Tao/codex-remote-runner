@@ -89,14 +89,12 @@ def registration_args(config: Path, **overrides: object) -> argparse.Namespace:
         "project_config": config,
         "label": "diagnostic",
         "task_id": "task-1",
-        "result_intent": "supporting",
-        "result_tags": {"purpose": "diagnostic"},
         "server": "compute-a",
         "ssh": "user@compute-a",
         "ssh_profile": "intranet",
         "configured_cores": 256,
         "minimum_cores": 128,
-        "workers": 48,
+        "assigned_cores": 48,
         "command": "printf 'hello world\\n'\nprintf 'done\\n'\n",
         "remote_workdir": "/srv/project/code",
         "project_python": "/srv/envs/project/bin/python3",
@@ -411,10 +409,8 @@ def test_registration_round_trips_exact_command_and_core_schema(tmp_path: Path) 
     assert state["state_schema_version"] == CURRENT_STATE_SCHEMA
     assert state["status"] == "registered"
     assert state["revision"] == 0
-    assert manifest["workers"] == 48
+    assert manifest["assigned_cores"] == 48
     assert manifest["minimum_cores"] == 128
-    assert manifest["result_intent"] == "supporting"
-    assert manifest["result_tags"] == {"purpose": "diagnostic"}
     assert "process_privacy" not in manifest
     assert "assets" not in manifest
     assert "launch_plan" not in manifest
@@ -444,15 +440,15 @@ def test_manifest_identity_must_match_registry_path(tmp_path: Path) -> None:
         load_current_run(project_paths(config), RUN_ID)
 
 
-def test_registration_records_workers_without_rewriting_command(tmp_path: Path) -> None:
+def test_registration_records_assigned_cores_without_rewriting_command(tmp_path: Path) -> None:
     _root, config = make_project(tmp_path)
     command = "python experiment.py --num-workers 7\n"
     manifest_path = registration.register(
-        registration_args(config, command=command, workers=7)
+        registration_args(config, command=command, assigned_cores=7)
     )
 
     assert (manifest_path.parent / "command.sh").read_text(encoding="utf-8") == command
-    assert "256" not in command
+    assert load_yaml(manifest_path)["assigned_cores"] == 7
 
 
 def test_registration_records_portable_output_identity(tmp_path: Path) -> None:
@@ -509,7 +505,7 @@ args = argparse.Namespace(
     ssh="compute-a",
     ssh_profile="auto",
     configured_cores=256,
-    workers=None,
+    assigned_cores=256,
     command=sys.argv[4],
     remote_workdir="/srv/project/code",
     project_python="/srv/envs/project/bin/python3",

@@ -11,9 +11,9 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 - 由控制器持久化队列与运行状态，任务不会依赖原始客户端进程。
 - 根据已配置的容量、可用性和优先级自动选择执行服务器。
 - 在远程 detached worktree 中准备并运行精确的 Git revision。
-- 支持附着式 Codex 等待，并在等待工具完成后恢复发起它的 App 回合。
-- 提供可交互的 Textual 和本地网页控制面板，并支持确认后停止任务。
-- 提供由控制器持有、包含冻结 binding 与已验证结果的实验注册表。
+- 默认 detached 提交；仅在明确请求时使用附着式 Codex 等待。
+- 提供本地网页控制面板，并支持确认后停止任务。
+- 原样执行 opaque workload 命令，并通过 `RR_ASSIGNED_CORES` 暴露分配资源。
 - 提供明确的停止、清理、彻底删除、服务器排空/下线和输出归档流程。
 
 ```text
@@ -43,7 +43,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[tui,web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.8.0'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.8.0'
 remote-runner --help
 ```
 
@@ -52,7 +52,7 @@ remote-runner --help
 ```bash
 git clone https://github.com/Chenning-Tao/codex-remote-runner.git
 cd codex-remote-runner
-uv tool install '.[tui,web]'
+uv tool install '.[web]'
 remote-runner --help
 ```
 
@@ -65,7 +65,17 @@ npm run build --prefix web
 uv run pytest -q
 ```
 
-`tui` 和 `web` extra 都是可选的。核心生命周期命令只依赖 PyYAML。
+`web` extra 是可选的。核心生命周期命令只依赖 PyYAML。
+
+激活这次边界变更后的 controller release 时，会在阻止 dispatch lease 并停止
+controller worker 后执行一次历史状态迁移。旧实验 registry 的字节会原子移出
+活跃项目状态，保存到
+`<controller-root>/retired-state/experiment-registry-v1/<project-id>`。旧 schema-1
+pending output-sync intent 只有在 run ID、终态 execution record、revision、server、
+路径和时间戳完全一致时才会升级为纯传输 schema。迁移可重复执行；遇到 symlink
+或源/目标冲突时会拒绝覆盖并阻止激活。
+活跃 registry 只留下一个私有 retirement marker，用于阻止尚未退出的旧二进制
+重新创建已删除系统；正常 controller API 不读取该 marker。
 
 ## 配置
 
@@ -94,42 +104,11 @@ Standard/Test 并发任务数，也可以在排队任务详情中切换任务类
 控制器范围暂停新任务准入，再删除项目、全局、本机 SSH 和归档端专用同步凭据；
 共享登录密钥、历史记录、运行目录和输出仍会保留。
 
-该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示与 TUI 相同的 controller snapshot。服务器列表会在远端主机提供数据时显示实时负载和物理内存使用量。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置。详情栏可以停止一个精确的排队中或运行中任务，也可以修改排队任务的类型、优先级和可用服务器；队列表格还可以跨页勾选多个任务，批量修改任务类型、优先级，并可选地统一为同一组兼容服务器。未选择的设置保持不变。如果新选择的兼容服务器尚未准备，Web 进程会先为任务的精确 revision 完成准备，再启用该服务器。队列写操作使用各任务自己的 controller revision 和有时限的准备租约，旧快照修改或已经进入调度的任务会被拒绝；批量操作会明确报告部分失败并保留失败项。
-
-## 实验注册表
-
-网页中的“实验”分区展示由控制器持有的已发布通用实验设计、精确 point
-revision、冻结的 run binding、经过输出同步验证的结构化结果，以及显式
-结果决策。网页通过有界查询读取控制器；操作者核对候选指标、观测数和来源运行
-后，可以显式接受或拒绝候选结果。结果不会按时间戳选择，真实空注册表也不会
-回退到合成 Demo。
-
-打开 `?demo=experiments` 可以在没有 Controller 的情况下查看内置的
-`decoder_atomloss` 项目快照。它只是用于检查面板的静态测试数据，不会写入
-Controller；正常“实验”视图仍只读取当前项目配置的 Controller 注册表。
-
-```bash
-remote-runner experiment plan preview \
-  --project-config /path/to/.remote-runner.yaml \
-  --file experiment-plan.json
-
-remote-runner experiment query \
-  --project-config /path/to/.remote-runner.yaml \
-  --file experiment-query.json
-```
-
-使用 `remote-runner run --experiment-binding binding.json` 可以为精确 run ID 和
-Git revision 生成并冻结 binding。新 producer 在同步输出中写入
-`experiment_result`。带 binding 的 workload 会通过
-`RR_EXPERIMENT_BINDING_PATH` 收到 canonical finalized binding 的只读文件路径；
-对应文件摘要由 `RR_EXPERIMENT_BINDING_SHA256` 提供。没有 binding 的 workload
-不会收到这两个变量。结果满足资格条件后仍需显式
-acceptance 才会成为当前正式结果。契约、权威边界和后续加固项见
-[实现计划](docs/plans/experiment-registry-results-dashboard.md)。
+该命令只监听 `127.0.0.1`，自动打开系统浏览器，并持续展示 controller snapshot。服务器列表会在远端主机提供数据时显示实时负载和物理内存使用量。使用 `--no-open` 可以只启动服务而不打开浏览器，使用 `--port PORT` 可以选择其他本地端口。浏览器不会收到 SSH 配置。详情栏可以停止一个精确的排队中或运行中任务，也可以修改排队任务的类型、优先级和可用服务器；队列表格还可以跨页勾选多个任务，批量修改任务类型、优先级，并可选地统一为同一组兼容服务器。未选择的设置保持不变。如果新选择的兼容服务器尚未准备，Web 进程会先为任务的精确 revision 完成准备，再启用该服务器。队列写操作使用各任务自己的 controller revision 和有时限的准备租约，旧快照修改或已经进入调度的任务会被拒绝；批量操作会明确报告部分失败并保留失败项。
 
 ## 运行
 
-Remote Runner 只接受干净且已经提交的源码 revision。下面是一个最小的前台等待任务：
+Remote Runner 只接受干净且已经提交的源码 revision。默认提交在 controller 返回精确 run ID 和 queue record 后结束：
 
 ```bash
 remote-runner run \
@@ -137,27 +116,26 @@ remote-runner run \
   --source-repo /absolute/path/to/clean/worktree \
   --label "smoke test" \
   --task-id "validation/smoke" \
-  --result-intent supporting \
-  --wait \
-  --until reportable \
   --command '"$RR_PROJECT_PYTHON" -m pytest -q'
 ```
 
-命令会以 JSON 返回权威的队列和执行状态。任务失败或被停止时，等待操作本身仍可能成功完成，因此应检查返回的 outcome，而不能只依赖 CLI 退出状态。
+workload 命令不会被追加 `--num-workers` 或做其他改写；程序自行读取
+`RR_ASSIGNED_CORES` 并决定如何使用。只有明确要求前台等待时才添加
+`--wait --until reportable`。
+
+输出同步只证明路径、传输字节、checksum 和 receipt。failed/stopped run 也可以
+同步 checkpoint；同步完成不会改写 execution 状态，也不会判断科学有效性。
 
 常用的后续命令：
 
 ```bash
 remote-runner monitor --project-config /path/to/.remote-runner.yaml
 remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-... --until reportable
-remote-runner tui --project-config /path/to/.remote-runner.yaml
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
 remote-runner retire-server --project-config /path/to/.remote-runner.yaml --server compute-a
 remote-runner retire-server --project-config /path/to/.remote-runner.yaml --server compute-a --apply
 ```
-
-在 TUI 中选中运行中或排队中的任务后按 `x`，即可检查并确认停止请求。控制器始终是状态权威；如果传输结果不明确，TUI 会报告停止尚未得到确认并重新刷新，而不会假定任务已经停止。
 
 修改放置策略、优先级、隐私设置或输出标识前，请阅读 [references/submission.md](references/submission.md)。执行破坏性的生命周期操作前，请阅读 [references/lifecycle.md](references/lifecycle.md)。
 
@@ -165,7 +143,7 @@ remote-runner retire-server --project-config /path/to/.remote-runner.yaml --serv
 
 [SKILL.md](SKILL.md) 和 [agents/openai.yaml](agents/openai.yaml) 提供 Codex skill 的元数据与运行契约。它们用于补充 CLI；Python wheel 不会安装任何用户专属的 Codex 配置。
 
-当前 Codex App 任务需要自动回报时，发起任务的这一轮必须让 `run --wait` 或
+明确要求当前 Codex App 任务自动回报时，发起任务的这一轮必须让 `run --wait` 或
 `remote-runner wait --until reportable` 保持为尚未完成的工具调用。这是一条
 附着式完成链路，不是后台回调：
 
@@ -187,6 +165,9 @@ remote-runner retire-server --project-config /path/to/.remote-runner.yaml --serv
 远程 run 仍会继续，但系统不会自动生成 detached 回报；之后必须使用同一个
 精确 run ID 重新附着。Remote Runner 不再提供 detached Codex callback、独立
 App Server 回报、模型 heartbeat 或定时模型/工具轮询路径。
+
+需要跨会话引用时，Trellis 只保存精确 run ID 和决定，不复制 Remote Runner 的
+queue/execution record；后续使用 run ID 查询权威状态。
 
 ## 安全与支持
 

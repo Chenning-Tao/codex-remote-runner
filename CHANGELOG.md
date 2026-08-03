@@ -3,6 +3,38 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## Unreleased
+
+### Removed
+
+- Removed the unused Textual TUI, its `tui` CLI command, and its optional
+  dependency; the local Web dashboard remains the human status interface.
+- Removed the experiment plan/design/point registry, run bindings, structured
+  result ingestion and decisions, official-result pointers, experiment CLI and
+  controller APIs, Web Experiments views/demo, scripts, documentation, and tests.
+- Removed result-intent metadata and worker-policy command rewriting. Workload
+  commands now execute unchanged and receive `RR_ASSIGNED_CORES`.
+
+### Changed
+
+- Made controller release activation migrate the removed experiment registry out of
+  active project state into private `retired-state` storage and upgrade verified
+  schema-1 pending output-sync intents to the transport-only schema. Migration is
+  bounded, idempotent, and blocks on identity conflicts instead of overwriting data.
+- Made durable submission detached by default; explicit waits continue to use
+  controller etag long polling without model polling.
+- Made output synchronization a terminal-run byte-transfer contract. Failed and
+  stopped checkpoints can be archived, receipts preserve the original execution
+  status, and synchronization never changes execution authority.
+- Simplified purge to exact run IDs and explicit task previews. Replacement runs
+  and scientific-equivalence checks are gone; task names are not tombstoned.
+  Record deletion is the default, while `--delete-artifacts` explicitly selects
+  separately guarded runtime/output/archive/worktree deletion.
+- Kept minimal internal run-ID replay tombstones outside normal status, Web, and
+  model-facing run views.
+- Clarified that Trellis stores exact run-ID references and cross-session decisions,
+  not copies of Remote Runner records.
+
 ## 0.8.0 - 2026-07-31
 
 ### Added

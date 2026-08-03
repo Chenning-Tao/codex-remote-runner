@@ -15,7 +15,6 @@ from ..output_sync import (
     process_pending_once,
 )
 from ..tmux import exact_tmux_target, output_sync_tmux_session, resolve_tmux_executable
-from .experiments import ingest_completed_sync_results
 from .output_prune import prune_outputs
 from .registry import ControllerPaths, controller_paths
 
@@ -101,7 +100,6 @@ def run_worker(
     execution_paths = project_paths(paths.config_path)
     while True:
         result = process_pending_once(execution_paths, connect_timeout=timeout)
-        result["experiment_results"] = ingest_completed_sync_results(paths)
         config = load_config(execution_paths.registry_root)
         if config is not None and not config.paused and config.prune_source_servers:
             result["prune_after_sync"] = prune_outputs(
@@ -142,7 +140,7 @@ def run_worker(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Synchronize succeeded run outputs.")
+    parser = argparse.ArgumentParser(description="Synchronize terminal-run outputs.")
     parser.add_argument("--controller-root", type=Path, required=True)
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--timeout", type=int, default=8)

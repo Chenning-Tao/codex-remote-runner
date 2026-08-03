@@ -14,9 +14,6 @@ from remote_runner._internal import output_sync, registration, task_purge
 from remote_runner._internal.controller import task_purge as controller_task_purge
 from remote_runner._internal.controller.registry import (
     controller_paths,
-    create_task_tombstone,
-    list_queued,
-    load_task_tombstone,
     submit_job,
     transition_queued_state,
 )
@@ -27,7 +24,6 @@ from remote_runner._internal.execution_registry import (
     update_current_state,
     write_yaml,
 )
-from experiment_fixtures import ingest_experiment_result_reference
 
 
 RUN_ID = "rr-0123456789abcdef"
@@ -45,11 +41,8 @@ def queued_job(
         "revision": "a" * 40,
         "label": "purge test",
         "task_id": task_id,
-        "result_intent": "excluded",
-        "result_tags": {},
         "submitted_command": command,
         "submitted_command_sha256": sha256_bytes(command.encode()),
-        "worker_arg": "--num-workers",
         "prepared_servers": [
             {
                 "name": "compute-a",
@@ -69,13 +62,20 @@ def queued_job(
     }
 
 
-def purge_args(root: Path, *, apply: bool, task: str = "task-1") -> argparse.Namespace:
+def purge_args(
+    root: Path,
+    *,
+    apply: bool,
+    task: str = "task-1",
+    delete_artifacts: bool | None = None,
+) -> argparse.Namespace:
     return argparse.Namespace(
         controller_root=root,
         project_id="example",
         task_id=task,
         reason="obsolete test task",
         apply=apply,
+        delete_artifacts=apply if delete_artifacts is None else delete_artifacts,
         timeout=8,
     )
 
@@ -86,15 +86,13 @@ def register_execution(paths: object, *, output_path: str | None = None) -> obje
             project_config=paths.config_path,  # type: ignore[attr-defined]
             label="purge test",
             task_id="task-1",
-            result_intent="excluded",
-            result_tags={},
             workload_class="standard",
             server="compute-a",
             ssh="compute-a",
             ssh_profile="test",
             configured_cores=8,
             minimum_cores=1,
-            workers=1,
+            assigned_cores=1,
             command="true",
             remote_workdir="/srv/example/worktrees/" + "a" * 40,
             project_python=sys.executable,
@@ -102,7 +100,6 @@ def register_execution(paths: object, *, output_path: str | None = None) -> obje
             source_revision="a" * 40,
             prepared_servers=["compute-a"],
             submitted_command="true",
-            worker_defaulted=False,
             require_clean_worktree=True,
             output_root=None,
             output_relpath=None,
@@ -119,6 +116,7 @@ def test_cli_exposes_task_purge_as_dry_run_by_default() -> None:
     args = cli.build_parser().parse_args(["purge-task", "--task-id", "task-1"])
 
     assert args.apply is False
+    assert args.delete_artifacts is False
     assert args.reason == "user confirmed this task is no longer needed"
 
 
@@ -143,55 +141,20 @@ def test_task_purge_uses_exact_stored_identity(tmp_path: Path) -> None:
     assert preview["candidate_count"] == 1
 
 
-def test_queue_only_task_is_stopped_purged_and_tombstoned(tmp_path: Path) -> None:
+def test_queue_only_task_is_purged_without_blocking_future_same_task(tmp_path: Path) -> None:
     paths = controller_paths(tmp_path / "controller", "example")
     write_yaml(paths.config_path, {"controller_registry": True})
     submit_job(paths, queued_job())
 
-    result = controller_task_purge.purge_task(purge_args(paths.root, apply=True))
+    result = controller_task_purge.purge_task(
+        purge_args(paths.root, apply=True, delete_artifacts=False)
+    )
 
     assert result["status"] == "complete"
     assert result["run_ids"] == [RUN_ID]
     assert not (paths.queue_dir / RUN_ID).exists()
-    tombstone = load_task_tombstone(paths, "task-1")
-    assert tombstone is not None
-    assert tombstone["status"] == "purged"
-    with pytest.raises(ValueError, match="cannot accept new runs"):
-        submit_job(paths, queued_job(run_id="rr-fedcba9876543210"))
-
-
-def test_experiment_result_reference_blocks_task_purge(tmp_path: Path) -> None:
-    paths = controller_paths(tmp_path / "controller", "example")
-    submit_job(paths, queued_job())
-    reference = ingest_experiment_result_reference(paths, RUN_ID)
-
-    result = controller_task_purge.purge_task(
-        purge_args(paths.root, apply=True)
-    )
-
-    assert result["status"] == "blocked"
-    blocker = next(
-        item for item in result["blockers"] if item["run_id"] == RUN_ID
-    )
-    assert blocker["result_ids"] == [reference["result_id"]]
-    assert "experiment provenance tombstone" in blocker["error"]
-    assert (paths.queue_dir / RUN_ID).is_dir()
-    assert load_task_tombstone(paths, "task-1") is None
-
-
-def test_tombstone_closes_dispatch_race(tmp_path: Path) -> None:
-    paths = controller_paths(tmp_path / "controller", "example")
-    submit_job(paths, queued_job())
-    create_task_tombstone(paths, "task-1", reason="obsolete")
-
-    assert list_queued(paths) == []
-    with pytest.raises(RuntimeError, match="tombstoned"):
-        transition_queued_state(
-            paths,
-            RUN_ID,
-            expected_revision=0,
-            status="dispatching",
-        )
+    assert result["artifacts_deleted"] is False
+    submit_job(paths, queued_job(run_id="rr-fedcba9876543210"))
 
 
 def test_dispatched_queue_without_execution_is_blocked(tmp_path: Path) -> None:
@@ -367,7 +330,9 @@ def test_task_purge_blocks_output_overlapping_a_retained_run(tmp_path: Path) -> 
         {"status": "failed"},
     )
 
-    preview = controller_task_purge.purge_task(purge_args(paths.root, apply=False))
+    preview = controller_task_purge.purge_task(
+        purge_args(paths.root, apply=False, delete_artifacts=True)
+    )
 
     assert preview["status"] == "blocked"
     assert preview["blockers"][0]["retained_run_id"] == "rr-fedcba9876543210"

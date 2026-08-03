@@ -11,7 +11,6 @@ from .output_paths import normalize_output_root
 
 
 PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-DEFAULT_WORKER_ARGUMENT = "--num-workers"
 DEFAULT_LEASE_SECONDS = 120
 DEFAULT_PROBE_INTERVAL_SECONDS = 60
 
@@ -37,11 +36,6 @@ class RemoteRuntime:
 
 
 @dataclass(frozen=True)
-class ParallelismConfig:
-    default_arg: str
-
-
-@dataclass(frozen=True)
 class SchedulingConfig:
     strategy: str
     lease_seconds: int
@@ -57,7 +51,6 @@ class ManagedProjectConfig:
     local_repo: Path
     controller: ControllerConfig
     remotes: dict[str, RemoteRuntime]
-    parallelism: ParallelismConfig
     scheduling: SchedulingConfig
     output_sync: OutputSyncConfig | None
 
@@ -214,20 +207,6 @@ def load_managed_project_config(path: Path) -> ManagedProjectConfig:
 
     if not any(runtime.enabled and runtime.auto_select for runtime in remotes.values()):
         raise ValueError("project config must enable at least one automatic candidate")
-
-    parallelism_raw = raw.get("parallelism", {})
-    parallelism = _mapping(parallelism_raw, "parallelism")
-    default_value = parallelism.get("default_value", "selected_server.cores")
-    if default_value != "selected_server.cores":
-        raise ValueError(
-            "project config parallelism.default_value must be selected_server.cores"
-        )
-    parallelism_config = ParallelismConfig(
-        default_arg=_text(
-            parallelism.get("default_arg", DEFAULT_WORKER_ARGUMENT),
-            "parallelism.default_arg",
-        )
-    )
 
     scheduling_raw = raw.get("scheduling", {})
     scheduling = _mapping(scheduling_raw, "scheduling")
@@ -389,7 +368,6 @@ def load_managed_project_config(path: Path) -> ManagedProjectConfig:
         local_repo=local_repo,
         controller=controller_config,
         remotes=remotes,
-        parallelism=parallelism_config,
         scheduling=scheduling_config,
         output_sync=output_sync_config,
     )

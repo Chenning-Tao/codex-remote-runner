@@ -1,4 +1,4 @@
 interface:
   display_name: "Remote Runner"
   short_description: "Run and follow durable remote workloads"
-  default_prompt: "Use $remote-runner to submit my clean committed HEAD, keep the originating tool call attached with --wait --until reportable, and treat only the final wait JSON plus tool completion as the follow-up signal. Then inspect the authoritative outcome and report in that same Codex App turn. Do not add model polling or a detached callback, and do not promise an App unread indicator."
+  default_prompt: "Use $remote-runner to submit my clean committed HEAD and return the exact run ID after the durable queue record is accepted. Detach by default; use an attached --wait --until reportable only when I explicitly ask to wait. Never add model polling, interpret scientific validity, or copy the run record into Trellis."

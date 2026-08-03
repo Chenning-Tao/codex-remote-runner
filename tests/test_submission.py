@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 from pathlib import Path
 
@@ -41,123 +40,7 @@ def config(tmp_path: Path) -> Path:
     return path
 
 
-def binding_template() -> dict[str, object]:
-    return {
-        "kind": "run_binding",
-        "schema_version": 1,
-        "targets": [
-            {
-                "study_id": "study-0123456789abcdef",
-                "origin_design_revision_id": "design-0123456789abcdef",
-                "plan_digest": "sha256:" + "1" * 64,
-                "point_id": "point-0123456789abcdef",
-                "point_revision_id": "pointrev-0123456789abcdef",
-                "point_revision_digest": "sha256:" + "2" * 64,
-                "setting_digest": "sha256:" + "3" * 64,
-                "result_group_id": "primary",
-                "contribution_role": "primary",
-            }
-        ],
-        "expects_result_manifest": False,
-        "metadata": {},
-    }
-
-
-def test_experiment_binding_template_is_finalized_for_exact_run(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "binding.json"
-    path.write_text(
-        json.dumps(binding_template()),
-        encoding="utf-8",
-    )
-
-    binding = submission._finalize_experiment_binding(
-        path,
-        run_id="rr-0123456789abcdef",
-        source_revision="a" * 40,
-    )
-
-    assert binding is not None
-    assert binding["binding_id"].startswith("binding-")
-    assert binding["run_id"] == "rr-0123456789abcdef"
-    assert binding["source_revision"] == "a" * 40
-    assert binding["binding_digest"].startswith("sha256:")
-
-
-def test_supplied_binding_identity_is_reproducible_and_fail_closed(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "binding.json"
-    template = binding_template()
-    template["binding_id"] = "binding-0123456789abcdef"
-    path.write_text(json.dumps(template), encoding="utf-8")
-
-    first = submission._finalize_experiment_binding(
-        path,
-        run_id="rr-0123456789abcdef",
-        source_revision="a" * 40,
-    )
-    second = submission._finalize_experiment_binding(
-        path,
-        run_id="rr-0123456789abcdef",
-        source_revision="a" * 40,
-    )
-
-    assert first == second
-    assert first is not None
-    assert first["binding_id"] == "binding-0123456789abcdef"
-
-    frozen = dict(first)
-    path.write_text(json.dumps(frozen), encoding="utf-8")
-    assert (
-        submission._finalize_experiment_binding(
-            path,
-            run_id="rr-0123456789abcdef",
-            source_revision="a" * 40,
-        )
-        == first
-    )
-
-    frozen_targets = list(frozen["targets"])
-    frozen_targets[0] = {**frozen_targets[0], "setting_digest": "sha256:" + "4" * 64}
-    frozen["targets"] = frozen_targets
-    path.write_text(json.dumps(frozen), encoding="utf-8")
-    with pytest.raises(ValueError, match="binding_digest does not match"):
-        submission._finalize_experiment_binding(
-            path,
-            run_id="rr-0123456789abcdef",
-            source_revision="a" * 40,
-        )
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("run_id", "rr-fedcba9876543210", "run_id does not match"),
-        ("source_revision", "b" * 40, "source_revision does not match"),
-    ],
-)
-def test_binding_template_rejects_supplied_run_identity_mismatch(
-    tmp_path: Path,
-    field: str,
-    value: str,
-    message: str,
-) -> None:
-    path = tmp_path / "binding.json"
-    template = binding_template()
-    template[field] = value
-    path.write_text(json.dumps(template), encoding="utf-8")
-
-    with pytest.raises(ValueError, match=message):
-        submission._finalize_experiment_binding(
-            path,
-            run_id="rr-0123456789abcdef",
-            source_revision="a" * 40,
-        )
-
-
-@pytest.mark.parametrize("override_name", [None, "task-repo"])
+@pytest.mark.parametrize("override_name", [None, "alternate"])
 def test_managed_run_fans_out_selected_source_and_submits_prepared_manifest(
     tmp_path: Path,
     monkeypatch,
@@ -217,8 +100,6 @@ def test_managed_run_fans_out_selected_source_and_submits_prepared_manifest(
         ssh_profile="auto",
         label="test",
         task_id="task-1",
-        result_intent="supporting",
-        result_tags=["purpose=validation", "campaign=backfill"],
         queue_priority="urgent",
         minimum_cores=128,
         command="python experiment.py",
@@ -236,21 +117,9 @@ def test_managed_run_fans_out_selected_source_and_submits_prepared_manifest(
     assert prepared_from == [(source_override or (tmp_path / "code")).resolve()]
     assert result["prepared_servers"] == ["compute-a"]
     assert submitted["revision"] == "a" * 40
-    assert submitted["result_intent"] == "supporting"
-    assert submitted["result_tags"] == {
-        "campaign": "backfill",
-        "purpose": "validation",
-    }
     assert submitted["queue_priority"] == "urgent"
     assert submitted["minimum_cores"] == 128
     assert result["minimum_cores"] == 128
-    assert result["result_intent"] == "supporting"
-    assert result["result_tags"] == {
-        "campaign": "backfill",
-        "purpose": "validation",
-    }
-    assert submitted["worker_arg"] == "--num-workers"
-    assert submitted["worker_policy"] == "auto"
     assert submitted["output_relpath"] == "validation/result.json"
     assert submitted["output_path"] is None
     prepared = submitted["prepared_servers"]
@@ -457,7 +326,6 @@ def test_test_workload_allows_configured_testing_pool_subset(
     assert result["prepared_servers"] == ["compute-d"]
     assert result["workload_class"] == "test"
     assert submitted["workload_class"] == "test"
-    assert submitted["worker_policy"] == "exact"
     assert submitted["prepared_servers"][0]["test_slots"] == 1
 
 

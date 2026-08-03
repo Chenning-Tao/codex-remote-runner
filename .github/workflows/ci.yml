@@ -58,12 +58,12 @@ jobs:
           export UV_TOOL_DIR="$RUNNER_TEMP/uv-tools"
           export UV_TOOL_BIN_DIR="$RUNNER_TEMP/uv-bin"
           wheel=(dist/*.whl)
-          uv tool install --force "${wheel[0]}[tui,web]"
+          uv tool install --force "${wheel[0]}[web]"
           "$UV_TOOL_BIN_DIR/remote-runner" --help
           "$UV_TOOL_DIR/codex-remote-runner/bin/python" -c \
-            'import rich; import textual; import remote_runner.tui; from remote_runner.web_app import STATIC_ROOT; assert (STATIC_ROOT / "index.html").is_file()'
+            'from remote_runner.web_app import STATIC_ROOT; assert (STATIC_ROOT / "index.html").is_file()'
           sdist=(dist/*.tar.gz)
-          uv tool install --force "${sdist[0]}[tui,web]"
+          uv tool install --force "${sdist[0]}[web]"
           "$UV_TOOL_BIN_DIR/remote-runner" web --help
           "$UV_TOOL_DIR/codex-remote-runner/bin/python" -c \
             'from remote_runner.web_app import STATIC_ROOT; assert (STATIC_ROOT / "index.html").is_file()'

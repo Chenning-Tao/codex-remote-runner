@@ -68,11 +68,8 @@ def job() -> dict[str, object]:
         "revision": "a" * 40,
         "label": "test",
         "task_id": "task-1",
-        "result_intent": "candidate",
-        "result_tags": {"campaign": "test"},
         "submitted_command": command,
         "submitted_command_sha256": sha256_bytes(command.encode()),
-        "worker_arg": "--num-workers",
         "prepared_servers": [
             {
                 "name": "compute-a",
@@ -188,7 +185,6 @@ def test_edit_queued_job_switches_workload_class(tmp_path: Path, monkeypatch) ->
     )
 
     assert result["job"]["workload_class"] == "test"
-    assert result["job"]["worker_policy"] == "auto"
     assert result["state"]["revision"] == 1
 
 
@@ -971,7 +967,6 @@ def test_status_filters_queue_and_runs_by_normalized_task_id(
             "returned": 1,
             "omitted": 0,
             "by_status": {"queued": 1},
-            "by_result_intent": {"candidate": 1},
         },
         "runs": {
             "total": 1,
@@ -980,7 +975,6 @@ def test_status_filters_queue_and_runs_by_normalized_task_id(
             "returned": 1,
             "omitted": 0,
             "by_authoritative_status": {"running": 1},
-            "by_result_intent": {"unclassified": 1},
         },
     }
 
@@ -996,7 +990,6 @@ def test_status_filters_queue_and_runs_by_normalized_task_id(
                 "returned": 0,
                 "omitted": 0,
                 "by_status": {},
-                "by_result_intent": {},
             },
             "runs": {
                 "total": 0,
@@ -1005,7 +998,6 @@ def test_status_filters_queue_and_runs_by_normalized_task_id(
                 "returned": 0,
                 "omitted": 0,
                 "by_authoritative_status": {},
-                "by_result_intent": {},
             },
         },
     }
@@ -1076,38 +1068,6 @@ def test_status_overview_loads_the_queue_registry_once(
     assert [item["job"]["run_id"] for item in result["queue"]] == [
         "rr-0123456789abcdef"
     ]
-
-
-def test_status_filters_queue_by_result_intent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    paths = controller_paths(tmp_path / "controller", "example")
-    submit_job(paths, job())
-    supporting = job()
-    supporting["run_id"] = "rr-fedcba9876543210"
-    supporting["result_intent"] = "supporting"
-    supporting["result_tags"] = {"purpose": "validation"}
-    submit_job(paths, supporting)
-    monkeypatch.setattr(
-        controller_service, "ensure_dispatcher", lambda **_kwargs: False
-    )
-    args = argparse.Namespace(
-        controller_root=paths.root,
-        project_id="example",
-        run_id=None,
-        task_id=None,
-        result_intent="supporting",
-        timeout=8,
-        interval=60,
-    )
-
-    result = controller_service.status(args)
-
-    assert [item["job"]["run_id"] for item in result["queue"]] == [
-        "rr-fedcba9876543210"
-    ]
-    assert result["summary"]["queue"]["by_result_intent"] == {"supporting": 1}
 
 
 def test_status_defaults_to_active_records_with_complete_summary(
@@ -1188,13 +1148,12 @@ def test_status_defaults_to_active_records_with_complete_summary(
     assert monitored == ["rr-1111111111111111", "rr-2222222222222222"]
     assert result["summary"] == {
         "queue": {
-            "total": 3,
+                "total": 2,
             "active": 2,
             "matched": 2,
             "returned": 1,
             "omitted": 1,
-            "by_status": {"queued": 2, "stopped": 1},
-            "by_result_intent": {"candidate": 3},
+                "by_status": {"queued": 2},
         },
         "runs": {
             "total": 3,
@@ -1203,7 +1162,6 @@ def test_status_defaults_to_active_records_with_complete_summary(
             "returned": 1,
             "omitted": 1,
             "by_authoritative_status": {"running": 2, "succeeded": 1},
-            "by_result_intent": {"unclassified": 3},
         },
     }
 

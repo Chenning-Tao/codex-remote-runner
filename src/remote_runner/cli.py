@@ -9,7 +9,6 @@ from typing import Any
 from . import __version__
 from ._internal import (
     cleanup,
-    experiment_client,
     monitoring,
     output_prune,
     output_sync_client,
@@ -26,8 +25,7 @@ from ._internal import (
 )
 from ._internal.pool import DEFAULT_SERVER_REGISTRY
 from ._internal.preparation_manifest import write_preparation_manifest
-from ._internal.result_metadata import MONITOR_RESULT_INTENTS, RESULT_INTENTS
-from ._internal.scheduling import QUEUE_PRIORITIES, WORKER_POLICIES, WORKLOAD_CLASSES
+from ._internal.scheduling import QUEUE_PRIORITIES, WORKLOAD_CLASSES
 from ._revision import SOURCE_REVISION
 
 
@@ -106,17 +104,6 @@ def _add_wait_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_experiment_common(
-    parser: argparse.ArgumentParser,
-    *,
-    document: bool = True,
-) -> None:
-    _add_project_config(parser)
-    if document:
-        parser.add_argument("--file", type=Path, required=True)
-    parser.add_argument("--timeout", type=_positive_int, default=8)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="remote-runner",
@@ -161,32 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--label", required=True)
     run_parser.add_argument("--task-id", required=True)
     run_parser.add_argument(
-        "--result-intent",
-        choices=RESULT_INTENTS,
-        required=True,
-        help="declare whether this run is a result candidate, supporting evidence, or excluded",
-    )
-    run_parser.add_argument(
-        "--tag",
-        dest="result_tags",
-        action="append",
-        metavar="KEY=VALUE",
-        help="attach open result metadata; repeat for multiple tags",
-    )
-    run_parser.add_argument(
         "--workload-class",
         choices=WORKLOAD_CLASSES,
         default="standard",
         help="submit standard exclusive work or a configured test-lane workload",
-    )
-    run_parser.add_argument(
-        "--worker-policy",
-        choices=WORKER_POLICIES,
-        help=(
-            "append the selected server's core count with the configured worker "
-            "argument (auto), or execute the submitted command unchanged (exact); "
-            "defaults to auto for standard work and exact for test work"
-        ),
     )
     run_parser.add_argument(
         "--queue-priority",
@@ -200,14 +165,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="portable relative POSIX path resolved against the selected output_root",
     )
     run_parser.add_argument("--output-metadata")
-    run_parser.add_argument(
-        "--experiment-binding",
-        type=Path,
-        help=(
-            "finalize and freeze a run_binding JSON template for this exact run "
-            "and source revision"
-        ),
-    )
     run_parser.add_argument("--privacy", choices=("process-title",))
     run_parser.add_argument("--run-id")
     run_parser.add_argument(
@@ -225,11 +182,6 @@ def build_parser() -> argparse.ArgumentParser:
     selector = monitor_parser.add_mutually_exclusive_group()
     selector.add_argument("--run-id")
     selector.add_argument("--task-id")
-    monitor_parser.add_argument(
-        "--result-intent",
-        choices=MONITOR_RESULT_INTENTS,
-        help="filter queue and execution records by declared result intent",
-    )
     monitor_parser.add_argument("--timeout", type=int, default=8)
 
     wait_parser = subparsers.add_parser(
@@ -240,24 +192,6 @@ def build_parser() -> argparse.ArgumentParser:
     wait_parser.add_argument("--run-id", required=True)
     wait_parser.add_argument("--timeout", type=int, default=8)
     _add_wait_options(wait_parser)
-
-    tui_parser = subparsers.add_parser(
-        "tui",
-        help="open the optional interactive human dashboard",
-    )
-    _add_project_config(tui_parser)
-    tui_parser.add_argument(
-        "--server-registry",
-        type=Path,
-        default=DEFAULT_SERVER_REGISTRY,
-    )
-    tui_parser.add_argument("--timeout", type=int, default=8)
-    tui_parser.add_argument(
-        "--stop-timeout",
-        type=_positive_int,
-        default=10,
-        help="wait this many seconds before escalating a selected workload stop",
-    )
 
     web_parser = subparsers.add_parser(
         "web",
@@ -286,86 +220,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="start the local dashboard without opening a browser",
     )
 
-    experiment_parser = subparsers.add_parser(
-        "experiment",
-        help="publish experiment designs and inspect the project result registry",
-    )
-    experiment_areas = experiment_parser.add_subparsers(
-        dest="experiment_area",
-        required=True,
-    )
-    experiment_query_parser = experiment_areas.add_parser(
-        "query",
-        help="execute one bounded experiment_query JSON document",
-    )
-    _add_experiment_common(experiment_query_parser)
-    experiment_query_parser.set_defaults(experiment_command="query")
-
-    experiment_plan_parser = experiment_areas.add_parser(
-        "plan",
-        help="preview or publish an experiment_plan JSON document",
-    )
-    experiment_plan_actions = experiment_plan_parser.add_subparsers(
-        dest="experiment_plan_action",
-        required=True,
-    )
-    experiment_plan_preview = experiment_plan_actions.add_parser("preview")
-    _add_experiment_common(experiment_plan_preview)
-    experiment_plan_preview.set_defaults(experiment_command="plan-preview")
-    experiment_plan_publish = experiment_plan_actions.add_parser("publish")
-    _add_experiment_common(experiment_plan_publish)
-    experiment_plan_publish.add_argument("--request-id", required=True)
-    experiment_plan_publish.add_argument("--impact-digest")
-    experiment_plan_publish.set_defaults(experiment_command="plan-publish")
-
-    experiment_binding_parser = experiment_areas.add_parser(
-        "binding",
-        help="ingest an explicit immutable run_binding document",
-    )
-    experiment_binding_actions = experiment_binding_parser.add_subparsers(
-        dest="experiment_binding_action",
-        required=True,
-    )
-    experiment_binding_ingest = experiment_binding_actions.add_parser("ingest")
-    _add_experiment_common(experiment_binding_ingest)
-    experiment_binding_ingest.set_defaults(experiment_command="binding-ingest")
-
-    experiment_result_parser = experiment_areas.add_parser(
-        "result",
-        help="ingest a structured experiment_result document",
-    )
-    experiment_result_actions = experiment_result_parser.add_subparsers(
-        dest="experiment_result_action",
-        required=True,
-    )
-    experiment_result_ingest = experiment_result_actions.add_parser("ingest")
-    _add_experiment_common(experiment_result_ingest)
-    experiment_result_ingest.set_defaults(experiment_command="result-ingest")
-
-    experiment_acceptance_parser = experiment_areas.add_parser(
-        "acceptance",
-        help="record an explicit result acceptance decision",
-    )
-    experiment_acceptance_actions = experiment_acceptance_parser.add_subparsers(
-        dest="experiment_acceptance_action",
-        required=True,
-    )
-    experiment_acceptance_record = experiment_acceptance_actions.add_parser("record")
-    _add_experiment_common(experiment_acceptance_record)
-    experiment_acceptance_record.set_defaults(experiment_command="acceptance-record")
-
-    experiment_registry_parser = experiment_areas.add_parser(
-        "registry",
-        help="maintain the rebuildable experiment projection",
-    )
-    experiment_registry_actions = experiment_registry_parser.add_subparsers(
-        dest="experiment_registry_action",
-        required=True,
-    )
-    experiment_registry_rebuild = experiment_registry_actions.add_parser("rebuild")
-    _add_experiment_common(experiment_registry_rebuild, document=False)
-    experiment_registry_rebuild.set_defaults(experiment_command="registry-rebuild")
-
     stop_parser = subparsers.add_parser(
         "stop",
         help="stop one queued or running workload",
@@ -393,9 +247,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_project_config(run_purge_parser)
     run_purge_parser.add_argument("--run-id", required=True)
-    replacement = run_purge_parser.add_mutually_exclusive_group(required=True)
-    replacement.add_argument("--replacement-run-id")
-    replacement.add_argument("--no-replacement", action="store_true")
     run_purge_parser.add_argument(
         "--reason",
         default="user confirmed this failed run is no longer needed",
@@ -404,6 +255,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="perform the purge; omission produces a dry-run inventory",
+    )
+    run_purge_parser.add_argument(
+        "--delete-artifacts",
+        action="store_true",
+        help="also delete exclusively owned runtime, output, archive, and worktree data",
     )
     run_purge_parser.add_argument("--timeout", type=int, default=10)
 
@@ -422,11 +278,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="perform the purge; omission produces a dry-run inventory",
     )
+    purge_parser.add_argument(
+        "--delete-artifacts",
+        action="store_true",
+        help="also delete exclusively owned runtime, output, archive, and worktree data",
+    )
     purge_parser.add_argument("--timeout", type=int, default=10)
 
     sync_parser = subparsers.add_parser(
         "sync-outputs",
-        help="configure and start automatic synchronization of succeeded outputs",
+        help="configure and start automatic synchronization of terminal-run outputs",
     )
     _add_project_config(sync_parser)
     sync_parser.add_argument("--timeout", type=int, default=10)
@@ -560,8 +421,6 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.subcommand == "wait":
         result = waiting.wait_for_run(args)
         return result, waiting.wait_exit_code(result)
-    if args.subcommand == "experiment":
-        return experiment_client.execute(args), 0
     if args.subcommand == "stop":
         return stopping.request_stop(args), 0
     if args.subcommand == "cleanup":
@@ -604,25 +463,6 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.subcommand == "tui":
-        try:
-            from .tui import run_tui
-        except ModuleNotFoundError as exc:
-            missing = exc.name or ""
-            if any(
-                missing == dependency or missing.startswith(f"{dependency}.")
-                for dependency in ("rich", "textual")
-            ):
-                parser.error(
-                    "the TUI optional dependency is not installed; "
-                    "install codex-remote-runner with the 'tui' extra"
-                )
-            raise
-        try:
-            run_tui(args)
-        except (OSError, RuntimeError, ValueError) as exc:
-            parser.error(str(exc))
-        return 0
     if args.subcommand == "web":
         try:
             from .web_app import run_web

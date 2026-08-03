@@ -33,11 +33,8 @@ def queued_job() -> dict[str, object]:
         "revision": "a" * 40,
         "label": "cleanup test",
         "task_id": "task-1",
-        "result_intent": "candidate",
-        "result_tags": {},
         "submitted_command": command,
         "submitted_command_sha256": sha256_bytes(command.encode()),
-        "worker_arg": "--num-workers",
         "prepared_servers": [
             {
                 "name": "compute-a",

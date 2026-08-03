@@ -27,23 +27,11 @@ from ..output_sync import (
     store_config,
     sync_status,
 )
-from ..result_metadata import MONITOR_RESULT_INTENTS
 from ..run_readiness import cohort_report_readiness
 from ..scheduling import normalize_workload_class
 from ..stopping import stop as stop_execution
 from ..tmux import dispatcher_tmux_session, exact_tmux_target, resolve_tmux_executable
 from .dashboard import collect_server_snapshot, enrich_active_runs, validate_payload
-from .experiments import (
-    binding_submission_guard,
-    ingest_binding as ingest_experiment_binding,
-    ingest_completed_sync_results,
-    ingest_result as ingest_experiment_result,
-    preview_plan as preview_experiment_plan,
-    publish_plan as publish_experiment_plan,
-    query_registry as query_experiment_registry,
-    rebuild_registry as rebuild_experiment_registry,
-    record_acceptance as record_experiment_acceptance,
-)
 from .output_prune import prune_outputs
 from .run_purge import purge_run
 from .task_purge import purge_task
@@ -156,13 +144,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
             disable_config(paths.registry_root)
         else:
             store_config(paths.registry_root, output_sync)
-    raw_binding = job.get("experiment_binding")
-    if raw_binding is None:
-        entry = submit_job(paths, job)
-    else:
-        with binding_submission_guard(paths, raw_binding) as binding:
-            job["experiment_binding"] = binding
-            entry = submit_job(paths, job)
+    entry = submit_job(paths, job)
     stored_job, _state = load_job(paths, entry.name)
     ensure_server_capacities(paths, stored_job["prepared_servers"])
     dispatcher_started = ensure_dispatcher(
@@ -176,67 +158,6 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         "outcome": {"action": "submitted", "run_id": entry.name},
         "dispatcher_started": dispatcher_started,
     }
-
-
-def experiment_query(args: argparse.Namespace) -> dict[str, Any]:
-    paths = controller_paths(args.controller_root, args.project_id)
-    ingestion = ingest_completed_sync_results(paths)
-    result = query_experiment_registry(paths, _read_object("experiment query"))
-    result["ingestion"] = {
-        "projected": ingestion["projected"],
-        "error_count": len(ingestion["errors"]),
-        "errors": ingestion["errors"][:20],
-    }
-    return result
-
-
-def experiment_plan_preview(args: argparse.Namespace) -> dict[str, Any]:
-    paths = controller_paths(args.controller_root, args.project_id)
-    return preview_experiment_plan(paths, _read_object("experiment plan"))
-
-
-def experiment_plan_publish(args: argparse.Namespace) -> dict[str, Any]:
-    paths = controller_paths(args.controller_root, args.project_id)
-    request = _read_object("experiment plan publication")
-    if set(request) - {"plan", "request_id", "expected_impact_digest"}:
-        raise ValueError("experiment plan publication contains unknown fields")
-    if "plan" not in request or "request_id" not in request:
-        raise ValueError("experiment plan publication requires plan and request_id")
-    request_id = request["request_id"]
-    if not isinstance(request_id, str):
-        raise ValueError("experiment plan publication request_id must be a string")
-    expected_impact_digest = request.get("expected_impact_digest")
-    if expected_impact_digest is not None and not isinstance(
-        expected_impact_digest, str
-    ):
-        raise ValueError("expected_impact_digest must be a string or null")
-    return publish_experiment_plan(
-        paths,
-        request["plan"],
-        request_id=request_id,
-        expected_impact_digest=expected_impact_digest,
-    )
-
-
-def experiment_binding_ingest(args: argparse.Namespace) -> dict[str, Any]:
-    paths = controller_paths(args.controller_root, args.project_id)
-    return ingest_experiment_binding(paths, _read_object("run binding"))
-
-
-def experiment_result_ingest(args: argparse.Namespace) -> dict[str, Any]:
-    paths = controller_paths(args.controller_root, args.project_id)
-    return ingest_experiment_result(paths, _read_object("experiment result"))
-
-
-def experiment_acceptance(args: argparse.Namespace) -> dict[str, Any]:
-    paths = controller_paths(args.controller_root, args.project_id)
-    ingest_completed_sync_results(paths)
-    return record_experiment_acceptance(paths, _read_object("acceptance request"))
-
-
-def experiment_registry_rebuild(args: argparse.Namespace) -> dict[str, Any]:
-    paths = controller_paths(args.controller_root, args.project_id)
-    return rebuild_experiment_registry(paths)
 
 
 def pending_all(args: argparse.Namespace) -> dict[str, Any]:
@@ -480,9 +401,7 @@ def _compact_queue_item(
             "run_id",
             "label",
             "task_id",
-            "result_intent",
             "workload_class",
-            "worker_policy",
             "queue_priority",
             "queue_position",
             "minimum_cores",
@@ -528,7 +447,6 @@ def _compact_execution(row: dict[str, Any]) -> dict[str, Any]:
             "run_id",
             "label",
             "task_id",
-            "result_intent",
             "server",
             "workload_class",
             "authoritative_status",
@@ -569,9 +487,6 @@ def _status_summary(
             "returned": queue_returned,
             "omitted": max(0, queue_matched - queue_returned),
             "by_status": _status_counts(queue_statuses),
-            "by_result_intent": _status_counts(
-                [str(job.get("result_intent", "unclassified")) for job, _state in jobs]
-            ),
         },
         "runs": {
             "total": len(rows),
@@ -580,9 +495,6 @@ def _status_summary(
             "returned": runs_returned,
             "omitted": max(0, runs_matched - runs_returned),
             "by_authoritative_status": _status_counts(run_statuses),
-            "by_result_intent": _status_counts(
-                [str(row.get("result_intent", "unclassified")) for row in rows]
-            ),
         },
     }
 
@@ -590,13 +502,14 @@ def _status_summary(
 def status(args: argparse.Namespace) -> dict[str, Any]:
     paths = controller_paths(args.controller_root, args.project_id)
     task_selector = _task_selector(getattr(args, "task_id", None))
-    result_intent = getattr(args, "result_intent", None)
     overview = args.run_id is None and task_selector is None
-    all_jobs = [] if args.run_id is not None else list_jobs(paths)
-    if result_intent is not None:
-        all_jobs = [
-            item for item in all_jobs if item[0].get("result_intent") == result_intent
-        ]
+    all_jobs = (
+        []
+        if args.run_id is not None
+        else list_jobs(paths, statuses={"queued", "dispatching"})
+        if overview
+        else list_jobs(paths)
+    )
     if args.run_id is not None:
         try:
             job, state = load_job(paths, args.run_id)
@@ -616,21 +529,15 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
             {"job": job, "state": state}
             for job, state in (dispatching + list_queued(paths, jobs=all_jobs))
         ]
-    if result_intent is not None:
-        queue = [
-            item for item in queue if item["job"].get("result_intent") == result_intent
-        ]
     runs: list[dict[str, Any]] = []
     all_rows: list[dict[str, Any]] = []
     if paths.config_path.is_file():
         execution_paths = project_paths(paths.config_path)
         all_rows = monitoring.load_registry_rows(
-            execution_paths, only_run_id=args.run_id
+            execution_paths,
+            only_run_id=args.run_id,
+            active_only=overview,
         )
-        if result_intent is not None:
-            all_rows = [
-                row for row in all_rows if row.get("result_intent") == result_intent
-            ]
         rows = all_rows
         if task_selector is not None:
             rows = [
@@ -1338,13 +1245,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval", type=int, default=60)
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("submit")
-    subparsers.add_parser("experiment-query")
-    subparsers.add_parser("experiment-plan-preview")
-    subparsers.add_parser("experiment-plan-publish")
-    subparsers.add_parser("experiment-binding-ingest")
-    subparsers.add_parser("experiment-result-ingest")
-    subparsers.add_parser("experiment-acceptance")
-    subparsers.add_parser("experiment-registry-rebuild")
     subparsers.add_parser("pending-all")
     subparsers.add_parser("extend-all")
     queued_job_parser = subparsers.add_parser("queued-job")
@@ -1363,14 +1263,13 @@ def build_parser() -> argparse.ArgumentParser:
     status_selector = status_parser.add_mutually_exclusive_group()
     status_selector.add_argument("--run-id")
     status_selector.add_argument("--task-id")
-    status_parser.add_argument("--result-intent", choices=MONITOR_RESULT_INTENTS)
     wait_parser = subparsers.add_parser("wait-run")
     wait_parser.add_argument("--run-id", required=True)
     wait_parser.add_argument("--after-etag")
     wait_parser.add_argument("--wait-seconds", type=int, default=50)
     subparsers.add_parser("wait-runs")
     dashboard_parser = subparsers.add_parser("dashboard")
-    dashboard_parser.set_defaults(run_id=None, task_id=None, result_intent=None)
+    dashboard_parser.set_defaults(run_id=None, task_id=None)
     stop_parser = subparsers.add_parser("stop")
     stop_parser.add_argument("--run-id", required=True)
     cleanup_parser = subparsers.add_parser("cleanup-stopped")
@@ -1378,15 +1277,14 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument("--apply", action="store_true")
     run_purge_parser = subparsers.add_parser("purge-run")
     run_purge_parser.add_argument("--run-id", required=True)
-    replacement = run_purge_parser.add_mutually_exclusive_group(required=True)
-    replacement.add_argument("--replacement-run-id")
-    replacement.add_argument("--no-replacement", action="store_true")
     run_purge_parser.add_argument("--reason", required=True)
     run_purge_parser.add_argument("--apply", action="store_true")
+    run_purge_parser.add_argument("--delete-artifacts", action="store_true")
     purge_parser = subparsers.add_parser("purge-task")
     purge_parser.add_argument("--task-id", required=True)
     purge_parser.add_argument("--reason", required=True)
     purge_parser.add_argument("--apply", action="store_true")
+    purge_parser.add_argument("--delete-artifacts", action="store_true")
     subparsers.add_parser("configure-output-sync")
     output_prune_parser = subparsers.add_parser("prune-outputs")
     output_prune_parser.add_argument("--run-id")
@@ -1407,20 +1305,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action == "submit":
             result = submit(args)
-        elif args.action == "experiment-query":
-            result = experiment_query(args)
-        elif args.action == "experiment-plan-preview":
-            result = experiment_plan_preview(args)
-        elif args.action == "experiment-plan-publish":
-            result = experiment_plan_publish(args)
-        elif args.action == "experiment-binding-ingest":
-            result = experiment_binding_ingest(args)
-        elif args.action == "experiment-result-ingest":
-            result = experiment_result_ingest(args)
-        elif args.action == "experiment-acceptance":
-            result = experiment_acceptance(args)
-        elif args.action == "experiment-registry-rebuild":
-            result = experiment_registry_rebuild(args)
         elif args.action == "pending-all":
             result = pending_all(args)
         elif args.action == "extend-all":

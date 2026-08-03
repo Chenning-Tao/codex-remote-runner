@@ -243,38 +243,16 @@ def job(
         "revision": "a" * 40,
         "label": "experiment",
         "task_id": "task-1",
-        "result_intent": "candidate",
-        "result_tags": {},
         "queue_priority": queue_priority,
         "workload_class": workload_class,
         "submitted_command": command,
         "submitted_command_sha256": sha256_bytes(command.encode()),
-        "worker_arg": "--num-workers",
         "prepared_servers": servers,
         "output_relpath": None,
         "output_path": None,
         "output_metadata": {},
         "lease_seconds": 120,
     }
-
-
-def test_worker_resolution_is_independent_from_workload_class() -> None:
-    switched_to_test = job(workload_class="test")
-    switched_to_test["worker_policy"] = "auto"
-    switched_to_standard = job(
-        workload_class="standard",
-        command="python -m pytest tests/test_scheduler.py -q",
-    )
-    switched_to_standard["worker_policy"] = "exact"
-
-    assert controller_dispatcher._resolve_job_command(
-        switched_to_test,
-        configured_cores=256,
-    ) == ("python experiment.py --num-workers 256", 256, True)
-    assert controller_dispatcher._resolve_job_command(
-        switched_to_standard,
-        configured_cores=256,
-    ) == ("python -m pytest tests/test_scheduler.py -q", None, False)
 
 
 def test_execution_registration_preserves_minimum_cores(
@@ -297,9 +275,7 @@ def test_execution_registration_preserves_minimum_cores(
         queued,
         server,
         workdir="/srv/example/worktrees/" + "a" * 40,
-        resolved_command="python experiment.py --num-workers 256",
-        workers=256,
-        worker_defaulted=True,
+        assigned_cores=256,
         output_root=None,
         output_relpath=None,
         output_path=None,
@@ -307,6 +283,8 @@ def test_execution_registration_preserves_minimum_cores(
 
     assert captured["minimum_cores"] == 256
     assert captured["configured_cores"] == 256
+    assert captured["assigned_cores"] == 256
+    assert captured["command"] == "python experiment.py"
 
 
 def test_dispatch_selects_urgent_job_ahead_of_older_normal_job(
@@ -506,8 +484,7 @@ def test_external_saturation_without_runner_work_still_dispatches(
 
     assert outcome.action == "started"
     assert outcome.server == "compute-b"
-    assert recorded["workers"] == 256
-    assert str(recorded["resolved_command"]).endswith("--num-workers 256")
+    assert recorded["assigned_cores"] == 256
 
 
 def test_dispatch_prefers_absolute_headroom(tmp_path: Path, monkeypatch) -> None:
@@ -541,7 +518,7 @@ def test_dispatch_prefers_absolute_headroom(tmp_path: Path, monkeypatch) -> None
     outcome = controller_dispatcher.dispatch_once(paths)
 
     assert outcome.server == "compute-b"
-    assert selected["workers"] == 256
+    assert selected["assigned_cores"] == 256
 
 
 def test_dispatch_only_probes_manually_enabled_servers(
@@ -681,8 +658,8 @@ def test_blocked_standard_head_does_not_hide_test_lane(
 
     assert outcome.action == "started"
     assert outcome.run_id == "rr-fedcba9876543210"
-    assert selected["resolved_command"] == "python -m pytest tests/test_scheduler.py -q"
-    assert selected["workers"] is None
+    assert selected["assigned_cores"] == 256
+    assert selected["job"]["submitted_command"] == "python -m pytest tests/test_scheduler.py -q"
     assert load_job(paths, RUN_ID)[1]["status"] == "queued"
     assert load_job(paths, str(standard_backfill["run_id"]))[1]["status"] == "queued"
 

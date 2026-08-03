@@ -361,6 +361,8 @@ def request_task_purge(args: argparse.Namespace) -> dict[str, Any]:
     action_args = ["--task-id", args.task_id, "--reason", args.reason]
     if args.apply:
         action_args.append("--apply")
+    if args.delete_artifacts:
+        action_args.append("--delete-artifacts")
     return call_controller(
         config,
         "purge-task",

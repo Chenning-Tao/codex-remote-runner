@@ -30,7 +30,7 @@ def view(
         ("completed", "ready"),
         ("pending", "waiting"),
         ("retryable", "waiting"),
-        ("waiting_for_succeeded_state", "waiting"),
+        ("waiting_for_terminal_state", "waiting"),
         ("cancelled", "attention"),
         ("unknown", "attention"),
     ],

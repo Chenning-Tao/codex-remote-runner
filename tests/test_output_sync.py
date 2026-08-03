@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -39,15 +38,13 @@ def make_run(
             project_config=config,
             label="sync-test",
             task_id="task-1",
-            result_intent="candidate",
-            result_tags={"campaign": "sync-test"},
             workload_class="standard",
             server="compute-b",
             ssh="compute-b",
             ssh_profile="intranet",
             configured_cores=8,
             minimum_cores=1,
-            workers=None,
+            assigned_cores=8,
             command="true\n",
             remote_workdir=str(worktree),
             project_python=sys.executable,
@@ -55,7 +52,6 @@ def make_run(
             source_revision="a" * 40,
             prepared_servers=["compute-b"],
             submitted_command="true",
-            worker_defaulted=False,
             require_clean_worktree=True,
             output_root=None,
             output_relpath=None,
@@ -108,19 +104,100 @@ def test_succeeded_output_creates_one_immutable_pending_intent(tmp_path: Path) -
     pending = output_sync.list_pending(paths.registry_root)  # type: ignore[attr-defined]
     assert len(pending) == 1
     assert pending[0] == {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": RUN_ID,
         "source_server": "compute-b",
         "source_path": "/srv/project/output/run",
         "revision": "a" * 40,
             "task_id": "task-1",
             "label": "sync-test",
-            "result_intent": "candidate",
-            "result_tags": {"campaign": "sync-test"},
         "output_metadata": {"code": "bb90"},
-        "succeeded_at": "2026-07-22T00:00:00Z",
+        "authoritative_status": "succeeded",
+        "terminal_at": "2026-07-22T00:00:00Z",
         "state_revision": 1,
     }
+
+
+def test_legacy_pending_intent_migrates_without_scientific_metadata(
+    tmp_path: Path,
+) -> None:
+    _config, paths = make_run(tmp_path)
+    mark_succeeded(paths)
+    current = output_sync.list_pending(paths.registry_root)[0]
+    pending_path = (
+        output_sync.output_sync_paths(paths.registry_root).pending_dir
+        / f"{RUN_ID}.json"
+    )
+    legacy = {
+        "schema_version": 1,
+        "run_id": current["run_id"],
+        "source_server": current["source_server"],
+        "source_path": current["source_path"],
+        "revision": current["revision"],
+        "task_id": current["task_id"],
+        "label": current["label"],
+        "result_intent": "candidate",
+        "result_tags": {"study": "retired"},
+        "experiment_binding": {"opaque": "retired"},
+        "output_metadata": current["output_metadata"],
+        "succeeded_at": current["terminal_at"],
+        "state_revision": current["state_revision"],
+    }
+    pending_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    migrated = output_sync.migrate_legacy_pending_intents(paths)
+
+    assert migrated == {"scanned": 1, "migrated_run_ids": [RUN_ID]}
+    assert output_sync.list_pending(paths.registry_root) == [current]
+    stored = json.loads(pending_path.read_text(encoding="utf-8"))
+    assert "result_intent" not in stored
+    assert "result_tags" not in stored
+    assert "experiment_binding" not in stored
+    assert output_sync.migrate_legacy_pending_intents(paths) == {
+        "scanned": 1,
+        "migrated_run_ids": [],
+    }
+
+
+def test_legacy_pending_intent_migration_rejects_execution_mismatch(
+    tmp_path: Path,
+) -> None:
+    _config, paths = make_run(tmp_path)
+    mark_succeeded(paths)
+    current = output_sync.list_pending(paths.registry_root)[0]
+    pending_path = (
+        output_sync.output_sync_paths(paths.registry_root).pending_dir
+        / f"{RUN_ID}.json"
+    )
+    legacy = {
+        "schema_version": 1,
+        "run_id": current["run_id"],
+        "source_server": current["source_server"],
+        "source_path": "/srv/project/output/other",
+        "revision": current["revision"],
+        "task_id": current["task_id"],
+        "label": current["label"],
+        "output_metadata": current["output_metadata"],
+        "succeeded_at": current["terminal_at"],
+        "state_revision": current["state_revision"],
+    }
+    pending_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source_path"):
+        output_sync.migrate_legacy_pending_intents(paths)
+
+    assert json.loads(pending_path.read_text(encoding="utf-8")) == legacy
+
+
+def test_legacy_pending_intent_migration_rejects_broken_pending_symlink(
+    tmp_path: Path,
+) -> None:
+    _config, paths = make_run(tmp_path)
+    pending = output_sync.output_sync_paths(paths.registry_root).pending_dir
+    pending.symlink_to(tmp_path / "missing", target_is_directory=True)
+
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        output_sync.migrate_legacy_pending_intents(paths)
 
 
 def test_succeeded_run_without_output_path_does_not_enqueue(tmp_path: Path) -> None:
@@ -177,66 +254,46 @@ def test_pending_sync_is_confirmed_only_after_archive_receipt(
     assert run_status["receipt"]["disposition"] == "copied_and_verified"
 
 
-def test_archive_validates_structured_experiment_result_and_artifact_digests(
+@pytest.mark.parametrize(("status", "exit_code"), [("failed", 1), ("stopped", 143)])
+def test_failed_and_stopped_checkpoints_sync_without_changing_execution_status(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    exit_code: int,
 ) -> None:
-    artifacts_root = tmp_path / "archive" / "artifacts"
-    archived_run = artifacts_root / RUN_ID
-    archived_run.mkdir(parents=True)
-    artifact_bytes = b'{"samples_per_second":612.5}\n'
-    (archived_run / "summary.json").write_bytes(artifact_bytes)
-    artifact_digest = f"sha256:{hashlib.sha256(artifact_bytes).hexdigest()}"
-    manifest = {
-        "kind": "experiment_result",
-        "schema_version": 1,
-        "emitter_run_id": RUN_ID,
-        "results": [
-            {
-                "artifacts": [
-                    {
-                        "run_id": RUN_ID,
-                        "relative_path": "summary.json",
-                        "sha256": artifact_digest,
-                    }
-                ]
-            }
-        ],
-    }
-    (archived_run / "experiment-result.json").write_text(
-        json.dumps(manifest),
-        encoding="utf-8",
-    )
-    payload = {
-        "run_id": RUN_ID,
-        "experiment_binding": {
-            "kind": "run_binding",
-            "schema_version": 1,
-            "run_id": RUN_ID,
-            "source_revision": "a" * 40,
-            "expects_result_manifest": True,
-            "result_manifest_relpath": "experiment-result.json",
+    _config, paths = make_run(tmp_path)
+    _manifest, state = load_current_run(paths, RUN_ID)
+    update_current_state(
+        paths,
+        RUN_ID,
+        int(state["revision"]),
+        {
+            "status": status,
+            "finished_at": "2026-07-22T00:00:00Z",
+            "exit_code": exit_code,
         },
-    }
-
-    verified = output_sync_remote._verified_experiment_result(
-        payload,
-        archived_run_path=archived_run,
-        artifacts_root=artifacts_root,
-        source_kind="directory",
+    )
+    intent = output_sync.list_pending(paths.registry_root)[0]
+    assert intent["authoritative_status"] == status
+    monkeypatch.setattr(
+        output_sync,
+        "invoke_target",
+        lambda _config, intent, *, connect_timeout: {
+            "schema_version": 1,
+            "run_id": intent["run_id"],
+            "authoritative_status": intent["authoritative_status"],
+            "verification": "rsync_checksum_dry_run",
+            "disposition": "copied_and_verified",
+        },
     )
 
-    assert verified is not None
-    assert verified["artifact_count"] == 1
-    assert verified["canonical_sha256"].startswith("sha256:")
+    result = output_sync.process_pending_once(paths, connect_timeout=8)
 
-    (archived_run / "summary.json").write_bytes(b"tampered")
-    with pytest.raises(ValueError, match="artifact digest mismatch"):
-        output_sync_remote._verified_experiment_result(
-            payload,
-            archived_run_path=archived_run,
-            artifacts_root=artifacts_root,
-            source_kind="directory",
-        )
+    assert result["archived"] == 1
+    _manifest, after = load_current_run(paths, RUN_ID)
+    assert after["status"] == status
+    receipt = output_sync.run_sync_status(paths.registry_root, RUN_ID)["receipt"]
+    assert receipt["authoritative_status"] == status
 
 
 def test_failed_archive_pull_remains_pending_and_retryable(
@@ -250,7 +307,6 @@ def test_failed_archive_pull_remains_pending_and_retryable(
         "invoke_target",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("unreachable")),
     )
-
     result = output_sync.process_pending_once(paths, connect_timeout=8)
 
     assert result["retryable"] == 1
@@ -304,7 +360,8 @@ def test_remote_rsync_command_is_a_pull_from_named_source() -> None:
             "task_id": "task-1",
             "label": "test",
             "output_metadata": {},
-            "succeeded_at": "2026-07-22T00:00:00Z",
+            "authoritative_status": "succeeded",
+            "terminal_at": "2026-07-22T00:00:00Z",
         }
     )
 
@@ -342,7 +399,8 @@ def test_restricted_source_key_leaves_remote_path_visible() -> None:
             "task_id": "task-1",
             "label": "test",
             "output_metadata": {},
-            "succeeded_at": "2026-07-22T00:00:00Z",
+            "authoritative_status": "succeeded",
+            "terminal_at": "2026-07-22T00:00:00Z",
         }
     )
 
@@ -363,7 +421,7 @@ def test_controller_host_starts_one_exact_output_sync_tmux_session(
     paths = controller_paths(tmp_path / "controller", "example")
     write_yaml(paths.config_path, {"controller_registry": True})
     output_sync.store_config(paths.registry_root, sync_config().to_payload())
-    output_sync.enqueue_succeeded_output(
+    output_sync.enqueue_terminal_output(
         paths.registry_root,
         {
             "run_id": RUN_ID,
@@ -375,7 +433,8 @@ def test_controller_host_starts_one_exact_output_sync_tmux_session(
             "output_metadata": {},
         },
         state_revision=1,
-        succeeded_at="2026-07-22T00:00:00Z",
+        authoritative_status="succeeded",
+        terminal_at="2026-07-22T00:00:00Z",
     )
     calls: list[list[str]] = []
 
@@ -419,7 +478,7 @@ def test_controller_host_does_not_start_worker_while_sync_is_paused(
         paths.registry_root,
         {**sync_config().to_payload(), "paused": True},
     )
-    output_sync.enqueue_succeeded_output(
+    output_sync.enqueue_terminal_output(
         paths.registry_root,
         {
             "run_id": RUN_ID,
@@ -431,7 +490,8 @@ def test_controller_host_does_not_start_worker_while_sync_is_paused(
             "output_metadata": {},
         },
         state_revision=1,
-        succeeded_at="2026-07-22T00:00:00Z",
+        authoritative_status="succeeded",
+        terminal_at="2026-07-22T00:00:00Z",
     )
     monkeypatch.setattr(
         output_sync_worker,

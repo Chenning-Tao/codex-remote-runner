@@ -124,24 +124,8 @@ function retirementBlockerLabel(code: string | undefined): string {
   }[code ?? ""] ?? "下线前置检查未通过";
 }
 
-function workerPolicyLabel(workerPolicy: string | undefined): string {
-  if (workerPolicy === "auto") return "自动并行";
-  if (workerPolicy === "exact") return "原样执行";
-  return "--";
-}
-
 function priorityLabel(priority: string | undefined): string {
   return priority === "urgent" ? "紧急" : "普通";
-}
-
-function resultIntentLabel(intent: string | undefined): string {
-  if (!intent) return "--";
-  return {
-    candidate: "候选结果",
-    supporting: "辅助结果",
-    excluded: "排除",
-    unclassified: "未分类",
-  }[intent] ?? intent;
 }
 
 function queueWorkload(entry: QueueEntry): "standard" | "test" {
@@ -1331,8 +1315,6 @@ export function DetailPanel({
           <DetailGroup term="任务 ID" mono>{entry.job.task_id ?? "--"}</DetailGroup>
           <DetailGroup term="当前优先级">{priorityLabel(entry.job.queue_priority)}</DetailGroup>
           <DetailGroup term="任务类型">{workloadClassLabel(entry.job.workload_class)}</DetailGroup>
-          <DetailGroup term="并行策略">{workerPolicyLabel(entry.job.worker_policy)}</DetailGroup>
-          <DetailGroup term="结果处理方式">{resultIntentLabel(entry.job.result_intent)}</DetailGroup>
           <DetailGroup term="当前服务器">{entry.job.eligible_servers?.join(", ") || "无"}</DetailGroup>
           <DetailGroup term="状态">{runStatusLabel(entry.state.status ?? "queued")}</DetailGroup>
           {entry.state.placement_update && (

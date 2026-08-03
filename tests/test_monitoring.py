@@ -44,13 +44,11 @@ def make_current_run(tmp_path: Path, *, run_id: str = RUN_ID) -> tuple[Path, obj
             project_config=config,
             label="current-run",
             task_id="task-1",
-            result_intent="candidate",
-            result_tags={"campaign": "test"},
             server="compute-a",
             ssh="compute-a",
             ssh_profile="test",
             configured_cores=8,
-            workers=None,
+            assigned_cores=8,
             command="true\n",
             remote_workdir=str(workdir),
             project_python=sys.executable,
@@ -819,22 +817,6 @@ def test_main_queries_controller_by_task_id(
         "action_args": ("--task-id", "07-18-example"),
     }
     assert json.loads(capsys.readouterr().out) == {"queue": [], "runs": []}
-
-    observed.clear()
-    assert (
-        cli.main(
-            [
-                "monitor",
-                "--project-config",
-                str(config),
-                "--result-intent",
-                "candidate",
-            ]
-        )
-        == 0
-    )
-    assert observed["action_args"] == ("--result-intent", "candidate")
-
 
 def test_main_rejects_run_and_task_selectors_together() -> None:
     with pytest.raises(SystemExit):

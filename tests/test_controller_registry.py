@@ -48,11 +48,8 @@ def queued_job() -> dict[str, object]:
         "revision": "a" * 40,
         "label": "experiment",
         "task_id": "task-1",
-        "result_intent": "candidate",
-        "result_tags": {"campaign": "test"},
         "submitted_command": command,
         "submitted_command_sha256": sha256_bytes(command.encode()),
-        "worker_arg": "--num-workers",
         "prepared_servers": [
             {
                 "name": "compute-a",
@@ -85,9 +82,6 @@ def test_submit_and_list_fifo_jobs_privately(tmp_path: Path) -> None:
     assert job["revision"] == "a" * 40
     assert job["queue_priority"] == "normal"
     assert job["workload_class"] == "standard"
-    assert job["worker_policy"] == "auto"
-    assert job["result_intent"] == "candidate"
-    assert job["result_tags"] == {"campaign": "test"}
     assert state["status"] == "queued"
     assert stat.S_IMODE(paths.project_root.stat().st_mode) == 0o700
     assert stat.S_IMODE((paths.queue_dir / RUN_ID / "job.yaml").stat().st_mode) == 0o600
@@ -506,9 +500,7 @@ def test_queued_job_can_switch_workload_class_and_moves_to_destination_tail(
     )
 
     assert result["job"]["workload_class"] == "test"
-    assert result["job"]["worker_policy"] == "auto"
     loaded_test, _state = load_job(paths, "rr-fedcba9876543210")
-    assert loaded_test["worker_policy"] == "exact"
     test_lane = [
         job["run_id"]
         for job, _state in list_queued(paths)
@@ -579,8 +571,8 @@ def test_historical_queue_schema_keeps_legacy_output_readable(tmp_path: Path) ->
     assert loaded["output_path"] == "$HOME/result.json"
     assert loaded["output_relpath"] is None
     assert loaded["prepared_servers"][0]["output_root"] is None
-    assert loaded["result_intent"] == "unclassified"
-    assert loaded["result_tags"] == {}
+    assert "result_intent" not in loaded
+    assert "result_tags" not in loaded
 
 
 def test_relative_output_requires_every_prepared_root(tmp_path: Path) -> None:

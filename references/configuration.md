@@ -84,10 +84,6 @@ remote:
     python: /srv/envs/example/bin/python3
     output_root: /home/other-user/example
 
-parallelism:
-  default_arg: --num-workers
-  default_value: selected_server.cores
-
 scheduling:
   strategy: max_available_cores
   lease_seconds: 120
@@ -99,7 +95,7 @@ scheduling:
 output_sync:
   target_server: archive
   target_ssh: archive
-  target_root: /srv/archive/example/scientific-v1
+  target_root: /srv/archive/example/artifacts-v1
   source_ssh_config: /srv/archive/.ssh/output-sync.conf
   source_hosts:
     compute-a: compute-a-int
@@ -198,8 +194,8 @@ server descriptors.
 
 ## Output Synchronization
 
-`output_sync` enables default archival of every succeeded run that declares an
-output path. `target_ssh` is the controller host's SSH destination for the archive
+`output_sync` enables default archival of every terminal run that declares an
+output path, including failed or stopped checkpoints. `target_ssh` is the controller host's SSH destination for the archive
 server. `source_ssh_config` and `source_hosts` are interpreted on the target server;
 they must name direct target-to-source routes for every enabled non-target remote
 that configures `output_root`. The target server itself is local and must not appear
@@ -209,15 +205,23 @@ eligible for execution.
 
 Run `remote-runner sync-outputs` once after adding or changing this section. Every
 later submission carries the same validated configuration to the controller. The
-controller writes one durable outbox intent when a run becomes succeeded, while a
+controller writes one durable outbox intent when a run becomes terminal, while a
 separate controller worker asks the target to pull only that run's output. Sync
-failures never change run authority, and canonical scientific selection remains a
-separate concern. Source data is retained by default. `prune_after_sync.servers` is
+outcome never changes run authority or interprets transferred bytes. Source data is
+retained by default. `prune_after_sync.servers` is
 an explicit allow-list of configured source hosts whose outputs may be deleted only
 after checksum-verified archival; do not infer this policy from server names. The
 worker also reconciles eligible completed receipts when this allow-list is enabled.
 Initial synchronization configuration is forward-only and does not archive older
-succeeded history.
+terminal history.
+
+When activating the release that removes the experiment subsystem, the controller
+upgrades existing schema-1 pending intents under the output-sync worker lock. The
+upgrade accepts only intents whose exact run ID, succeeded execution state, state
+revision, source server/path, output metadata, and terminal timestamp match the
+durable run record. It discards retired result and experiment fields rather than
+translating them into transport authority. Any mismatch blocks activation and leaves
+the original intent unchanged.
 
 ## Restricted Source Access
 
@@ -232,7 +236,7 @@ protected arguments. Install
 and bind each source-specific public key to it with OpenSSH `restrict,command=...`.
 The default is `false` for compatibility with ordinary SSH source keys.
 
-Set `paused: true` during another writer's one-time migration. Succeeded
+Set `paused: true` during another writer's one-time migration. Terminal
 transitions still enter the durable outbox, but the target worker does not start.
 Change it to `false` and rerun `remote-runner sync-outputs` to drain the backlog.
 
@@ -247,6 +251,17 @@ Provision before ordinary lifecycle use:
 - create external output roots with appropriate ownership;
 - install rsync and direct source SSH access on the output-sync target;
 - install tmux on the controller and compute servers.
+
+Controller activation stops both project dispatchers and output-sync workers after
+checking controller-wide dispatch leases. For the experiment-boundary migration it
+atomically moves each legacy `.remote-runner/experiments` directory to private
+`<controller-root>/retired-state/experiment-registry-v1/<project-id>` storage. The
+move is content-opaque and idempotent. A simultaneous legacy source and retired
+destination, a symlink, or an unverifiable pending transfer blocks activation rather
+than merging or deleting bytes.
+The migration holds the retired registry's own legacy file lock while moving it and
+leaves only a private marker at the old path. That marker blocks an in-flight old
+binary from recreating the removed registry and is not part of any normal query.
 
 Official local/controller support is macOS and Linux. Do not select an
 OS-specific local executable directory; uv owns tool discovery. Windows is not

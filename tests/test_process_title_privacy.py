@@ -71,7 +71,6 @@ def registration_args(
     privacy: str | None,
     command: str = "printf 'done\\n'\n",
     source_revision: str | None = None,
-    experiment_binding: dict[str, object] | None = None,
 ) -> argparse.Namespace:
     runtime = yaml.safe_load(config.read_text(encoding="utf-8"))["remote"]["local"]
     return argparse.Namespace(
@@ -82,7 +81,7 @@ def registration_args(
         ssh="local",
         ssh_profile="test",
         configured_cores=8,
-        workers=None,
+        assigned_cores=8,
         command=command,
         remote_workdir=runtime["workdir"],
         project_python=runtime["python"],
@@ -91,7 +90,6 @@ def registration_args(
         output_path=None,
         output_metadata=None,
         source_revision=source_revision,
-        experiment_binding=experiment_binding,
         run_id=run_id,
         privacy=privacy,
     )
@@ -265,58 +263,6 @@ def test_normal_and_opt_in_plans_have_exact_distinct_assets(tmp_path: Path) -> N
     )
     assert PRIVATE_RUN_ID in helper
     assert "process-title privacy test" not in helper
-
-
-def test_privacy_plan_preserves_experiment_binding_handoff(tmp_path: Path) -> None:
-    revision = "a" * 40
-    _project, _workdir, config = make_project(tmp_path)
-    binding = {
-        "kind": "run_binding",
-        "schema_version": 1,
-        "binding_id": "binding-0123456789abcdef",
-        "run_id": PRIVATE_RUN_ID,
-        "source_revision": revision,
-        "targets": [
-            {
-                "study_id": "study-0123456789abcdef",
-                "origin_design_revision_id": "design-0123456789abcdef",
-                "plan_digest": "sha256:" + "1" * 64,
-                "point_id": "point-0123456789abcdef",
-                "point_revision_id": "pointrev-0123456789abcdef",
-                "point_revision_digest": "sha256:" + "2" * 64,
-                "setting_digest": "sha256:" + "3" * 64,
-                "result_group_id": "primary",
-                "contribution_role": "primary",
-            }
-        ],
-        "result_manifest_relpath": "experiment-result.json",
-        "expects_result_manifest": True,
-        "metadata": {},
-    }
-    registration.register(
-        registration_args(
-            config,
-            run_id=PRIVATE_RUN_ID,
-            privacy=PROCESS_TITLE_PRIVACY_MODE,
-            source_revision=revision,
-            experiment_binding=binding,
-        )
-    )
-
-    plan = launch_plan.build_launch_plan(project_paths(config), PRIVATE_RUN_ID)
-
-    assert [(asset.name, asset.mode) for asset in plan.assets] == [
-        ("run.sh", 0o700),
-        ("command.sh", 0o600),
-        ("experiment-binding.json", 0o400),
-        ("sitecustomize.py", 0o600),
-    ]
-    wrapper = plan.assets[0].content.decode()
-    assert "RR_EXPERIMENT_BINDING_PATH" in wrapper
-    assert "RR_EXPERIMENT_BINDING_SHA256=sha256:" in wrapper
-    assert "ALLOWED_ASSETS[EXPERIMENT_BINDING_ASSET] = 0o400" in (
-        plan.bootstrap_stdin.decode()
-    )
 
 
 def test_sitecustomize_probe_discovers_without_executing_existing_hook(

@@ -11,12 +11,10 @@ def request_run_purge(args: argparse.Namespace) -> dict[str, object]:
     config_path = resolve_project_config(args.project_config)
     config = load_managed_project_config(config_path)
     action_args = ["--run-id", args.run_id, "--reason", args.reason]
-    if args.replacement_run_id is not None:
-        action_args.extend(["--replacement-run-id", args.replacement_run_id])
-    if args.no_replacement:
-        action_args.append("--no-replacement")
     if args.apply:
         action_args.append("--apply")
+    if args.delete_artifacts:
+        action_args.append("--delete-artifacts")
     return call_controller(
         config,
         "purge-run",

@@ -25,9 +25,7 @@ import {
   SnapshotHealth,
   SummaryStrip,
 } from "./components";
-import { ExperimentsDashboard, ExperimentsDemo } from "./ExperimentsDemo";
 import { ageFrom, serverState, textMatches } from "./format";
-import { ProductNav } from "./ProductNav";
 import type {
   BatchQueueUpdateResult,
   QueueEntry,
@@ -429,8 +427,6 @@ function RunsDashboard() {
                 </div>
               </header>
 
-              <ProductNav active="runs" />
-
               <div className="rr-toolbar" aria-label="仪表盘筛选">
                 <SearchInput
                   aria-label="搜索服务器、任务或运行 ID"
@@ -612,8 +608,5 @@ function RunsDashboard() {
 }
 
 export default function App() {
-  const params = new URLSearchParams(window.location.search);
-  if (params.get("demo") === "experiments") return <ExperimentsDemo />;
-  if (params.get("view") === "experiments") return <ExperimentsDashboard live />;
   return <RunsDashboard />;
 }
