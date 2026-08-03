@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
-## Unreleased
+## 0.9.0 - 2026-08-03
 
 ### Removed
 
@@ -35,6 +35,15 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 - Clarified that Trellis stores exact run-ID references and cross-session decisions,
   not copies of Remote Runner records.
 
+## 0.8.1 - 2026-07-31
+
+### Fixed
+
+- Allowed dashboard `add-server` batches and `sync-pool` to prepare exact queued
+  historical revisions from a verified clean linked worktree when the configured
+  checkout has unrelated local changes, while preserving explicit-source priority,
+  per-revision object checks, structured source audit data, and fail-closed behavior.
+
 ## 0.8.0 - 2026-07-31
 
 ### Added
@@ -46,13 +55,6 @@ based on Keep a Changelog, and the project intends to follow Semantic Versioning
 - Added live physical-memory telemetry to server probes and the Web dashboard,
   including total, available, used, and percentage fields with Linux and macOS
   fallbacks when the remote host exposes them.
-
-### Fixed
-
-- Allowed dashboard `add-server` batches and `sync-pool` to prepare exact queued
-  historical revisions from a verified clean linked worktree when the configured
-  checkout has unrelated local changes, while preserving explicit-source priority,
-  per-revision object checks, structured source audit data, and fail-closed behavior.
 
 ## 0.7.0 - 2026-07-29
 

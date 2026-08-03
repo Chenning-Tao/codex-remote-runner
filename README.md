@@ -49,7 +49,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.8.0'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.0'
 remote-runner --help
 ```
 
