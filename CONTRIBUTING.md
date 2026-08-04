@@ -9,21 +9,29 @@ that inspect process ownership also require procps.
 uv sync --frozen --group dev
 npm ci --prefix web
 npm run build --prefix web
-uv run pytest -q
-uv run ruff check src/remote_runner tests scripts
-uv run pyright --project pyrightconfig.json
-uv build
-uv run python scripts/check_dist.py dist
 ```
+
+Run focused checks locally for the code you changed. For example:
+
+```bash
+uv run pytest -q tests/test_web_app.py
+uv run ruff check src/remote_runner/web_app.py tests/test_web_app.py
+npm run check --prefix web
+```
+
+GitHub Actions is the authoritative full validation gate. Every pull request
+runs the complete Python suite, repository-wide lint and type checks, a clean web
+asset build, and Linux/macOS package smoke tests. Do not duplicate that complete
+matrix locally unless CI is unavailable or a failure needs local reproduction.
 
 The committed files under `src/remote_runner/web_static` are generated from the
 versioned sources in `web`. Rebuild them in the same change and confirm that a
 second build leaves the worktree clean. Web UI changes follow
 [`web/DESIGN.md`](web/DESIGN.md).
 
-Run the full suite before opening a pull request. Tests that exercise actual SSH
-infrastructure must use disposable hosts and must never add private endpoints,
-credentials, local workflow state, or machine-specific paths to the repository.
+Tests that exercise actual SSH infrastructure must use disposable hosts and must
+never add private endpoints, credentials, local workflow state, or
+machine-specific paths to the repository.
 
 ## Changes
 
