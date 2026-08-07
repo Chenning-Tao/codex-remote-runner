@@ -15,7 +15,7 @@
   "dependencies": {
     "@patternfly/react-core": "6.6.0",
     "@patternfly/react-table": "6.6.0",
-    "lucide-react": "1.26.0",
+    "lucide-react": "1.28.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
