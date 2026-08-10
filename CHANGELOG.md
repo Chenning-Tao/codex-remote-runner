@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## 0.9.1 - 2026-08-10
+
+### Fixed
+
+- Restored resumable `purge-run --delete-artifacts` for failed runs with execution
+  records by keeping schema-2 run tombstones minimal and validating task identity
+  against the locked execution manifest.
+
 ## 0.9.0 - 2026-08-03
 
 ### Removed
