@@ -584,7 +584,6 @@ def stage_failed_current_run(
     tombstone = load_yaml(tombstone_path)
     if (
         tombstone.get("run_id") != validated
-        or tombstone.get("task_id") != task_id
         or tombstone.get("status") != "purging"
     ):
         raise ValueError(f"run {validated} purge tombstone does not match execution")
