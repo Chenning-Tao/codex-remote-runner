@@ -14,6 +14,14 @@ def normalize_minimum_cores(value: object) -> int:
     return value
 
 
+def normalize_requested_cores(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("requested cores must be a positive integer or omitted")
+    return value
+
+
 def normalize_queue_priority(value: object) -> str:
     if not isinstance(value, str) or value not in _QUEUE_PRIORITY_RANK:
         choices = ", ".join(QUEUE_PRIORITIES)
@@ -39,12 +47,17 @@ class CapacityCandidate:
     load5: float
     priority: int = 0
     active_run_count: int = 0
+    allocated_cores: int = 0
+    allocation_unknown: bool = False
 
     @property
     def available_cores(self) -> float:
-        if self.active_run_count:
+        if self.allocation_unknown or (
+            self.active_run_count and self.allocated_cores == 0
+        ):
             return 0.0
-        return max(float(self.configured_cores) - self.load5, 0.0)
+        consumed = max(float(self.allocated_cores), self.load5)
+        return max(float(self.configured_cores) - consumed, 0.0)
 
 
 def rank_candidates(candidates: list[CapacityCandidate]) -> list[CapacityCandidate]:
@@ -57,6 +70,8 @@ def rank_candidates(candidates: list[CapacityCandidate]) -> list[CapacityCandida
             raise ValueError(f"load5 for {candidate.name!r} must be non-negative")
         if candidate.active_run_count < 0:
             raise ValueError(f"active run count for {candidate.name!r} must be non-negative")
+        if candidate.allocated_cores < 0:
+            raise ValueError(f"allocated cores for {candidate.name!r} must be non-negative")
     return sorted(
         candidates,
         key=lambda item: (

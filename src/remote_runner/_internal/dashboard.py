@@ -7,6 +7,7 @@ from typing import Any
 from .config import ManagedProjectConfig, load_managed_project_config
 from .controller.client import call_controller
 from .execution_registry import load_yaml, resolve_project_config
+from .machine_identity import normalize_machine_id
 from .pool import DEFAULT_SERVER_REGISTRY, resolve_ssh_targets
 
 
@@ -42,6 +43,9 @@ def build_server_inventory(
         raw = servers.get(name)
         base: dict[str, Any] = {
             "name": name,
+            "machine_id": name,
+            "machine_id_source": "legacy-name",
+            "machine_fingerprint": None,
             "enabled": runtime.enabled,
             "auto_select": runtime.auto_select,
             "python": runtime.python,
@@ -80,6 +84,10 @@ def build_server_inventory(
                     memory_gb, f"configured memory_gb for {name!r}"
                 )
             slots = _test_slots(raw, name)
+            machine_id, machine_id_source = normalize_machine_id(
+                raw.get("machine_id"),
+                server_name=name,
+            )
             endpoints = [
                 {"ssh": ssh, "ssh_profile": profile}
                 for ssh, profile in resolve_ssh_targets(raw, name, "auto")
@@ -94,6 +102,9 @@ def build_server_inventory(
             enabled=runtime.enabled and globally_enabled,
             configured_cores=cores,
             configured_memory_gb=memory_gb,
+            machine_id=machine_id,
+            machine_id_source=machine_id_source,
+            machine_fingerprint=None,
             test_slots=slots,
             endpoints=endpoints,
         )

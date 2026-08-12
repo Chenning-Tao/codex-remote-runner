@@ -9,6 +9,7 @@ from typing import Any
 from .config import load_managed_project_config
 from .controller.client import call_controller
 from .execution_registry import resolve_project_config, sha256_bytes
+from .machine_identity import normalize_machine_id
 from .output_paths import normalize_output_relpath
 from .pool import (
     normalize_candidate_servers,
@@ -18,6 +19,7 @@ from .pool import (
 from .preparation_manifest import load_preparation_manifest
 from .scheduling import (
     normalize_minimum_cores,
+    normalize_requested_cores,
     normalize_workload_class,
 )
 from .source import DeploymentTarget, PreparationResult, prepare_revision
@@ -78,12 +80,22 @@ def _prepared_manifest(
     for item in preparation.prepared:
         candidate = candidates[item.name]
         runtime = candidate["runtime"]
+        machine_id, machine_id_source = normalize_machine_id(
+            candidate.get("machine_id"),
+            server_name=item.name,
+        )
         prepared.append(
             {
                 "name": item.name,
+                "machine_id": machine_id,
+                "machine_id_source": candidate.get(
+                    "machine_id_source", machine_id_source
+                ),
+                "machine_fingerprint": candidate.get("machine_fingerprint"),
                 "ssh": candidate["ssh"],
                 "ssh_profile": candidate["ssh_profile"],
                 "configured_cores": candidate["cores"],
+                "configured_memory_gb": candidate.get("memory_gb"),
                 "priority": candidate["priority"],
                 "bare_repo": runtime["bare_repo"],
                 "worktree_root": runtime["worktree_root"],
@@ -99,9 +111,12 @@ def _eligible_prepared_servers(
     prepared_servers: list[dict[str, Any]],
     *,
     minimum_cores: int,
+    requested_cores: int | None = None,
     candidate_servers: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     required = normalize_minimum_cores(minimum_cores)
+    requested = normalize_requested_cores(requested_cores)
+    required_inventory = max(required, requested or 1)
     allowed = None if candidate_servers is None else set(candidate_servers)
     eligible: list[dict[str, Any]] = []
     for server in prepared_servers:
@@ -112,7 +127,7 @@ def _eligible_prepared_servers(
             raise ValueError(
                 "prepared server configured_cores must be a positive integer"
             )
-        if cores >= required:
+        if cores >= required_inventory:
             normalized = dict(server)
             normalized["output_root"] = server.get("output_root")
             normalized["test_slots"] = server.get("test_slots", 0)
@@ -124,7 +139,9 @@ def _eligible_prepared_servers(
                 "no allowed candidate server is in the eligible prepared server set: "
                 f"{names}"
             )
-        raise ValueError(f"no prepared server has at least {required} configured cores")
+        raise ValueError(
+            f"no prepared server has at least {required_inventory} configured cores"
+        )
     return eligible
 
 
@@ -159,6 +176,9 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
     output_relpath = _requested_output(args)
     source_repo = resolve_source_repo(config.local_repo, args.source_repo)
     minimum_cores = normalize_minimum_cores(getattr(args, "minimum_cores", 1))
+    requested_cores = normalize_requested_cores(
+        getattr(args, "requested_cores", None)
+    )
     workload_class = normalize_workload_class(
         getattr(args, "workload_class", "standard")
     )
@@ -206,7 +226,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
             explicit_server=requested_server,
             ssh_profile=args.ssh_profile,
             timeout=args.timeout,
-            minimum_cores=minimum_cores,
+            minimum_cores=max(minimum_cores, requested_cores or 1),
             candidate_servers=candidate_servers or testing_servers or None,
         )
         targets, candidates = _reachable_targets(pool, explicit_server=requested_server)
@@ -221,6 +241,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         prepared_servers = _eligible_prepared_servers(
             _prepared_manifest(preparation, candidates),
             minimum_cores=minimum_cores,
+            requested_cores=requested_cores,
             candidate_servers=candidate_servers,
         )
         preparation_failures = [item.__dict__ for item in preparation.failures]
@@ -238,6 +259,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         prepared_servers = _eligible_prepared_servers(
             list(prepared["prepared_servers"]),
             minimum_cores=minimum_cores,
+            requested_cores=requested_cores,
             candidate_servers=candidate_servers,
         )
         preparation_failures = list(prepared["preparation_failures"])
@@ -275,6 +297,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         "submitted_command": command,
         "submitted_command_sha256": sha256_bytes(command.encode("utf-8")),
         "minimum_cores": minimum_cores,
+        "requested_cores": requested_cores,
         "server_scope": server_scope,
         "prepared_servers": prepared_servers,
         "output_relpath": output_relpath,
@@ -297,6 +320,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         "revision": revision,
         "prepared_servers": [item["name"] for item in prepared_servers],
         "minimum_cores": minimum_cores,
+        "requested_cores": requested_cores,
         "server_scope": server_scope,
         "workload_class": workload_class,
         "preparation_failures": preparation_failures,

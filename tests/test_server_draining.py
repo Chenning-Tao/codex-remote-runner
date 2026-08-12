@@ -40,9 +40,15 @@ def test_drain_client_calls_controller_for_configured_server(
         return {"server": "burst", "drained": True}
 
     monkeypatch.setattr(server_draining, "call_controller", call)
+    registry = tmp_path / "servers.yaml"
+    write_yaml(
+        registry,
+        {"servers": {"burst": {"cores": 64, "machine_id": "physical-burst"}}},
+    )
     result = server_draining.update(
         argparse.Namespace(
             project_config=project_config(tmp_path),
+            server_registry=registry,
             server="burst",
             timeout=8,
         ),
@@ -52,6 +58,7 @@ def test_drain_client_calls_controller_for_configured_server(
     assert result["drained"] is True
     assert observed["action"] == "drain-server"
     assert observed["action_args"] == ("--server", "burst")
+    assert observed["payload"] == {"machine_id": "physical-burst"}
 
 
 def test_drain_client_rejects_unconfigured_server(tmp_path: Path) -> None:

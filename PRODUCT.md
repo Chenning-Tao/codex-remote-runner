@@ -82,6 +82,11 @@ lifecycle operations across a project-owned server pool.
 - Server details expose controller-wide standard and test slot limits. Queue
   details can switch queued work between those lanes. Capacity changes are
   revision-guarded, admission-only, and never preempt running work.
+- Physical capacity, drains, and launch leases are keyed by an explicit stable
+  `machine_id` and verified with a hashed remote machine fingerprint. Core
+  allocations are consumable across both lanes; omitted requests remain
+  whole-machine allocations for compatibility. Memory is inventory and telemetry
+  only and does not participate in admission.
 - Server details can pause or resume controller-wide dispatch admission for one
   server. Pausing requires explicit confirmation, never stops existing work,
   and refreshes authoritative drain state before the UI reports completion.

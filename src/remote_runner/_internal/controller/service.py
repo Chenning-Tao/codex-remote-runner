@@ -135,9 +135,31 @@ def _read_object(noun: str) -> dict[str, Any]:
     return value
 
 
+def _read_optional_object(noun: str) -> dict[str, Any]:
+    try:
+        raw = sys.stdin.read()
+    except OSError:
+        return {}
+    if not raw.strip():
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"stdin must contain one JSON {noun} object: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"stdin must contain one JSON {noun} object")
+    return value
+
+
 def submit(args: argparse.Namespace) -> dict[str, Any]:
     paths = controller_paths(args.controller_root, args.project_id)
     job = _read_object("job")
+    prepared_servers = job.get("prepared_servers")
+    if not isinstance(prepared_servers, list) or any(
+        not isinstance(server, dict) for server in prepared_servers
+    ):
+        raise ValueError("job prepared_servers must be a list of mappings")
+    ensure_server_capacities(paths, prepared_servers)
     if "output_sync" in job:
         output_sync = job.get("output_sync")
         if output_sync is None:
@@ -145,8 +167,6 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
         else:
             store_config(paths.registry_root, output_sync)
     entry = submit_job(paths, job)
-    stored_job, _state = load_job(paths, entry.name)
-    ensure_server_capacities(paths, stored_job["prepared_servers"])
     dispatcher_started = ensure_dispatcher(
         controller_root=args.controller_root,
         project_id=args.project_id,
@@ -172,6 +192,16 @@ def extend_all(args: argparse.Namespace) -> dict[str, Any]:
     updates = payload.get("updates")
     if not isinstance(updates, list):
         raise ValueError("pool update requires an updates list")
+    for update in updates:
+        if not isinstance(update, dict) or not isinstance(
+            update.get("prepared_servers"), list
+        ):
+            raise ValueError("pool update prepared_servers must be a list")
+        additions = update["prepared_servers"]
+        if any(not isinstance(server, dict) for server in additions):
+            raise ValueError("pool update prepared server must be a mapping")
+        if additions:
+            ensure_server_capacities(paths, additions)
     results = extend_queued_all(paths, updates)
     dispatcher_started = ensure_dispatcher(
         controller_root=args.controller_root,
@@ -197,6 +227,7 @@ def queued_job(args: argparse.Namespace) -> dict[str, Any]:
             "run_id": job["run_id"],
             "revision": job["revision"],
             "minimum_cores": job["minimum_cores"],
+            "requested_cores": job.get("requested_cores"),
             "workload_class": job["workload_class"],
             "prepared_servers": [
                 str(server["name"]) for server in job["prepared_servers"]
@@ -217,6 +248,9 @@ def extend_job(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("queued job extension requires revision and prepared_servers")
     if placement_token is not None and not isinstance(placement_token, str):
         raise ValueError("queued job extension placement_token must be a string")
+    if any(not isinstance(server, dict) for server in prepared_servers):
+        raise ValueError("queued job extension prepared server must be a mapping")
+    ensure_server_capacities(paths, prepared_servers)
     result = extend_queued_job(
         paths,
         args.run_id,
@@ -224,7 +258,6 @@ def extend_job(args: argparse.Namespace) -> dict[str, Any]:
         prepared_servers=prepared_servers,
         placement_token=placement_token,
     )
-    ensure_server_capacities(paths, prepared_servers)
     dispatcher_started = ensure_dispatcher(
         controller_root=args.controller_root,
         project_id=args.project_id,
@@ -276,10 +309,19 @@ def edit_queued_job(args: argparse.Namespace) -> dict[str, Any]:
             workload_class or current_job["workload_class"]
         )
         selected_servers = eligible_servers or list(current_job["eligible_servers"])
+        prepared_by_name = {
+            str(server["name"]): server for server in current_job["prepared_servers"]
+        }
         slot_field = f"{target_class}_slots"
         if not any(
             isinstance(name, str)
-            and int(capacities.get(name, {}).get(slot_field, 0)) > 0
+            and name in prepared_by_name
+            and int(
+                capacities.get(
+                    str(prepared_by_name[name].get("machine_id", name)), {}
+                ).get(slot_field, 0)
+            )
+            > 0
             for name in selected_servers
         ):
             raise ValueError(
@@ -405,6 +447,7 @@ def _compact_queue_item(
             "queue_priority",
             "queue_position",
             "minimum_cores",
+            "requested_cores",
             "server_scope",
             "created_at",
         )
@@ -786,9 +829,24 @@ def configure_output_sync(args: argparse.Namespace) -> dict[str, Any]:
 
 def update_server_drain(args: argparse.Namespace, *, drained: bool) -> dict[str, Any]:
     paths = controller_paths(args.controller_root, args.project_id)
-    result = set_server_drained(paths, args.server, drained=drained)
+    payload = _read_optional_object("server drain")
+    if set(payload) - {"machine_id"}:
+        raise ValueError("server drain payload is invalid")
+    machine_id = payload.get("machine_id", args.server)
+    if not isinstance(machine_id, str):
+        raise ValueError("server drain machine_id must be a string")
+    result = set_server_drained(
+        paths,
+        args.server,
+        machine_id=machine_id,
+        drained=drained,
+    )
     project_queued_matches = sum(
-        args.server in {str(item["name"]) for item in job["prepared_servers"]}
+        any(
+            str(item["name"]) in job["eligible_servers"]
+            and str(item.get("machine_id", item["name"])) == machine_id
+            for item in job["prepared_servers"]
+        )
         for job, _state in list_queued(paths)
     )
     dispatcher_started = False
@@ -994,7 +1052,8 @@ def assess_server_retirement(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
 
-    drained = args.server in list_drained_servers(
+    machine_id = str(server.get("machine_id", args.server))
+    drained = machine_id in list_drained_servers(
         controller_paths(args.controller_root, args.project_id)
     )
     return {
@@ -1018,10 +1077,10 @@ def dashboard(args: argparse.Namespace) -> dict[str, Any]:
     servers = [
         {
             **server,
-            "standard_slots": capacities[server["name"]]["standard_slots"],
-            "test_slots": capacities[server["name"]]["test_slots"],
-            "capacity_revision": capacities[server["name"]]["revision"],
-            "capacity_customized": capacities[server["name"]]["customized"],
+            "standard_slots": capacities[server["machine_id"]]["standard_slots"],
+            "test_slots": capacities[server["machine_id"]]["test_slots"],
+            "capacity_revision": capacities[server["machine_id"]]["revision"],
+            "capacity_customized": capacities[server["machine_id"]]["customized"],
         }
         for server in servers
     ]
@@ -1039,6 +1098,17 @@ def dashboard(args: argparse.Namespace) -> dict[str, Any]:
     runs = overview.get("runs", [])
     if not isinstance(runs, list):
         raise RuntimeError("controller overview returned invalid runs")
+    drains = overview.get("server_drains")
+    if isinstance(drains, dict) and isinstance(drains.get("servers"), dict):
+        by_machine = drains["servers"]
+        overview["server_drains"] = {
+            **drains,
+            "servers": {
+                str(server["name"]): by_machine[server["machine_id"]]
+                for server in servers
+                if server["machine_id"] in by_machine
+            },
+        }
     return {
         **overview,
         "servers": enrich_active_runs(snapshot, runs),
@@ -1050,11 +1120,19 @@ def dashboard(args: argparse.Namespace) -> dict[str, Any]:
 def edit_server_capacity(args: argparse.Namespace) -> dict[str, Any]:
     paths = controller_paths(args.controller_root, args.project_id)
     payload = _read_object("server capacity update")
-    if set(payload) != {"expected_revision", "standard_slots", "test_slots"}:
+    if set(payload) != {
+        "machine_id",
+        "expected_revision",
+        "standard_slots",
+        "test_slots",
+    }:
         raise ValueError("server capacity update payload is invalid")
+    if not isinstance(payload["machine_id"], str):
+        raise ValueError("server capacity machine_id must be a string")
     result = update_server_capacity(
         paths,
         args.server,
+        machine_id=payload["machine_id"],
         expected_revision=payload["expected_revision"],
         standard_slots=payload["standard_slots"],
         test_slots=payload["test_slots"],

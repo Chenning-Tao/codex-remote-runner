@@ -3,6 +3,33 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## 0.9.2 - 2026-08-12
+
+### Added
+
+- Added stable controller-wide `machine_id` values backed by remote machine
+  fingerprints, with fail-closed alias/conflict checks and migration of legacy
+  name-keyed capacity, drain, and lease state.
+- Added explicit `--cores N` allocations and `RR_SERVER_CORES`. Core allocations
+  are conserved across standard and test lanes, while omitted requests and old
+  queued manifests retain whole-machine allocation semantics.
+
+### Changed
+
+- Made controller activation transactionally align the client CLI, controller-global
+  CLI, and private `runner/current` runtime, with exact revision receipts and rollback
+  on mismatch. Memory remains telemetry and inventory rather than admission authority.
+
+### Fixed
+
+- Covered the complete remote startup window with renewable fenced dispatch leases;
+  unknown launches and interrupted dispatchers retain durable ownership until remote
+  state is safely reconciled.
+- Made malformed or unreadable leases block acquisition, dispatch, and release
+  activation instead of being overwritten or silently ignored.
+- Accepted and validated allocation-bearing remote status schema 2 while preserving
+  schema-1 runtime compatibility.
+
 ## 0.9.1 - 2026-08-10
 
 ### Fixed

@@ -9,23 +9,35 @@ from typing import Any, Mapping
 
 from .config import ManagedProjectConfig
 from .execution_registry import sha256_bytes
+from .machine_identity import normalize_server_identity
 from .output_paths import normalize_output_root
 from .source import PreparationResult, resolve_clean_head, runner_ref
 
 
-PREPARATION_MANIFEST_SCHEMA = 3
+PREPARATION_MANIFEST_SCHEMA = 4
+LEGACY_PREPARATION_MANIFEST_SCHEMA = 3
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 PREPARED_SERVER_FIELDS = {
     "name",
+    "machine_id",
+    "machine_id_source",
+    "machine_fingerprint",
     "ssh",
     "ssh_profile",
     "configured_cores",
+    "configured_memory_gb",
     "priority",
     "bare_repo",
     "worktree_root",
     "python",
     "output_root",
     "test_slots",
+}
+LEGACY_PREPARED_SERVER_FIELDS = PREPARED_SERVER_FIELDS - {
+    "machine_id",
+    "machine_id_source",
+    "machine_fingerprint",
+    "configured_memory_gb",
 }
 
 
@@ -50,17 +62,41 @@ def build_preparation_manifest(
     preparation: PreparationResult,
     prepared_servers: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    normalized_servers = [
+        {**server, "test_slots": server.get("test_slots", 0)}
+        for server in prepared_servers
+    ]
+    identity_verified = all(
+        server.get("machine_fingerprint") is not None
+        for server in normalized_servers
+    )
+    if identity_verified:
+        normalized_servers = [
+            {
+                **normalize_server_identity(server),
+                "configured_memory_gb": server.get("configured_memory_gb"),
+            }
+            for server in normalized_servers
+        ]
+        schema_version = PREPARATION_MANIFEST_SCHEMA
+    else:
+        normalized_servers = [
+            {
+                key: value
+                for key, value in server.items()
+                if key in LEGACY_PREPARED_SERVER_FIELDS
+            }
+            for server in normalized_servers
+        ]
+        schema_version = LEGACY_PREPARATION_MANIFEST_SCHEMA
     payload: dict[str, Any] = {
-        "schema_version": PREPARATION_MANIFEST_SCHEMA,
+        "schema_version": schema_version,
         "project_id": config.project_id,
         "revision": preparation.revision,
         "ref": preparation.ref,
         "project_config_sha256": _file_digest(config.path),
         "server_registry_sha256": _file_digest(server_registry_path),
-        "prepared_servers": [
-            {**server, "test_slots": server.get("test_slots", 0)}
-            for server in prepared_servers
-        ],
+        "prepared_servers": normalized_servers,
         "preparation_failures": [item.__dict__ for item in preparation.failures],
     }
     validate_preparation_manifest_shape(payload)
@@ -84,7 +120,10 @@ def validate_preparation_manifest_shape(payload: Mapping[str, Any]) -> None:
     if set(payload) != expected_fields:
         raise ValueError("preparation manifest fields mismatch")
     schema = payload["schema_version"]
-    if schema != PREPARATION_MANIFEST_SCHEMA:
+    if schema not in {
+        LEGACY_PREPARATION_MANIFEST_SCHEMA,
+        PREPARATION_MANIFEST_SCHEMA,
+    }:
         raise ValueError("unsupported preparation manifest schema")
     project_id = payload["project_id"]
     if not isinstance(project_id, str) or not project_id:
@@ -104,7 +143,12 @@ def validate_preparation_manifest_shape(payload: Mapping[str, Any]) -> None:
         raise ValueError("preparation manifest requires prepared servers")
     names: set[str] = set()
     for server in servers:
-        if not isinstance(server, dict) or set(server) != PREPARED_SERVER_FIELDS:
+        expected_server_fields = (
+            PREPARED_SERVER_FIELDS
+            if schema == PREPARATION_MANIFEST_SCHEMA
+            else LEGACY_PREPARED_SERVER_FIELDS
+        )
+        if not isinstance(server, dict) or set(server) != expected_server_fields:
             raise ValueError("preparation manifest prepared server fields mismatch")
         for field in (
             "name",
@@ -119,12 +163,26 @@ def validate_preparation_manifest_shape(payload: Mapping[str, Any]) -> None:
         if server["name"] in names:
             raise ValueError("preparation manifest contains duplicate prepared servers")
         names.add(server["name"])
+        if schema == PREPARATION_MANIFEST_SCHEMA:
+            identity = normalize_server_identity(server)
+            if identity["machine_fingerprint"] is None:
+                raise ValueError(
+                    "preparation manifest machine fingerprint is required"
+                )
         cores = server["configured_cores"]
         priority = server["priority"]
         if isinstance(cores, bool) or not isinstance(cores, int) or cores <= 0:
             raise ValueError("preparation manifest configured_cores is invalid")
         if isinstance(priority, bool) or not isinstance(priority, int):
             raise ValueError("preparation manifest priority is invalid")
+        if schema == PREPARATION_MANIFEST_SCHEMA:
+            memory_gb = server["configured_memory_gb"]
+            if memory_gb is not None and (
+                isinstance(memory_gb, bool)
+                or not isinstance(memory_gb, int)
+                or memory_gb <= 0
+            ):
+                raise ValueError("preparation manifest configured_memory_gb is invalid")
         normalize_output_root(
             server["output_root"],
             "preparation manifest prepared server output_root",
@@ -169,6 +227,18 @@ def load_preparation_manifest(
         raise ValueError("preparation manifest server registry changed")
     if resolve_clean_head(source_repo) != payload["revision"]:
         raise ValueError("preparation manifest source revision mismatch")
+    if payload["schema_version"] == LEGACY_PREPARATION_MANIFEST_SCHEMA:
+        payload = dict(payload)
+        payload["prepared_servers"] = [
+            {
+                **server,
+                "machine_id": server["name"],
+                "machine_id_source": "legacy-name",
+                "machine_fingerprint": None,
+                "configured_memory_gb": None,
+            }
+            for server in payload["prepared_servers"]
+        ]
     return payload
 
 

@@ -235,6 +235,7 @@ def _wrapper_source(
     privacy_mode: str | None,
     workload_class: str = "standard",
     assigned_cores: int = 1,
+    server_cores: int = 1,
     *,
     output_root: str | None = None,
     output_path: str | None = None,
@@ -247,6 +248,7 @@ def _wrapper_source(
     workload_environment = [
         f"RR_PROJECT_PYTHON={quoted_project_python}",
         f"RR_ASSIGNED_CORES={assigned_cores}",
+        f"RR_SERVER_CORES={server_cores}",
     ]
     if output_root is not None:
         workload_environment.append(f"RR_OUTPUT_ROOT={shlex.quote(output_root)}")
@@ -286,8 +288,8 @@ write_status() {{
   if [[ "$finished_at" != "null" ]]; then
     finished_json="\\\"${{finished_at}}\\\""
   fi
-  printf '{{"schema_version":1,"run_id":"%s","label":%s,"workload_class":"%s","state":"%s","exit_code":%s,"started_at":"%s","finished_at":%s}}\n' \
-    "$run_id" "$label_json" "$workload_class" "$state" "$exit_code" "$started_at" "$finished_json" >"$temporary"
+  printf '{{"schema_version":2,"run_id":"%s","label":%s,"workload_class":"%s","assigned_cores":%d,"server_cores":%d,"state":"%s","exit_code":%s,"started_at":"%s","finished_at":%s}}\n' \
+    "$run_id" "$label_json" "$workload_class" {assigned_cores} {server_cores} "$state" "$exit_code" "$started_at" "$finished_json" >"$temporary"
   chmod 600 "$temporary"
   mv -f -- "$temporary" "$status_path"
 }}
@@ -327,7 +329,7 @@ printf '[REMOTE_RUNNER_START] %s\n' "$started_at"
 write_status running null null || exit 125
 cd -- "$workdir" || exit 125
 
-unset RR_OUTPUT_ROOT RR_OUTPUT_PATH RR_OUTPUT_DIR RR_ASSIGNED_CORES
+unset RR_OUTPUT_ROOT RR_OUTPUT_PATH RR_OUTPUT_DIR RR_ASSIGNED_CORES RR_SERVER_CORES
 {workload_prefix} {quoted_project_python} -c 'import base64,os,sys; os.setsid(); os.execv(sys.executable, ("remote-runner:" + sys.argv[1], "-c", base64.b64decode(sys.argv[3]).decode(), sys.argv[1], sys.argv[2]))' "$run_id" "$runtime_dir" {supervisor_b64!r} \
   < "${{runtime_dir}}/command.sh" &
 workload_pid=$!
@@ -827,6 +829,7 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
         privacy_mode,
         str(manifest.get("workload_class", "standard")),
         int(manifest.get("assigned_cores", manifest["configured_cores"])),
+        int(manifest["configured_cores"]),
         output_root=output_root,
         output_path=output_path,
     ).encode()

@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from ..dashboard import DASHBOARD_SCHEMA
+from ..machine_identity import normalize_server_identity
 from .dispatcher import probe_server_state
 
 
@@ -73,8 +74,12 @@ def validate_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
         if configuration_error is not None:
             configuration_error = _text(configuration_error, "configuration_error")
         servers.append(
-            {
+            normalize_server_identity(
+                {
                 "name": name,
+                "machine_id": raw.get("machine_id"),
+                "machine_id_source": raw.get("machine_id_source", "legacy-name"),
+                "machine_fingerprint": raw.get("machine_fingerprint"),
                 "enabled": enabled,
                 "auto_select": auto_select,
                 "testing_enabled": testing_enabled,
@@ -96,7 +101,8 @@ def validate_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 or 0,
                 "endpoints": endpoints,
                 "configuration_error": configuration_error,
-            }
+                }
+            )
         )
     return servers
 
@@ -106,6 +112,7 @@ def _probe_server(server: dict[str, Any], timeout: int) -> dict[str, Any]:
         field: server[field]
         for field in (
             "name",
+            "machine_id",
             "enabled",
             "auto_select",
             "testing_enabled",
@@ -213,6 +220,17 @@ def enrich_active_runs(
         )
         item["test_runs"] = sum(
             run.get("workload_class") == "test" for run in active_runs
+        )
+        item["allocated_cores"] = sum(
+            int(run["assigned_cores"])
+            for run in active_runs
+            if isinstance(run.get("assigned_cores"), int)
+            and not isinstance(run["assigned_cores"], bool)
+        )
+        item["allocation_unknown"] = any(
+            not isinstance(run.get("assigned_cores"), int)
+            or isinstance(run["assigned_cores"], bool)
+            for run in active_runs
         )
         enriched.append(item)
     return enriched

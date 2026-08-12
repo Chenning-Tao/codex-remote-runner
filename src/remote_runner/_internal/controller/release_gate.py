@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..._revision import SOURCE_REVISION
-from ..execution_registry import load_yaml, project_paths
+from ..execution_registry import project_paths
 from ..output_sync import migrate_legacy_pending_intents, output_sync_paths
 from ..tmux import (
     dispatcher_tmux_session,
@@ -26,11 +26,13 @@ from .registry import (
     ControllerPaths,
     controller_paths,
     controller_scheduler_paths,
+    load_server_lease,
     scheduler_lock,
 )
 
 
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+VERSION_RE = re.compile(r"^remote-runner ([^ ]+) \(([0-9a-f]{40})\)$")
 RETIRED_EXPERIMENT_MARKER_SCHEMA = 1
 
 
@@ -38,8 +40,10 @@ RETIRED_EXPERIMENT_MARKER_SCHEMA = 1
 class ActiveLease:
     project_id: str
     server: str
+    machine_id: str
     run_id: str
     expires_at: float
+    heartbeat_expired: bool
 
 
 def _project_ids(controller_root: Path) -> list[str]:
@@ -64,34 +68,74 @@ def _active_leases(
     scheduler = controller_scheduler_paths(controller_root)
     if scheduler.leases_dir.is_dir():
         for lease_path in sorted(scheduler.leases_dir.glob("*.yaml")):
-            try:
-                lease = load_yaml(lease_path)
-                expires_at = float(lease.get("expires_at", 0))
-                project_id = str(lease["project_id"])
-            except (KeyError, OSError, TypeError, ValueError):
-                continue
-            if expires_at <= timestamp:
+            lease = load_server_lease(lease_path)
+            expires_at = float(lease["expires_at"])
+            durable_dispatch = lease["kind"] == "dispatch"
+            if expires_at <= timestamp and not durable_dispatch:
                 continue
             active.append(
                 ActiveLease(
-                    project_id=project_id,
-                    server=lease_path.stem,
-                    run_id=str(lease.get("run_id", "unknown")),
+                    project_id=str(lease["project_id"]),
+                    server=str(lease["server"]),
+                    machine_id=str(lease["machine_id"]),
+                    run_id=str(lease["run_id"]),
                     expires_at=expires_at,
+                    heartbeat_expired=expires_at <= timestamp,
                 )
             )
 
     return active
 
 
-def inspect_release_gate(controller_root: Path, *, now: float | None = None) -> dict[str, Any]:
+def _executable_receipt(path: Path) -> dict[str, Any]:
+    clean_environment = os.environ.copy()
+    clean_environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [str(path), "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        env=clean_environment,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            completed.stderr.strip() or f"version probe failed for {path}"
+        )
+    version = completed.stdout.strip()
+    match = VERSION_RE.fullmatch(version)
+    if match is None:
+        raise RuntimeError(f"invalid remote-runner version receipt from {path}")
+    return {
+        "path": str(path),
+        "version": match.group(1),
+        "revision": match.group(2),
+        "raw": version,
+    }
+
+
+def _optional_executable_receipt(path: Path | None) -> dict[str, Any] | None:
+    if path is None or (not path.exists() and not path.is_symlink()):
+        return None
+    return _executable_receipt(path)
+
+
+def inspect_release_gate(
+    controller_root: Path,
+    *,
+    now: float | None = None,
+    global_cli: Path | None = None,
+) -> dict[str, Any]:
     root = controller_root.expanduser().resolve()
     project_ids = _project_ids(root)
     leases = _active_leases(root, now=now)
+    current_cli = root / "runner" / "current" / "venv" / "bin" / "remote-runner"
     return {
         "revision": SOURCE_REVISION,
         "projects": project_ids,
         "active_leases": [lease.__dict__ for lease in leases],
+        "controller_global_cli": _optional_executable_receipt(global_cli),
+        "controller_private_current": _optional_executable_receipt(current_cli),
     }
 
 
@@ -274,7 +318,99 @@ def _migrate_project_state(paths: ControllerPaths) -> dict[str, Any]:
     }
 
 
-def activate_release(controller_root: Path, revision: str) -> dict[str, Any]:
+def _activate_runtime_links(
+    *,
+    runner_root: Path,
+    revision: str,
+    global_cli: Path | None,
+) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
+    runner_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    current = runner_root / "current"
+    if current.exists() and not current.is_symlink():
+        raise ValueError("controller private current must be a symlink")
+    previous = os.readlink(current) if current.is_symlink() else None
+    current_temporary = runner_root / f".current-{revision}-{os.getpid()}"
+    with contextlib.suppress(FileNotFoundError):
+        current_temporary.unlink()
+    current_temporary.symlink_to(Path("releases") / revision)
+
+    global_backup: Path | None = None
+    global_temporary: Path | None = None
+    if global_cli is not None:
+        if not global_cli.is_absolute() or global_cli.name != "remote-runner":
+            raise ValueError("controller global CLI path must be absolute remote-runner")
+        if not global_cli.parent.is_dir() or global_cli.parent.is_symlink():
+            raise ValueError("controller global CLI parent must be a real directory")
+        global_temporary = global_cli.parent / f".remote-runner-{revision}-{os.getpid()}"
+        global_backup = global_cli.parent / f".remote-runner-backup-{os.getpid()}"
+        for temporary in (global_temporary, global_backup):
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
+        global_temporary.symlink_to(current / "venv" / "bin" / "remote-runner")
+
+    moved_global = False
+    installed_global = False
+    switched_current = False
+    try:
+        if global_cli is not None and (global_cli.exists() or global_cli.is_symlink()):
+            assert global_backup is not None
+            os.replace(global_cli, global_backup)
+            moved_global = True
+        if global_cli is not None:
+            assert global_temporary is not None
+            os.replace(global_temporary, global_cli)
+            installed_global = True
+        os.replace(current_temporary, current)
+        switched_current = True
+        private_path = current / "venv" / "bin" / "remote-runner"
+        private_receipt = (
+            _executable_receipt(private_path)
+            if global_cli is not None
+            else {"path": str(private_path), "revision": revision, "raw": None}
+        )
+        if private_receipt["revision"] != revision:
+            raise RuntimeError("controller private current revision does not match activation")
+        global_receipt = _optional_executable_receipt(global_cli)
+        if global_cli is not None and (
+            global_receipt is None or global_receipt["revision"] != revision
+        ):
+            raise RuntimeError("controller global CLI revision does not match activation")
+    except BaseException:
+        if switched_current:
+            rollback = runner_root / f".rollback-current-{os.getpid()}"
+            with contextlib.suppress(FileNotFoundError):
+                rollback.unlink()
+            if previous is None:
+                with contextlib.suppress(FileNotFoundError):
+                    current.unlink()
+            else:
+                rollback.symlink_to(previous)
+                os.replace(rollback, current)
+        if global_cli is not None and installed_global:
+            with contextlib.suppress(FileNotFoundError):
+                global_cli.unlink()
+        if global_cli is not None and moved_global:
+            assert global_backup is not None
+            os.replace(global_backup, global_cli)
+        raise
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            current_temporary.unlink()
+        if global_temporary is not None:
+            with contextlib.suppress(FileNotFoundError):
+                global_temporary.unlink()
+    if global_backup is not None:
+        with contextlib.suppress(FileNotFoundError):
+            global_backup.unlink()
+    return previous, global_receipt, private_receipt
+
+
+def activate_release(
+    controller_root: Path,
+    revision: str,
+    *,
+    global_cli: Path | None = None,
+) -> dict[str, Any]:
     if not REVISION_RE.fullmatch(revision):
         raise ValueError("release revision must be a full lowercase Git SHA")
     if SOURCE_REVISION != revision:
@@ -293,7 +429,7 @@ def activate_release(controller_root: Path, revision: str) -> dict[str, Any]:
         leases = _active_leases(root)
         if leases:
             detail = ", ".join(
-                f"{lease.project_id}:{lease.server}:{lease.run_id}"
+                f"{lease.project_id}:{lease.server}[{lease.machine_id}]:{lease.run_id}"
                 for lease in leases
             )
             raise RuntimeError(f"controller release blocked by active dispatch lease: {detail}")
@@ -302,14 +438,11 @@ def activate_release(controller_root: Path, revision: str) -> dict[str, Any]:
             _migrate_project_state(controller_paths(root, project_id))
             for project_id in project_ids
         ]
-        runner_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        current = runner_root / "current"
-        previous = os.readlink(current) if current.is_symlink() else None
-        temporary = runner_root / f".current-{revision}-{os.getpid()}"
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
-        temporary.symlink_to(Path("releases") / revision)
-        os.replace(temporary, current)
+        previous, global_receipt, private_receipt = _activate_runtime_links(
+            runner_root=runner_root,
+            revision=revision,
+            global_cli=global_cli,
+        )
 
     return {
         "revision": revision,
@@ -318,12 +451,15 @@ def activate_release(controller_root: Path, revision: str) -> dict[str, Any]:
         "stopped_output_sync_workers": stopped["output_sync_workers"],
         "state_migrations": migrations,
         "projects": project_ids,
+        "controller_global_cli": global_receipt,
+        "controller_private_current": private_receipt,
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Gate private controller release activation.")
     parser.add_argument("--controller-root", type=Path, required=True)
+    parser.add_argument("--global-cli", type=Path)
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("inspect")
     activate = subparsers.add_parser("activate")
@@ -336,9 +472,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.action == "inspect":
-            result = inspect_release_gate(args.controller_root)
+            result = inspect_release_gate(
+                args.controller_root,
+                global_cli=args.global_cli,
+            )
         else:
-            result = activate_release(args.controller_root, args.revision)
+            result = activate_release(
+                args.controller_root,
+                args.revision,
+                global_cli=args.global_cli,
+            )
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
     print(json.dumps(result, indent=2, sort_keys=True))

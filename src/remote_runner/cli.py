@@ -145,13 +145,22 @@ def build_parser() -> argparse.ArgumentParser:
             "cannot be combined with --candidate-server"
         ),
     )
+    run_parser.add_argument(
+        "--cores",
+        dest="requested_cores",
+        type=int,
+        help=(
+            "allocate exactly this many CPU cores from the selected machine; "
+            "omission preserves the compatible whole-machine allocation"
+        ),
+    )
     run_parser.add_argument("--label", required=True)
     run_parser.add_argument("--task-id", required=True)
     run_parser.add_argument(
         "--workload-class",
         choices=WORKLOAD_CLASSES,
         default="standard",
-        help="submit standard exclusive work or a configured test-lane workload",
+        help="submit work in the standard lane or configured test lane",
     )
     run_parser.add_argument(
         "--queue-priority",
@@ -359,6 +368,11 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         server_state_parser = subparsers.add_parser(command, help=help_text)
         _add_project_config(server_state_parser)
+        server_state_parser.add_argument(
+            "--server-registry",
+            type=Path,
+            default=DEFAULT_SERVER_REGISTRY,
+        )
         server_state_parser.add_argument("--server", required=True)
         server_state_parser.add_argument("--timeout", type=int, default=8)
     retire_server_parser = subparsers.add_parser(

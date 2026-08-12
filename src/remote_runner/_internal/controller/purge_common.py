@@ -177,6 +177,7 @@ def purge_execution_resources(
         leased = acquire_maintenance_lease(
             paths,
             server=server,
+            machine_id=str(manifest.get("machine_id", server)),
             run_id=owner,
             ttl_seconds=600,
         )
@@ -219,7 +220,13 @@ def purge_execution_resources(
             failures.append({"run_id": run_id, "error": str(exc)})
             continue
         finally:
-            release_dispatch_lease(paths, server=server, run_id=owner)
+            release_dispatch_lease(
+                paths,
+                server=server,
+                machine_id=leased.machine_id,
+                run_id=owner,
+                owner_token=leased.token,
+            )
         progress[run_id] = {"status": "complete", "result": result}
         persist()
     return failures
@@ -271,6 +278,7 @@ def worktree_candidates(
             continue
         candidate = {
             "server": str(server["name"]),
+            "machine_id": str(server.get("machine_id", server["name"])),
             "ssh": str(server["ssh"]),
             "python": str(server["python"]),
             "bare_repo": str(server["bare_repo"]),
@@ -323,6 +331,7 @@ def purge_worktrees(
         leased = acquire_maintenance_lease(
             paths,
             server=str(candidate["server"]),
+            machine_id=str(candidate["machine_id"]),
             run_id=owner,
             ttl_seconds=600,
         )
@@ -353,6 +362,8 @@ def purge_worktrees(
             release_dispatch_lease(
                 paths,
                 server=str(candidate["server"]),
+                machine_id=leased.machine_id,
                 run_id=owner,
+                owner_token=leased.token,
             )
     return failures, preserved

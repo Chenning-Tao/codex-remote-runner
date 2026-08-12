@@ -232,6 +232,7 @@ def test_edit_server_capacity_persists_both_lanes(tmp_path: Path, monkeypatch) -
         io.StringIO(
             json.dumps(
                 {"expected_revision": 0, "standard_slots": 3, "test_slots": 5}
+                | {"machine_id": "compute-a"}
             )
         ),
     )
@@ -344,6 +345,7 @@ def test_queued_job_returns_only_extension_constraints(tmp_path: Path) -> None:
             "run_id": "rr-0123456789abcdef",
             "revision": "a" * 40,
             "minimum_cores": 1,
+            "requested_cores": None,
             "workload_class": "standard",
             "prepared_servers": ["compute-a"],
             "output_relpath": None,
@@ -428,7 +430,17 @@ def test_drain_server_counts_frozen_queue_matches_and_resume_wakes_dispatcher(
         interval=60,
     )
 
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"machine_id": "compute-a"})),
+    )
     drained = controller_service.update_server_drain(args, drained=True)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"machine_id": "compute-a"})),
+    )
     resumed = controller_service.update_server_drain(args, drained=False)
 
     assert drained["scope"] == "controller"

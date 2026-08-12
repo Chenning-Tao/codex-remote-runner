@@ -4,8 +4,9 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event, Thread
 
 import pytest
 
@@ -13,7 +14,9 @@ from remote_runner._internal.controller import dispatcher as controller_dispatch
 from remote_runner._internal.controller.registry import (
     acquire_dispatch_lease,
     controller_paths,
+    controller_scheduler_paths,
     ensure_server_capacities,
+    MalformedLeaseError,
     load_job,
     reserve_queued_job_update,
     set_server_drained,
@@ -22,7 +25,8 @@ from remote_runner._internal.controller.registry import (
     update_queued_job,
     update_server_capacity,
 )
-from remote_runner._internal.execution_registry import sha256_bytes, write_yaml
+from remote_runner._internal.execution_registry import load_yaml, sha256_bytes, write_yaml
+from remote_runner._internal.scheduling import CapacityCandidate
 from remote_runner._internal.worktree import WorktreeResult
 
 
@@ -151,6 +155,174 @@ def test_dispatch_waits_for_live_lease_on_interrupted_head(tmp_path: Path) -> No
 
     assert outcome.action == "busy"
     assert outcome.run_id == RUN_ID
+
+
+def test_lease_heartbeat_covers_startup_beyond_initial_ttl(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "controller"
+    paths = controller_paths(root, "project-a")
+    queued = job()
+    queued["lease_seconds"] = 1
+    submit_job(paths, queued)
+    entered = Event()
+    proceed = Event()
+    outcomes: list[controller_dispatcher.DispatchOutcome] = []
+
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "probe_server_state",
+        lambda *_args: {"reachable": True, "load5": 0.0, "active_run_ids": ()},
+    )
+
+    def prepare(**_kwargs) -> WorktreeResult:
+        entered.set()
+        assert proceed.wait(timeout=3)
+        return WorktreeResult("/srv/example/worktrees/" + "a" * 40, False)
+
+    monkeypatch.setattr(controller_dispatcher, "prepare_remote_worktree", prepare)
+    monkeypatch.setattr(
+        controller_dispatcher, "_register_execution", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
+    monkeypatch.setattr(
+        controller_dispatcher.launch, "launch", lambda *_args, **_kwargs: None
+    )
+
+    thread = Thread(target=lambda: outcomes.append(controller_dispatcher.dispatch_once(paths)))
+    thread.start()
+    assert entered.wait(timeout=2)
+    lease_path = controller_scheduler_paths(root).leases_dir / "compute-b.yaml"
+    deadline = time.monotonic() + 2
+    lease = load_yaml(lease_path)
+    while lease["heartbeat_at"] == lease["created_at"] and time.monotonic() < deadline:
+        time.sleep(0.02)
+        lease = load_yaml(lease_path)
+    assert lease["heartbeat_at"] > lease["created_at"]
+    assert lease["expires_at"] > lease["created_at"] + 1
+    assert acquire_dispatch_lease(
+        controller_paths(root, "project-b"),
+        server="compute-b",
+        run_id="rr-fedcba9876543210",
+        ttl_seconds=1,
+        now=float(lease["created_at"]) + 2,
+    ) is None
+
+    proceed.set()
+    thread.join(timeout=3)
+    assert outcomes[0].action == "started"
+
+
+def test_lost_lease_owner_cannot_report_success(tmp_path: Path, monkeypatch) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    queued = job()
+    queued["lease_seconds"] = 1
+    submit_job(paths, queued)
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "probe_server_state",
+        lambda *_args: {"reachable": True, "load5": 0.0, "active_run_ids": ()},
+    )
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "prepare_remote_worktree",
+        lambda **_kwargs: WorktreeResult(
+            "/srv/example/worktrees/" + "a" * 40,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        controller_dispatcher, "_register_execution", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
+
+    def steal_fence(*_args, **_kwargs) -> None:
+        replacement = acquire_dispatch_lease(
+            paths,
+            server="compute-b",
+            run_id=RUN_ID,
+            ttl_seconds=1,
+            now=time.time() + 10,
+        )
+        assert replacement is not None
+
+    monkeypatch.setattr(controller_dispatcher.launch, "launch", steal_fence)
+
+    outcome = controller_dispatcher.dispatch_once(paths)
+
+    assert outcome.action == "unknown"
+    assert outcome.action != "started"
+
+
+def test_lost_queue_commit_owner_cannot_report_success(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, job())
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "probe_server_state",
+        lambda *_args: {"reachable": True, "load5": 0.0, "active_run_ids": ()},
+    )
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "prepare_remote_worktree",
+        lambda **_kwargs: WorktreeResult(
+            "/srv/example/worktrees/" + "a" * 40,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        controller_dispatcher, "_register_execution", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(controller_dispatcher, "project_paths", lambda _path: object())
+
+    def lose_queue_commit(*_args, **_kwargs) -> None:
+        transition_queued_state(
+            paths,
+            RUN_ID,
+            expected_revision=1,
+            status="failed",
+            error="competing controller decision",
+        )
+
+    monkeypatch.setattr(controller_dispatcher.launch, "launch", lose_queue_commit)
+
+    outcome = controller_dispatcher.dispatch_once(paths)
+
+    assert outcome.action == "unknown"
+    assert outcome.action != "started"
+    assert acquire_dispatch_lease(
+        controller_paths(paths.root, "other-project"),
+        server="compute-b",
+        run_id="rr-fedcba9876543210",
+        ttl_seconds=120,
+        now=time.time() + 10_000,
+    ) is None
+
+
+def test_dispatcher_fails_closed_on_malformed_global_lease(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, job())
+    scheduler = controller_scheduler_paths(paths.root)
+    scheduler.leases_dir.mkdir(parents=True)
+    (scheduler.leases_dir / "compute-b.yaml").write_text(
+        "owner_token: [broken\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        controller_dispatcher,
+        "probe_server_state",
+        lambda *_args: pytest.fail("malformed lease must block before probing"),
+    )
+
+    with pytest.raises(MalformedLeaseError, match="malformed dispatch lease"):
+        controller_dispatcher.dispatch_once(paths)
 
 
 def test_queued_urgent_job_does_not_bypass_active_dispatch(tmp_path: Path) -> None:
@@ -623,6 +795,7 @@ def test_blocked_standard_head_does_not_hide_test_lane(
         workload_class="test",
         command="python -m pytest tests/test_scheduler.py -q",
     )
+    test_job["requested_cores"] = 16
     test_job["run_id"] = "rr-fedcba9876543210"
     submit_job(paths, test_job, now="2026-01-01T00:00:01+00:00")
     monkeypatch.setattr(
@@ -632,7 +805,13 @@ def test_blocked_standard_head_does_not_hide_test_lane(
             "reachable": True,
             "load5": 256.0 if ssh == "compute-b" else 0.0,
             "active_runs": (
-                ({"run_id": "rr-running00000000", "workload_class": "standard"},)
+                (
+                    {
+                        "run_id": "rr-running00000000",
+                        "workload_class": "standard",
+                        "assigned_cores": 240,
+                    },
+                )
                 if ssh == "compute-b"
                 else ()
             ),
@@ -658,7 +837,7 @@ def test_blocked_standard_head_does_not_hide_test_lane(
 
     assert outcome.action == "started"
     assert outcome.run_id == "rr-fedcba9876543210"
-    assert selected["assigned_cores"] == 256
+    assert selected["assigned_cores"] == 16
     assert selected["job"]["submitted_command"] == "python -m pytest tests/test_scheduler.py -q"
     assert load_job(paths, RUN_ID)[1]["status"] == "queued"
     assert load_job(paths, str(standard_backfill["run_id"]))[1]["status"] == "queued"
@@ -920,9 +1099,14 @@ def test_test_pool_uses_another_server_when_one_server_is_full(
     assert outcome.server == "archive"
 
 
-def test_standard_lane_ignores_running_test_work(tmp_path: Path, monkeypatch) -> None:
+def test_standard_lane_shares_remaining_cores_with_running_test_work(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     paths = controller_paths(tmp_path / "controller", "example")
-    submit_job(paths, job())
+    queued = job()
+    queued["requested_cores"] = 8
+    submit_job(paths, queued)
     monkeypatch.setattr(
         controller_dispatcher,
         "probe_server_state",
@@ -930,7 +1114,11 @@ def test_standard_lane_ignores_running_test_work(tmp_path: Path, monkeypatch) ->
             "reachable": True,
             "load5": 256.0,
             "active_runs": (
-                {"run_id": "rr-testing00000000", "workload_class": "test"},
+                {
+                    "run_id": "rr-testing00000000",
+                    "workload_class": "test",
+                    "assigned_cores": 8,
+                },
             ),
         },
     )
@@ -953,6 +1141,38 @@ def test_standard_lane_ignores_running_test_work(tmp_path: Path, monkeypatch) ->
     assert outcomes[0].run_id == RUN_ID
 
 
+def test_large_machine_core_budget_blocks_cross_lane_overcommit() -> None:
+    candidate = controller_dispatcher.ProbedServer(
+        server={
+            "name": "epyc",
+            "machine_id": "epyc-9965",
+            "configured_cores": 768,
+            "standard_slots": 4,
+            "test_slots": 4,
+        },
+        capacity=CapacityCandidate(
+            name="epyc",
+            configured_cores=768,
+            load5=0.0,
+            allocated_cores=700,
+            active_run_count=2,
+        ),
+        active_standard_count=1,
+        active_test_count=1,
+        active_run_ids=("rr-a", "rr-b"),
+        active_assigned_cores=700,
+    )
+
+    assert not controller_dispatcher._has_workload_capacity(
+        {"workload_class": "test", "requested_cores": 100},
+        candidate,
+    )
+    assert controller_dispatcher._has_workload_capacity(
+        {"workload_class": "standard", "requested_cores": 68},
+        candidate,
+    )
+
+
 @pytest.mark.parametrize(
     ("workload_class", "capacity_changes", "active_class"),
     [
@@ -969,6 +1189,7 @@ def test_dispatch_uses_live_controller_slots_for_existing_queued_job(
 ) -> None:
     paths = controller_paths(tmp_path / "controller", "example")
     queued = job(workload_class=workload_class)
+    queued["requested_cores"] = 8
     submit_job(paths, queued)
     server = queued["prepared_servers"][0]
     ensure_server_capacities(paths, [server])
@@ -985,7 +1206,11 @@ def test_dispatch_uses_live_controller_slots_for_existing_queued_job(
             "reachable": True,
             "load5": 0.0,
             "active_runs": (
-                {"run_id": "rr-running00000000", "workload_class": active_class},
+                {
+                    "run_id": "rr-running00000000",
+                    "workload_class": active_class,
+                    "assigned_cores": 8,
+                },
             ),
         },
     )
@@ -1044,6 +1269,13 @@ def test_unknown_launch_outcome_stays_reconcilable(tmp_path: Path, monkeypatch) 
 
     assert outcome.action == "unknown"
     assert load_job(paths, RUN_ID)[1]["status"] == "dispatched"
+    assert acquire_dispatch_lease(
+        controller_paths(paths.root, "other-project"),
+        server="compute-b",
+        run_id="rr-fedcba9876543210",
+        ttl_seconds=120,
+        now=time.time() + 10_000,
+    ) is None
 
 
 def test_dispatch_batch_shares_probes_and_launches_distinct_servers_concurrently(

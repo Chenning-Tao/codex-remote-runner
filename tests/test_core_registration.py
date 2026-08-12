@@ -144,7 +144,7 @@ def test_explicit_server_never_probes_another_server(
     )
     calls: list[str] = []
 
-    def unreachable(ssh: str, _timeout: int) -> dict[str, object]:
+    def unreachable(ssh: str, _timeout: int, **_kwargs) -> dict[str, object]:
         calls.append(ssh)
         return {"reachable": False, "error": "offline"}
 
@@ -238,7 +238,7 @@ def test_local_pool_probe_does_not_preselect_a_server(
     monkeypatch.setattr(
         pool,
         "probe_endpoint",
-        lambda _ssh, _timeout: {"reachable": True},
+        lambda _ssh, _timeout, **_kwargs: {"reachable": True},
     )
     candidates = pool.probe_project_pool(
         load_managed_project_config(project_config),
@@ -270,7 +270,7 @@ def test_pool_probes_only_servers_meeting_minimum_cores(
     )
     calls: list[str] = []
 
-    def reachable(ssh: str, _timeout: int) -> dict[str, object]:
+    def reachable(ssh: str, _timeout: int, **_kwargs) -> dict[str, object]:
         calls.append(ssh)
         return {"reachable": True}
 
@@ -312,7 +312,7 @@ def test_pool_probes_only_allowed_candidate_servers(
     )
     probed: list[str] = []
 
-    def probe(ssh: str, _timeout: int) -> dict[str, bool]:
+    def probe(ssh: str, _timeout: int, **_kwargs) -> dict[str, bool]:
         probed.append(ssh)
         return {"reachable": True}
 
@@ -345,7 +345,11 @@ def test_pool_carries_global_testing_slots(
             }
         },
     )
-    monkeypatch.setattr(pool, "probe_endpoint", lambda *_args: {"reachable": True})
+    monkeypatch.setattr(
+        pool,
+        "probe_endpoint",
+        lambda *_args, **_kwargs: {"reachable": True},
+    )
 
     candidates = pool.probe_project_pool(
         load_managed_project_config(project_config),

@@ -43,7 +43,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.1'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.2'
 remote-runner --help
 ```
 
@@ -81,7 +81,7 @@ pending output-sync intent 只有在 run ID、终态 execution record、revision
 
 Remote Runner 使用两个 YAML 文件：
 
-1. `~/.codex/remote-servers.yaml` 描述共享物理容量和 SSH 端点。
+1. `~/.codex/remote-servers.yaml` 描述稳定的 `machine_id`、共享物理容量和 SSH 端点。
 2. 项目自有的 `.remote-runner.yaml` 描述控制器、源码仓库、项目远程服务器、调度策略以及可选的输出归档。
 
 可以从 [examples/remote-servers.yaml](examples/remote-servers.yaml) 和 [examples/project.remote-runner.yaml](examples/project.remote-runner.yaml) 开始。完整配置契约和环境准备要求见 [references/configuration.md](references/configuration.md)。
@@ -98,8 +98,10 @@ remote-runner web \
 
 控制台绑定在 `127.0.0.1`，可在服务器详情中直接设置控制器全局共享的
 Standard/Test 并发任务数，也可以在排队任务详情中切换任务类型、优先级和
-候选服务器。槽位只限制任务准入，不修改 worker 数，也不会停止已经运行的
-任务；将槽位设为 `0` 会暂停该类型的新任务。
+候选服务器。槽位与跨 Standard/Test 共享的物理核心预算共同限制任务准入；
+内存仅用于库存和监控，不参与 admission。未指定 `--cores` 时保持兼容的整机
+独占分配，`--cores N` 才显式共享恰好 `N` 核。调度不会修改 worker 数，也不会
+停止已经运行的任务；将槽位设为 `0` 会暂停该类型的新任务。
 
 服务器详情还可以先评估、再经二次确认永久下线机器。评估会覆盖同一控制器下
 的所有项目、服务器实际任务进程、冻结队列候选和结果归档状态。下线会先在

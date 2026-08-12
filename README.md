@@ -49,7 +49,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.1'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.2'
 remote-runner --help
 ```
 
@@ -88,8 +88,8 @@ binary cannot recreate the removed subsystem; no normal controller API reads it.
 
 Remote Runner uses two YAML files:
 
-1. `~/.codex/remote-servers.yaml` describes shared physical capacity and SSH
-   endpoints.
+1. `~/.codex/remote-servers.yaml` describes stable `machine_id` values, shared
+   physical capacity, and SSH endpoints.
 2. A project-owned `.remote-runner.yaml` describes the controller, source
    repository, project remotes, scheduling, and optional output archival.
 
@@ -116,9 +116,12 @@ never receives SSH configuration. The details drawer can stop one exact queued o
 workload, change a queued workload's priority and eligible servers, and prepare
 its exact revision on a newly selected compatible server before enabling it. It
 can also switch queued work between the standard and test lanes and edit each
-server's controller-wide standard/test concurrency limits. Slot limits control
-admission only and do not rewrite worker counts or stop running work. Workload
-class changes preserve the submitted command unchanged.
+server's controller-wide standard/test concurrency limits. Slot limits and the
+shared physical core budget both control admission; memory is telemetry only.
+Omitting `--cores` keeps the compatible whole-machine allocation, while
+`--cores N` opts into sharing exactly `N` cores across both lanes. These settings
+do not rewrite worker counts or stop running work. Workload class changes preserve
+the submitted command unchanged.
 Queue rows can be selected across pages to batch-change workload class, priority,
 and optionally one compatible server set. Unselected settings remain unchanged.
 Queue writes use per-run controller revisions and a bounded preparation

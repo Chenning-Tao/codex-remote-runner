@@ -541,7 +541,16 @@ def test_managed_run_reuses_preparation_without_remote_probe_or_push(
     assert result["preparation_reused"] is True
     assert result["revision"] == revision
     assert result["prepared_servers"] == ["compute-a"]
-    assert submitted["prepared_servers"] == [{**prepared_servers[0], "test_slots": 0}]
+    assert submitted["prepared_servers"] == [
+        {
+            **prepared_servers[0],
+            "test_slots": 0,
+            "machine_id": "compute-a",
+            "machine_id_source": "legacy-name",
+            "machine_fingerprint": None,
+            "configured_memory_gb": None,
+        }
+    ]
     assert submitted["minimum_cores"] == 128
 
 
@@ -554,6 +563,11 @@ def test_minimum_cores_filters_reused_prepared_candidates() -> None:
     assert submission._eligible_prepared_servers(
         prepared,
         minimum_cores=256,
+    ) == [{**prepared[0], "output_root": None, "test_slots": 0}]
+    assert submission._eligible_prepared_servers(
+        prepared,
+        minimum_cores=1,
+        requested_cores=200,
     ) == [{**prepared[0], "output_root": None, "test_slots": 0}]
 
 

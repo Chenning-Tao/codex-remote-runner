@@ -18,7 +18,12 @@ from .execution_registry import (
     validate_current_run_id,
 )
 from .output_paths import validate_resolved_output
-from .scheduling import normalize_minimum_cores, normalize_workload_class
+from .machine_identity import normalize_machine_fingerprint, normalize_machine_id
+from .scheduling import (
+    normalize_minimum_cores,
+    normalize_requested_cores,
+    normalize_workload_class,
+)
 
 
 def _output_metadata(raw: str | None) -> dict[str, Any]:
@@ -60,6 +65,20 @@ def register(args: argparse.Namespace) -> Path:
     assigned_cores = getattr(args, "assigned_cores", args.configured_cores)
     if isinstance(assigned_cores, bool) or not isinstance(assigned_cores, int) or assigned_cores <= 0:
         raise ValueError("assigned cores must be a positive integer")
+    requested_cores = normalize_requested_cores(
+        getattr(args, "requested_cores", None)
+    )
+    if requested_cores is not None and assigned_cores != requested_cores:
+        raise ValueError("assigned cores must equal the explicit requested cores")
+    if assigned_cores > args.configured_cores:
+        raise ValueError("assigned cores exceed configured server inventory")
+    machine_id, _machine_id_source = normalize_machine_id(
+        getattr(args, "machine_id", None),
+        server_name=args.server,
+    )
+    machine_fingerprint = normalize_machine_fingerprint(
+        getattr(args, "machine_fingerprint", None)
+    )
     if "\x00" in args.command or not args.command.strip():
         raise ValueError(
             "--command must be non-empty UTF-8 shell text without NUL bytes"
@@ -84,10 +103,13 @@ def register(args: argparse.Namespace) -> Path:
         "project_config": str(paths.config_path),
         "registry_root": str(paths.registry_root),
         "server": args.server,
+        "machine_id": machine_id,
+        "machine_fingerprint": machine_fingerprint,
         "ssh": args.ssh,
         "ssh_profile": args.ssh_profile,
         "configured_cores": args.configured_cores,
         "minimum_cores": minimum_cores,
+        "requested_cores": requested_cores,
         "assigned_cores": assigned_cores,
         "remote_workdir": runtime["workdir"],
         "project_python": runtime["python"],

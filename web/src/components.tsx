@@ -156,7 +156,10 @@ function taskCanUseServer(
     && server.enabled !== false
     && !server.configuration_error
     && typeof server.configured_cores === "number"
-    && server.configured_cores >= (entry.job.minimum_cores ?? 1)
+    && server.configured_cores >= Math.max(
+      entry.job.minimum_cores ?? 1,
+      entry.job.requested_cores ?? 1,
+    )
     && (
       entry.job.requires_output_root !== true
       || server.output_root_configured === true
@@ -700,6 +703,7 @@ export function DetailPanel({
     ?? [];
   const preparedServerSet = new Set(preparedServers);
   const minimumCores = queueEntry?.job.minimum_cores ?? 1;
+  const requestedCores = queueEntry?.job.requested_cores ?? 1;
   const canPrepareAdditionalServers = queueEntry?.job.portable_output !== false;
   const preparableServers = queueEntry && canPrepareAdditionalServers
     ? availableServers.filter((server) => (
@@ -707,7 +711,7 @@ export function DetailPanel({
         && server.enabled !== false
         && !server.configuration_error
         && typeof server.configured_cores === "number"
-        && server.configured_cores >= minimumCores
+        && server.configured_cores >= Math.max(minimumCores, requestedCores)
         && (
           draftWorkload !== "test"
           || (server.testing_enabled === true && (server.test_slots ?? 0) > 0)
@@ -1121,6 +1125,10 @@ export function DetailPanel({
               }}
             />
           </div>
+          <p>
+            槽位仍受整机共享核心分配上限约束；未显式请求核心的任务保持整机独占。
+            内存仅用于库存与监控展示，不参与 admission，请在启用共享槽位前自行核算峰值内存。
+          </p>
           {capacityError && <div className="rr-stop-error" role="alert">{capacityError}</div>}
           <Button
             variant="primary"
@@ -1189,10 +1197,12 @@ export function DetailPanel({
           <DetailGroup term="实时内存" mono>{serverMemory(server)}</DetailGroup>
           <DetailGroup term="内存使用率" mono>{liveMemoryPercent === null ? "--" : `${liveMemoryPercent.toFixed(1)}%`}</DetailGroup>
           <DetailGroup term="配置核心数" mono>{server.configured_cores ?? "--"}</DetailGroup>
+          <DetailGroup term="已分配核心" mono>{server.allocation_unknown ? "未知（保守阻断）" : server.allocated_cores ?? 0}</DetailGroup>
           <DetailGroup term="配置内存" mono>{typeof server.configured_memory_gb === "number" ? `${server.configured_memory_gb} GB` : "--"}</DetailGroup>
           <DetailGroup term="远程核心数" mono>{server.remote_cores ?? "--"}</DetailGroup>
           <DetailGroup term="Standard 槽位" mono>{server.standard_slots ?? 1}</DetailGroup>
           <DetailGroup term="Test 槽位" mono>{server.test_slots ?? 0}</DetailGroup>
+          <DetailGroup term="物理机 ID" mono>{server.machine_id ?? server.name}</DetailGroup>
           <DetailGroup term="自动分配">{server.auto_select === false ? "已排除" : "可分配"}</DetailGroup>
           <DetailGroup term="调度状态">{selection.drained ? "暂停调度" : "正常调度"}</DetailGroup>
           {(server.configuration_error || server.error) && <DetailGroup term="错误">{server.configuration_error ?? server.error}</DetailGroup>}

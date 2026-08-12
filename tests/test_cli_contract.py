@@ -67,6 +67,7 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
         "--queue-priority",
         "--workload-class",
         "--min-cores",
+        "--cores",
         "--candidate-server",
         "--output-relpath",
         "--wait",

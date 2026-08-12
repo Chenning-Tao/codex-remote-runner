@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -9,7 +10,12 @@ from typing import Any
 
 from .config import ManagedProjectConfig
 from .execution_registry import load_yaml
-from .remote_shell import ssh_connection_options
+from .machine_identity import (
+    MACHINE_IDENTITY_PROBE_PROGRAM,
+    normalize_machine_fingerprint,
+    normalize_machine_id,
+)
+from .remote_shell import remote_python_stdin_command, ssh_connection_options
 from .scheduling import normalize_minimum_cores
 
 
@@ -41,20 +47,26 @@ def normalize_candidate_servers(value: object) -> tuple[str, ...] | None:
     return candidates
 
 
-def probe_endpoint(ssh: str, timeout: int) -> dict[str, Any]:
+def probe_endpoint(
+    ssh: str,
+    timeout: int,
+    *,
+    python: str | None = None,
+) -> dict[str, Any]:
     if timeout <= 0:
         raise ValueError("endpoint probe timeout must be positive")
-    command = [
-        "ssh",
-        *ssh_connection_options(timeout),
-        ssh,
-        f"sh -c {shlex.quote('true')}",
-    ]
+    remote_command = (
+        f"sh -c {shlex.quote('true')}"
+        if python is None
+        else remote_python_stdin_command(python)
+    )
+    command = ["ssh", *ssh_connection_options(timeout), ssh, remote_command]
     try:
         completed = subprocess.run(
             command,
+            input=None if python is None else MACHINE_IDENTITY_PROBE_PROGRAM.encode(),
             check=False,
-            text=True,
+            text=python is None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout + 5,
@@ -64,9 +76,29 @@ def probe_endpoint(ssh: str, timeout: int) -> dict[str, Any]:
     if completed.returncode != 0:
         return {
             "reachable": False,
-            "error": completed.stderr.strip() or f"ssh exited with {completed.returncode}",
+            "error": (
+                completed.stderr.strip()
+                if isinstance(completed.stderr, str)
+                else completed.stderr.decode(errors="replace").strip()
+            )
+            or f"ssh exited with {completed.returncode}",
         }
-    return {"reachable": True}
+    if python is None:
+        return {"reachable": True}
+    try:
+        stdout = (
+            completed.stdout
+            if isinstance(completed.stdout, str)
+            else completed.stdout.decode()
+        )
+        payload = json.loads(stdout)
+        fingerprint = normalize_machine_fingerprint(
+            payload.get("machine_fingerprint") if isinstance(payload, dict) else None,
+            required=True,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        return {"reachable": False, "error": f"machine identity probe failed: {exc}"}
+    return {"reachable": True, "machine_fingerprint": fingerprint}
 
 
 def resolve_ssh_targets(
@@ -151,12 +183,28 @@ def _configured_candidates(
                 raise ValueError(
                     f"configured testing slots for {name!r} must be a positive integer"
                 )
+        machine_id, machine_id_source = normalize_machine_id(
+            server.get("machine_id"),
+            server_name=name,
+        )
+        memory_gb = server.get("memory_gb")
+        if memory_gb is not None and (
+            isinstance(memory_gb, bool)
+            or not isinstance(memory_gb, int)
+            or memory_gb <= 0
+        ):
+            raise ValueError(
+                f"configured memory_gb for {name!r} must be a positive integer"
+            )
         candidates.append(
             {
                 "name": name,
+                "machine_id": machine_id,
+                "machine_id_source": machine_id_source,
                 "server": server,
                 "runtime": asdict(project_config.remotes[name]),
                 "cores": cores,
+                "memory_gb": memory_gb,
                 "priority": priority,
                 "test_slots": test_slots,
             }
@@ -185,11 +233,16 @@ def _probe_candidate(
     selected_profile: str | None = None
     last_probe: dict[str, Any] = {"reachable": False, "error": "no endpoint attempted"}
     for ssh, profile in resolve_ssh_targets(item["server"], item["name"], ssh_profile):
-        last_probe = probe_endpoint(ssh, timeout)
+        runtime = item.get("runtime")
+        if isinstance(runtime, dict) and isinstance(runtime.get("python"), str):
+            last_probe = probe_endpoint(ssh, timeout, python=str(runtime["python"]))
+        else:
+            last_probe = probe_endpoint(ssh, timeout)
         attempts.append({"ssh": ssh, "ssh_profile": profile, "probe": last_probe})
         if last_probe.get("reachable") is True:
             selected_ssh = ssh
             selected_profile = profile
+            result["machine_fingerprint"] = last_probe.get("machine_fingerprint")
             break
     result["ssh"] = selected_ssh or attempts[-1]["ssh"]
     result["ssh_profile"] = selected_profile or attempts[-1]["ssh_profile"]

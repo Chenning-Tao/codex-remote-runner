@@ -74,6 +74,9 @@ def test_build_server_inventory_includes_idle_disabled_and_misconfigured_servers
     assert by_name["compute-b"]["enabled"] is False
     assert by_name["compute-a"] == {
         "name": "compute-a",
+        "machine_id": "compute-a",
+        "machine_id_source": "legacy-name",
+        "machine_fingerprint": None,
         "enabled": True,
         "auto_select": True,
         "python": "/opt/python3",
@@ -95,6 +98,9 @@ def test_build_server_inventory_includes_idle_disabled_and_misconfigured_servers
 def dashboard_server(**changes: object) -> dict[str, object]:
     value: dict[str, object] = {
         "name": "compute-a",
+        "machine_id": "compute-a",
+        "machine_id_source": "legacy-name",
+        "machine_fingerprint": None,
         "enabled": True,
         "auto_select": True,
         "python": "/opt/python3",
@@ -211,6 +217,7 @@ def test_server_snapshot_isolates_one_unreachable_server(monkeypatch) -> None:
                 dashboard_server(),
                 dashboard_server(
                     name="compute-b",
+                    machine_id="compute-b",
                     configured_cores=128,
                     endpoints=[{"ssh": "compute-b", "ssh_profile": "ssh"}],
                 ),

@@ -24,6 +24,7 @@ export interface ActiveRun {
 
 export interface ServerSnapshot {
   name: string;
+  machine_id?: string;
   state?: string;
   enabled?: boolean;
   auto_select?: boolean;
@@ -45,6 +46,8 @@ export interface ServerSnapshot {
   memory_used_percent?: number | null;
   standard_runs?: number;
   test_runs?: number;
+  allocated_cores?: number;
+  allocation_unknown?: boolean;
   active_runs?: ActiveRun[];
   error?: string;
   configuration_error?: string | null;
@@ -58,6 +61,7 @@ export interface QueueJob {
   queue_priority?: string;
   queue_position?: number;
   minimum_cores?: number;
+  requested_cores?: number | null;
   server_scope?: string;
   created_at?: string;
   eligible_servers?: string[];
