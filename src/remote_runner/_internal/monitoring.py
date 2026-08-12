@@ -12,6 +12,7 @@ from .config import load_managed_project_config
 from .controller.client import call_controller
 from .execution_registry import (
     CURRENT_MANIFEST_SCHEMA,
+    LEGACY_CURRENT_MANIFEST_SCHEMA,
     PREVIOUS_MANIFEST_SCHEMA,
     ProjectPaths,
     can_transition,
@@ -142,8 +143,22 @@ def parse_remote_status(
         return None, f"invalid remote status JSON: {exc.msg}"
     if not isinstance(data, dict):
         return None, "invalid remote status JSON: expected an object"
-    if data.get("schema_version") != 1:
+    schema_version = data.get("schema_version")
+    if schema_version not in {1, 2}:
         return None, "invalid remote status JSON: unsupported schema_version"
+    if schema_version == 2:
+        for field in ("assigned_cores", "server_cores"):
+            value = data.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                return (
+                    None,
+                    f"invalid remote status JSON: {field} must be a positive integer",
+                )
+        if int(data["assigned_cores"]) > int(data["server_cores"]):
+            return (
+                None,
+                "invalid remote status JSON: assigned_cores exceeds server_cores",
+            )
     workload_class = data.get("workload_class", "standard")
     if workload_class not in {"standard", "test"}:
         return None, "invalid remote status JSON: unsupported workload_class"
@@ -237,6 +252,10 @@ def _current_row(paths: ProjectPaths, run_id: str) -> dict[str, Any]:
         "ssh": manifest["ssh"],
         "task_id": manifest["task_id"],
         "workload_class": manifest.get("workload_class", "standard"),
+        "assigned_cores": manifest.get(
+            "assigned_cores", manifest["configured_cores"]
+        ),
+        "server_cores": manifest["configured_cores"],
         **_current_state_projection(state),
         "tmux_session": run_tmux_session(run_id),
         "remote_log": f"{remote_runtime}/log",
@@ -350,7 +369,11 @@ def load_registry_rows(
         try:
             manifest = load_yaml(manifest_path)
             schema = manifest.get("schema_version")
-            if schema in {PREVIOUS_MANIFEST_SCHEMA, CURRENT_MANIFEST_SCHEMA}:
+            if schema in {
+                LEGACY_CURRENT_MANIFEST_SCHEMA,
+                PREVIOUS_MANIFEST_SCHEMA,
+                CURRENT_MANIFEST_SCHEMA,
+            }:
                 rows.append(_current_row(paths, run_id))
             elif schema == 2:
                 if active_only:

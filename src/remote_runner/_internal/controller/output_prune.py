@@ -73,6 +73,7 @@ def _candidate(
     return {
         "run_id": run_id,
         "server": intent["source_server"],
+        "machine_id": manifest.get("machine_id", intent["source_server"]),
         "source_path": intent["source_path"],
         "archive_path": receipt["target_path"],
         "archived_at": receipt.get("archived_at"),
@@ -211,6 +212,7 @@ def prune_outputs(args: argparse.Namespace) -> dict[str, Any]:
         leased = acquire_maintenance_lease(
             paths,
             server=str(candidate["server"]),
+            machine_id=str(candidate["machine_id"]),
             run_id=run_id,
             ttl_seconds=600,
         )
@@ -254,7 +256,9 @@ def prune_outputs(args: argparse.Namespace) -> dict[str, Any]:
             release_dispatch_lease(
                 paths,
                 server=str(candidate["server"]),
+                machine_id=leased.machine_id,
                 run_id=run_id,
+                owner_token=leased.token,
             )
         results.append(result)
     return {

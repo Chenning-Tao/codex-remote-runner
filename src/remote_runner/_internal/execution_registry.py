@@ -19,11 +19,13 @@ from typing import Any
 
 from .output_sync import enqueue_terminal_output, is_configured
 from .output_paths import validate_resolved_output
-from .scheduling import normalize_workload_class
+from .machine_identity import normalize_machine_fingerprint, normalize_machine_id
+from .scheduling import normalize_requested_cores, normalize_workload_class
 
 PROJECT_CONFIG_NAME = ".remote-runner.yaml"
-CURRENT_MANIFEST_SCHEMA = 4
-PREVIOUS_MANIFEST_SCHEMA = 3
+CURRENT_MANIFEST_SCHEMA = 5
+PREVIOUS_MANIFEST_SCHEMA = 4
+LEGACY_CURRENT_MANIFEST_SCHEMA = 3
 CURRENT_STATE_SCHEMA = 2
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 CURRENT_RUN_ID_RE = re.compile(r"^rr-[0-9a-f]{16}$")
@@ -275,7 +277,11 @@ def registry_kind(paths: ProjectPaths, run_id: str) -> str | None:
         schema = load_yaml(manifest_path).get("schema_version")
     except (OSError, RuntimeError, ValueError):
         return "unsupported"
-    if schema in {PREVIOUS_MANIFEST_SCHEMA, CURRENT_MANIFEST_SCHEMA}:
+    if schema in {
+        LEGACY_CURRENT_MANIFEST_SCHEMA,
+        PREVIOUS_MANIFEST_SCHEMA,
+        CURRENT_MANIFEST_SCHEMA,
+    }:
         return "current"
     if schema == 2:
         return "v2"
@@ -368,7 +374,11 @@ def process_title_privacy_mode(manifest: dict[str, Any]) -> str | None:
 
 def validate_current_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     schema = manifest.get("schema_version")
-    if schema not in {PREVIOUS_MANIFEST_SCHEMA, CURRENT_MANIFEST_SCHEMA}:
+    if schema not in {
+        LEGACY_CURRENT_MANIFEST_SCHEMA,
+        PREVIOUS_MANIFEST_SCHEMA,
+        CURRENT_MANIFEST_SCHEMA,
+    }:
         raise ValueError("unsupported current manifest schema")
     forbidden = sorted(_FORBIDDEN_CORE_MANIFEST_FIELDS.intersection(manifest))
     if forbidden:
@@ -410,15 +420,29 @@ def validate_current_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     if not PurePosixPath(str(manifest["project_python"])).is_absolute():
         raise ValueError("project_python must be an absolute POSIX path")
     _positive_int(manifest.get("configured_cores"), "configured_cores")
+    machine_id, _machine_id_source = normalize_machine_id(
+        manifest.get("machine_id"),
+        server_name=str(manifest["server"]),
+    )
+    manifest["machine_id"] = machine_id
+    manifest["machine_fingerprint"] = normalize_machine_fingerprint(
+        manifest.get("machine_fingerprint")
+    )
     if "minimum_cores" in manifest:
         _positive_int(manifest.get("minimum_cores"), "minimum_cores")
         minimum_cores = int(manifest["minimum_cores"])
         if int(manifest["configured_cores"]) < minimum_cores:
             raise ValueError("manifest selected server does not satisfy minimum_cores")
-    _positive_int(
+    assigned_cores = _positive_int(
         manifest.get("assigned_cores", manifest.get("configured_cores")),
         "assigned_cores",
     )
+    requested_cores = normalize_requested_cores(manifest.get("requested_cores"))
+    manifest["requested_cores"] = requested_cores
+    if assigned_cores is not None and assigned_cores > int(manifest["configured_cores"]):
+        raise ValueError("manifest assigned_cores exceeds configured_cores")
+    if requested_cores is not None and assigned_cores != requested_cores:
+        raise ValueError("manifest assigned_cores does not equal requested_cores")
     _optional_text(manifest.get("expected_revision"), "expected_revision")
     if not isinstance(manifest.get("require_clean_worktree"), bool):
         raise ValueError("manifest require_clean_worktree must be boolean")

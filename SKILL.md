@@ -47,8 +47,14 @@ Use repeated `--candidate-server NAME` for an explicit eligible-server set. Use
 `--min-cores N` for a generic core requirement. The controller ranks only prepared,
 eligible servers using generic capacity and lane constraints.
 
+Omitting `--cores` preserves the compatible whole-machine allocation. Use
+`--cores N` only when the workload can safely share the physical machine; core
+allocations are summed across standard and test lanes. Memory is telemetry only and
+does not participate in admission.
+
 Remote Runner executes the submitted command unchanged. It exposes the selected
 allocation through `RR_ASSIGNED_CORES`; the workload decides whether and how to use it.
+`RR_SERVER_CORES` exposes inventory separately from the consumable allocation.
 
 ## Query Or Wait
 

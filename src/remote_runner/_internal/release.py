@@ -215,6 +215,10 @@ def install_local_tool(artifact: ReleaseArtifact) -> None:
             f"{artifact.wheel}[web]",
         ]
     )
+    verify_local_tool(artifact)
+
+
+def verify_local_tool(artifact: ReleaseArtifact) -> dict[str, str]:
     tool_dir = _run(["uv", "tool", "dir"]).stdout.strip()
     if not tool_dir:
         raise RuntimeError("uv did not report its tool environment directory")
@@ -247,6 +251,11 @@ def install_local_tool(artifact: ReleaseArtifact) -> None:
         raise RuntimeError(
             "installed local remote-runner revision does not match the release artifact"
         )
+    return {
+        "path": str(executable),
+        "revision": match.group(1),
+        "raw": version,
+    }
 
 
 def _ssh_argv(target: str, timeout: int) -> list[str]:
@@ -300,6 +309,25 @@ def _controller_uv_path(target: str, timeout: int) -> str:
     return discovered
 
 
+def _controller_global_cli(
+    target: str,
+    uv_path: str,
+    timeout: int,
+) -> str:
+    completed = _run(
+        [
+            *_ssh_argv(target, timeout),
+            shlex.join([uv_path, "tool", "dir", "--bin"]),
+        ],
+        timeout=timeout + 10,
+    )
+    bin_dir = completed.stdout.strip()
+    path = PurePosixPath(bin_dir)
+    if not path.is_absolute():
+        raise RuntimeError("uv did not report an absolute controller tool bin directory")
+    return str(path / "remote-runner")
+
+
 STAGE_SCRIPT = r'''set -eu
 root=$1
 revision=$2
@@ -346,6 +374,7 @@ def stage_controller_release(
     if timeout <= 0:
         raise ValueError("controller release timeout must be positive")
     uv_probe = _controller_uv_path(controller_ssh, timeout)
+    global_cli = _controller_global_cli(controller_ssh, uv_probe, timeout)
     remote_payload = f"/tmp/remote-runner-{artifact.revision}.tar.gz"
     _run(
         ["scp", str(artifact.controller_payload), f"{controller_ssh}:{remote_payload}"],
@@ -384,6 +413,8 @@ def stage_controller_release(
             "remote_runner._internal.controller.release_gate",
             "--controller-root",
             controller_root,
+            "--global-cli",
+            global_cli,
             "inspect",
         ],
         timeout=timeout,
@@ -402,6 +433,9 @@ def activate_controller_release(
     controller_root: str,
     timeout: int = 20,
 ) -> dict[str, Any]:
+    client_receipt = verify_local_tool(artifact)
+    uv_probe = _controller_uv_path(controller_ssh, timeout)
+    global_cli = _controller_global_cli(controller_ssh, uv_probe, timeout)
     layout = controller_release_layout(controller_root)
     staged_interpreter = str(
         PurePosixPath(layout.releases_root)
@@ -410,7 +444,7 @@ def activate_controller_release(
         / "bin"
         / "python"
     )
-    return _remote_json(
+    result = _remote_json(
         controller_ssh,
         [
             staged_interpreter,
@@ -418,12 +452,19 @@ def activate_controller_release(
             "remote_runner._internal.controller.release_gate",
             "--controller-root",
             controller_root,
+            "--global-cli",
+            global_cli,
             "activate",
             "--revision",
             artifact.revision,
         ],
         timeout=timeout,
     )
+    for field in ("controller_global_cli", "controller_private_current"):
+        receipt = result.get(field)
+        if not isinstance(receipt, dict) or receipt.get("revision") != artifact.revision:
+            raise RuntimeError(f"{field} revision does not match the release artifact")
+    return {**result, "client_cli": client_receipt}
 
 
 def build_parser() -> argparse.ArgumentParser:

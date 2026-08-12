@@ -33,6 +33,12 @@ Use `--min-cores N` for a generic resource constraint. Use repeated
 `--candidate-server NAME` for an explicit eligible-server set. The explicit set is
 stored on the queue record and remains user-editable while the run is queued.
 
+`--min-cores` filters machine inventory; it is not an allocation request. Omit
+`--cores` for the backward-compatible whole-machine allocation, including old queued
+manifests. Use `--cores N` to request a consumable allocation of exactly `N` cores.
+Core allocations are summed across standard and test lanes and are never duplicated.
+Memory inventory and telemetry do not participate in admission.
+
 The controller selects only from prepared eligible servers using current generic
 capacity, configured slots, drains, workload class, priority, and stable name ordering.
 It does not inspect workload arguments, experiment points, metrics, or result meaning.
@@ -51,6 +57,7 @@ appends `--num-workers` or rewrites another workload argument. The workload rece
 
 - `RR_PROJECT_PYTHON`: configured project interpreter;
 - `RR_ASSIGNED_CORES`: positive core allocation for the selected server;
+- `RR_SERVER_CORES`: configured physical core inventory for the selected server;
 - `RR_OUTPUT_ROOT`: selected output root for relative-output runs;
 - `RR_OUTPUT_PATH`: exact resolved output path;
 - `RR_OUTPUT_DIR`: parent directory of the resolved output path.

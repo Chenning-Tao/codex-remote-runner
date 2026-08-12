@@ -25,6 +25,7 @@ under the controller root. The global registry supplies the initial test value:
 ```yaml
 servers:
   compute-a:
+    machine_id: compute-a-physical
     ssh: compute-a
     cores: 256
     memory_gb: 512
@@ -32,9 +33,18 @@ servers:
       slots: 1
 ```
 
+`machine_id` is the stable controller-wide physical identity. Aliases in different
+projects must use the same `machine_id`; different machines that reuse one display
+name must use different IDs. Preparation records a hashed OS machine fingerprint.
+The controller rejects a machine ID that changes fingerprint, a fingerprint bound
+to multiple IDs, or a project/server alias reassigned to another ID. Registries that
+omit `machine_id` remain compatible by using the server name, but this legacy path
+cannot safely express aliases and should be migrated when a server is next prepared.
+
 `memory_gb` is optional static inventory metadata used by the web dashboard for
-display and sorting. It is not probed on each refresh and does not affect task
-scheduling.
+display and sorting. It does not affect admission. Live memory telemetry is also
+observational only; operators enabling shared core allocations must budget memory
+separately.
 
 Live server snapshots additionally expose optional physical-memory probe fields:
 `memory_total_bytes`, `memory_available_bytes`, `memory_used_bytes`, and
@@ -47,10 +57,14 @@ The controller initially uses one standard slot and the configured
 the controller-wide `scheduler/server-capacities.yaml` registry. Web overrides
 remain authoritative across projects and later dashboard refreshes.
 
-Standard and test slots limit concurrent runs only; they do not divide cores,
-rewrite worker arguments, or stop existing work. Zero disables new dispatch in
-that lane. Lowering a limit below current occupancy lets existing runs finish and
-blocks later dispatch until occupancy falls below the new limit.
+Standard and test slots limit concurrent runs in their respective lanes. Both lanes
+also consume one shared physical core budget. Runs submitted without `--cores`
+retain the compatible whole-machine allocation and therefore remain exclusive
+across both lanes. `--cores N` opts into a consumable allocation of exactly `N`
+cores; the controller admits a run only when both its lane slot and the shared core
+budget are available. Zero disables new dispatch in that lane. Lowering a limit
+below current occupancy lets existing runs finish and blocks later dispatch until
+occupancy falls below the new limit. Memory does not participate in this admission.
 
 ## Project Configuration
 
@@ -182,15 +196,17 @@ enabled project remotes. Candidates may be excluded from automatic standard
 placement. Every prepared testing candidate must configure positive global
 `testing.slots`.
 
-Server names come from the global server registry and identify controller-wide
-capacity. Project queues remain isolated, while dispatch leases are shared by
-all projects under one controller root so two projects cannot launch onto the
-same server concurrently. Keep `project_id` unique within that controller root.
-Standard and test runs consume their respective controller-wide slots
-independently. Test occupancy does not prevent a standard run from starting, and
-standard occupancy does not consume test slots. Dispatch reads the current
-controller capacity instead of the historical slot values frozen into queued
-server descriptors.
+Canonical `machine_id` values from the global server registry identify
+controller-wide capacity, drains, and dispatch leases. Display names remain
+project-local labels. Project queues remain isolated, while dispatch leases are
+shared by all projects under one controller root so aliases cannot launch onto the
+same physical machine concurrently. Keep `project_id` unique within that controller
+root.
+Standard and test runs consume their respective controller-wide slots independently,
+but their core allocations share one physical budget. Dispatch reads the current
+controller capacity instead of the historical slot values frozen into queued server
+descriptors. An active legacy runtime without allocation metadata conservatively
+consumes the entire core inventory until it finishes.
 
 ## Output Synchronization
 
@@ -251,6 +267,12 @@ Provision before ordinary lifecycle use:
 - create external output roots with appropriate ownership;
 - install rsync and direct source SSH access on the output-sync target;
 - install tmux on the controller and compute servers.
+
+The maintained activation flow requires the local client CLI to match the release
+artifact, discovers the controller's uv tool bin, and transactionally binds its
+global `remote-runner` command to the private `runner/current` runtime under the
+same lease/state gate. The activation receipt reports the client, controller-global,
+and controller-private revisions; a mismatch is an activation failure, not a warning.
 
 Controller activation stops both project dispatchers and output-sync workers after
 checking controller-wide dispatch leases. For the experiment-boundary migration it

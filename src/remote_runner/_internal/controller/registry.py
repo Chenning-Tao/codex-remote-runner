@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import math
 import os
 import re
 import secrets
@@ -28,17 +29,24 @@ from ..output_paths import (
     normalize_output_relpath,
     normalize_output_root,
 )
+from ..machine_identity import (
+    MACHINE_ID_RE,
+    normalize_machine_fingerprint,
+    normalize_server_identity,
+)
 from ..output_sync import validate_config_payload
 from ..scheduling import (
     normalize_minimum_cores,
     normalize_queue_priority,
+    normalize_requested_cores,
     normalize_workload_class,
     queue_priority_rank,
 )
 
 
-QUEUE_SCHEMA = 4
-PREVIOUS_QUEUE_SCHEMA = 3
+QUEUE_SCHEMA = 5
+PREVIOUS_QUEUE_SCHEMA = 4
+PRIORITY_QUEUE_SCHEMA = 3
 RELATIVE_OUTPUT_QUEUE_SCHEMA = 2
 LEGACY_QUEUE_SCHEMA = 1
 QUEUE_STATE_SCHEMA = 1
@@ -69,6 +77,7 @@ class ControllerSchedulerPaths:
     locks_dir: Path
     drains_path: Path
     capacities_path: Path
+    machines_path: Path
 
 
 def controller_scheduler_paths(root: Path) -> ControllerSchedulerPaths:
@@ -81,7 +90,22 @@ def controller_scheduler_paths(root: Path) -> ControllerSchedulerPaths:
         locks_dir=scheduler_root / "locks",
         drains_path=scheduler_root / "drained-servers.yaml",
         capacities_path=scheduler_root / "server-capacities.yaml",
+        machines_path=scheduler_root / "machine-identities.yaml",
     )
+
+
+@dataclass(frozen=True)
+class LeaseOwnership:
+    machine_id: str
+    server: str
+    project_id: str
+    run_id: str
+    token: str
+    expires_at: float
+
+
+class MalformedLeaseError(RuntimeError):
+    pass
 
 
 def controller_paths(root: Path, project_id: str) -> ControllerPaths:
@@ -132,14 +156,423 @@ def scheduler_lock(root: Path) -> contextlib.AbstractContextManager[None]:
     return _scheduler_lock(root)
 
 
+def _machine_alias(project_id: str, server: str) -> str:
+    if not PROJECT_ID_RE.fullmatch(project_id) or not PROJECT_ID_RE.fullmatch(server):
+        raise ValueError("machine alias contains an invalid project or server name")
+    return f"{project_id}/{server}"
+
+
+def _load_machine_identities_unlocked(
+    scheduler: ControllerSchedulerPaths,
+) -> dict[str, dict[str, Any]]:
+    if not scheduler.machines_path.is_file():
+        return {}
+    payload = load_yaml(scheduler.machines_path)
+    if payload.get("schema_version") != 1:
+        raise ValueError("unsupported machine-identity registry schema")
+    machines = payload.get("machines")
+    if not isinstance(machines, dict):
+        raise ValueError("machine-identity registry machines must be a mapping")
+    normalized: dict[str, dict[str, Any]] = {}
+    aliases_seen: dict[str, str] = {}
+    fingerprints_seen: dict[str, str] = {}
+    legacy_ids_seen: dict[str, str] = {}
+    for machine_id, raw in machines.items():
+        if not isinstance(machine_id, str) or MACHINE_ID_RE.fullmatch(machine_id) is None:
+            raise ValueError("machine-identity registry contains an invalid machine_id")
+        if not isinstance(raw, dict):
+            raise ValueError(f"machine identity for {machine_id!r} must be a mapping")
+        fingerprint = normalize_machine_fingerprint(raw.get("machine_fingerprint"))
+        cores = raw.get("configured_cores")
+        if isinstance(cores, bool) or not isinstance(cores, int) or cores <= 0:
+            raise ValueError(
+                f"machine identity for {machine_id!r} has invalid configured_cores"
+            )
+        memory_gb = raw.get("configured_memory_gb")
+        if memory_gb is not None and (
+            isinstance(memory_gb, bool)
+            or not isinstance(memory_gb, int)
+            or memory_gb <= 0
+        ):
+            raise ValueError(
+                f"machine identity for {machine_id!r} has invalid configured_memory_gb"
+            )
+        aliases = raw.get("aliases")
+        if (
+            not isinstance(aliases, list)
+            or not aliases
+            or any(
+                not isinstance(alias, str)
+                or alias.count("/") != 1
+                or any(
+                    PROJECT_ID_RE.fullmatch(part) is None
+                    for part in alias.split("/", 1)
+                )
+                for alias in aliases
+            )
+            or len(set(aliases)) != len(aliases)
+        ):
+            raise ValueError(f"machine identity for {machine_id!r} has invalid aliases")
+        for alias in aliases:
+            previous = aliases_seen.setdefault(alias, machine_id)
+            if previous != machine_id:
+                raise ValueError(
+                    f"machine alias {alias!r} is bound to multiple machine IDs"
+                )
+        identity_source = raw.get("identity_source")
+        if identity_source is None:
+            identity_source = (
+                "legacy-name"
+                if all(alias.rsplit("/", 1)[-1] == machine_id for alias in aliases)
+                else "explicit"
+            )
+        if identity_source not in {"explicit", "legacy-name"}:
+            raise ValueError(
+                f"machine identity for {machine_id!r} has invalid identity_source"
+            )
+        legacy_machine_ids = raw.get("legacy_machine_ids", [])
+        if (
+            not isinstance(legacy_machine_ids, list)
+            or any(
+                not isinstance(legacy_id, str)
+                or MACHINE_ID_RE.fullmatch(legacy_id) is None
+                or legacy_id == machine_id
+                for legacy_id in legacy_machine_ids
+            )
+            or len(set(legacy_machine_ids)) != len(legacy_machine_ids)
+        ):
+            raise ValueError(
+                f"machine identity for {machine_id!r} has invalid legacy_machine_ids"
+            )
+        for legacy_id in legacy_machine_ids:
+            previous = legacy_ids_seen.setdefault(legacy_id, machine_id)
+            if previous != machine_id:
+                raise ValueError(
+                    f"legacy machine_id {legacy_id!r} maps to multiple machine IDs"
+                )
+        if fingerprint is not None:
+            previous = fingerprints_seen.setdefault(fingerprint, machine_id)
+            if previous != machine_id:
+                raise ValueError(
+                    "one physical machine fingerprint is bound to multiple machine IDs"
+                )
+        normalized[machine_id] = {
+            "machine_fingerprint": fingerprint,
+            "configured_cores": cores,
+            "configured_memory_gb": memory_gb,
+            "aliases": sorted(aliases),
+            "identity_source": identity_source,
+            "legacy_machine_ids": sorted(legacy_machine_ids),
+            "updated_at": str(raw.get("updated_at") or "unknown"),
+        }
+    conflicts = set(normalized).intersection(legacy_ids_seen)
+    if conflicts:
+        raise ValueError(
+            "machine-identity registry reuses canonical IDs as legacy IDs: "
+            + ", ".join(sorted(conflicts))
+        )
+    return normalized
+
+
+def _machine_alias_owner(
+    machines: dict[str, dict[str, Any]], alias: str
+) -> str | None:
+    matches = [
+        machine_id
+        for machine_id, machine in machines.items()
+        if alias in machine["aliases"]
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"machine alias {alias!r} is bound to multiple machine IDs")
+    return matches[0] if matches else None
+
+
+def _machine_fingerprint_owner(
+    machines: dict[str, dict[str, Any]], fingerprint: str | None
+) -> str | None:
+    if fingerprint is None:
+        return None
+    matches = [
+        machine_id
+        for machine_id, machine in machines.items()
+        if machine.get("machine_fingerprint") == fingerprint
+    ]
+    if len(matches) > 1:
+        raise ValueError(
+            "one physical machine fingerprint is bound to multiple machine IDs"
+        )
+    return matches[0] if matches else None
+
+
+def _canonical_machine_id_unlocked(
+    machines: dict[str, dict[str, Any]], machine_id: str
+) -> str:
+    if machine_id in machines:
+        return machine_id
+    matches = [
+        canonical
+        for canonical, machine in machines.items()
+        if machine_id in machine.get("legacy_machine_ids", [])
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"legacy machine_id {machine_id!r} is ambiguous")
+    return matches[0] if matches else machine_id
+
+
+def _resolve_machine_request_unlocked(
+    machines: dict[str, dict[str, Any]],
+    *,
+    project_id: str,
+    server: str,
+    machine_id: str,
+) -> str:
+    canonical = _canonical_machine_id_unlocked(machines, machine_id)
+    alias_owner = _machine_alias_owner(machines, _machine_alias(project_id, server))
+    if alias_owner is None:
+        return canonical
+    if canonical != alias_owner and machine_id != server:
+        raise ValueError(
+            f"machine_id {machine_id!r} does not match server alias {server!r}"
+        )
+    return alias_owner
+
+
+def _validate_machine_inventory(
+    machine_id: str,
+    current: dict[str, Any],
+    *,
+    fingerprint: str | None,
+    cores: int,
+    memory_gb: int | None,
+) -> None:
+    if (
+        current["machine_fingerprint"] is not None
+        and fingerprint is not None
+        and current["machine_fingerprint"] != fingerprint
+    ):
+        raise ValueError(
+            f"machine_id {machine_id!r} resolved to a different physical fingerprint"
+        )
+    if int(current["configured_cores"]) != cores:
+        raise ValueError(
+            f"machine_id {machine_id!r} has conflicting configured core inventory"
+        )
+    current_memory = current.get("configured_memory_gb")
+    if (
+        current_memory is not None
+        and memory_gb is not None
+        and current_memory != memory_gb
+    ):
+        raise ValueError(
+            f"machine_id {machine_id!r} has conflicting configured memory inventory"
+        )
+
+
+def _merge_legacy_machine(
+    machines: dict[str, dict[str, Any]],
+    *,
+    legacy_id: str,
+    target_id: str,
+    fingerprint: str | None,
+    cores: int,
+    memory_gb: int | None,
+) -> None:
+    legacy = machines[legacy_id]
+    if legacy.get("identity_source") != "legacy-name":
+        raise ValueError(
+            f"machine identity {legacy_id!r} is explicit and cannot be reassigned"
+        )
+    _validate_machine_inventory(
+        legacy_id,
+        legacy,
+        fingerprint=fingerprint,
+        cores=cores,
+        memory_gb=memory_gb,
+    )
+    target = machines.get(target_id)
+    if target is None:
+        target = {
+            **legacy,
+            "identity_source": "explicit",
+            "legacy_machine_ids": sorted(
+                set(legacy.get("legacy_machine_ids", [])) | {legacy_id}
+            ),
+        }
+    else:
+        _validate_machine_inventory(
+            target_id,
+            target,
+            fingerprint=fingerprint or legacy.get("machine_fingerprint"),
+            cores=cores,
+            memory_gb=memory_gb or legacy.get("configured_memory_gb"),
+        )
+        target = {
+            **target,
+            "machine_fingerprint": target["machine_fingerprint"]
+            or legacy.get("machine_fingerprint")
+            or fingerprint,
+            "configured_memory_gb": target.get("configured_memory_gb")
+            or legacy.get("configured_memory_gb")
+            or memory_gb,
+            "aliases": sorted(set(target["aliases"]) | set(legacy["aliases"])),
+            "identity_source": "explicit",
+            "legacy_machine_ids": sorted(
+                set(target.get("legacy_machine_ids", []))
+                | set(legacy.get("legacy_machine_ids", []))
+                | {legacy_id}
+            ),
+        }
+    target["updated_at"] = utc_now()
+    machines[target_id] = target
+    if legacy_id != target_id:
+        del machines[legacy_id]
+
+
+def _ensure_machine_identities_unlocked(
+    scheduler: ControllerSchedulerPaths,
+    *,
+    project_id: str,
+    servers: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    machines = _load_machine_identities_unlocked(scheduler)
+    changed = False
+    for raw in servers:
+        server = normalize_server_identity(raw)
+        name = str(server["name"])
+        requested_machine_id = str(server["machine_id"])
+        requested_source = str(server["machine_id_source"])
+        alias = _machine_alias(project_id, name)
+        fingerprint = server["machine_fingerprint"]
+        cores = server.get("configured_cores")
+        if isinstance(cores, bool) or not isinstance(cores, int) or cores <= 0:
+            raise ValueError(f"configured cores for {name!r} must be positive")
+        memory_gb = server.get("configured_memory_gb")
+        if memory_gb is not None and (
+            isinstance(memory_gb, bool)
+            or not isinstance(memory_gb, int)
+            or memory_gb <= 0
+        ):
+            raise ValueError(f"configured memory for {name!r} must be positive")
+
+        alias_owner = _machine_alias_owner(machines, alias)
+        fingerprint_owner = _machine_fingerprint_owner(machines, fingerprint)
+        machine_id = requested_machine_id
+        if requested_source == "explicit":
+            merge_ids = {
+                owner
+                for owner in (alias_owner, fingerprint_owner)
+                if owner is not None and owner != requested_machine_id
+            }
+            for legacy_id in sorted(merge_ids):
+                _merge_legacy_machine(
+                    machines,
+                    legacy_id=legacy_id,
+                    target_id=requested_machine_id,
+                    fingerprint=fingerprint,
+                    cores=cores,
+                    memory_gb=memory_gb,
+                )
+                changed = True
+            machine_id = requested_machine_id
+        elif alias_owner is not None:
+            machine_id = alias_owner
+        elif fingerprint_owner is not None:
+            fingerprint_machine = machines[fingerprint_owner]
+            if fingerprint_machine.get("identity_source") != "explicit":
+                raise ValueError(
+                    f"machine fingerprint for {alias!r} is already bound to legacy "
+                    f"machine_id {fingerprint_owner!r}; configure one shared machine_id"
+                )
+            machine_id = fingerprint_owner
+
+        current = machines.get(machine_id)
+        if current is None:
+            machines[machine_id] = {
+                "machine_fingerprint": fingerprint,
+                "configured_cores": cores,
+                "configured_memory_gb": memory_gb,
+                "aliases": [alias],
+                "identity_source": requested_source,
+                "legacy_machine_ids": [],
+                "updated_at": utc_now(),
+            }
+            changed = True
+        else:
+            _validate_machine_inventory(
+                machine_id,
+                current,
+                fingerprint=fingerprint,
+                cores=cores,
+                memory_gb=memory_gb,
+            )
+            current_memory = current.get("configured_memory_gb")
+            updated = {
+                **current,
+                "machine_fingerprint": current["machine_fingerprint"] or fingerprint,
+                "configured_memory_gb": current_memory or memory_gb,
+                "aliases": sorted(set(current["aliases"]) | {alias}),
+                "identity_source": (
+                    "explicit"
+                    if requested_source == "explicit"
+                    or current.get("identity_source") == "explicit"
+                    else "legacy-name"
+                ),
+            }
+            if updated != current:
+                updated["updated_at"] = utc_now()
+                machines[machine_id] = updated
+                changed = True
+        raw["machine_id"] = machine_id
+        raw["machine_id_source"] = (
+            "legacy-name"
+            if machine_id == name
+            and machines[machine_id].get("identity_source") == "legacy-name"
+            else "explicit"
+        )
+        raw["machine_fingerprint"] = (
+            machines[machine_id].get("machine_fingerprint") or fingerprint
+        )
+    if changed:
+        write_yaml(
+            scheduler.machines_path,
+            {"schema_version": 1, "machines": dict(sorted(machines.items()))},
+        )
+    return machines
+
+
+def ensure_server_identities(
+    paths: ControllerPaths,
+    servers: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    _ensure_controller_tree(paths)
+    scheduler = controller_scheduler_paths(paths.root)
+    _private_tree(scheduler.scheduler_root)
+    with _scheduler_lock(paths.root):
+        return _ensure_machine_identities_unlocked(
+            scheduler,
+            project_id=paths.project_id,
+            servers=servers,
+        )
+
+
+def resolve_server_identity(
+    paths: ControllerPaths,
+    server: dict[str, Any],
+) -> dict[str, Any]:
+    resolved = dict(server)
+    ensure_server_identities(paths, [resolved])
+    return normalize_server_identity(resolved)
+
+
 def _capacity_slots(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1024:
         raise ValueError(f"{field} must be an integer between 0 and 1024")
     return value
 
 
-def _capacity_defaults(server: dict[str, Any]) -> tuple[str, int, int]:
-    name = server.get("name")
+def _capacity_defaults(server: dict[str, Any]) -> tuple[str, str, int, int]:
+    normalized = normalize_server_identity(server)
+    name = normalized.get("name")
     if not isinstance(name, str) or not PROJECT_ID_RE.fullmatch(name):
         raise ValueError("server capacity default contains an invalid server name")
     standard_slots = _capacity_slots(
@@ -150,7 +583,7 @@ def _capacity_defaults(server: dict[str, Any]) -> tuple[str, int, int]:
         server.get("test_slots", 0),
         f"test slots for {name!r}",
     )
-    return name, standard_slots, test_slots
+    return str(normalized["machine_id"]), name, standard_slots, test_slots
 
 
 def _load_server_capacities_unlocked(
@@ -198,21 +631,66 @@ def _load_server_capacities_unlocked(
     return normalized
 
 
+def _canonicalize_capacities_unlocked(
+    machines: dict[str, dict[str, Any]],
+    servers: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], bool]:
+    canonical: dict[str, dict[str, Any]] = {}
+    changed = False
+    for stored_id, capacity in servers.items():
+        machine_id = _canonical_machine_id_unlocked(machines, stored_id)
+        changed = changed or machine_id != stored_id
+        current = canonical.get(machine_id)
+        if current is None:
+            canonical[machine_id] = capacity
+            continue
+        if (
+            current["standard_slots"] != capacity["standard_slots"]
+            or current["test_slots"] != capacity["test_slots"]
+        ):
+            raise ValueError(
+                f"legacy and canonical capacity entries conflict for {machine_id!r}"
+            )
+        selected = current
+        if capacity["customized"] and not current["customized"]:
+            selected = capacity
+        elif capacity["customized"] == current["customized"] and int(
+            capacity["revision"]
+        ) > int(current["revision"]):
+            selected = capacity
+        canonical[machine_id] = selected
+        changed = True
+    return canonical, changed
+
+
 def ensure_server_capacities(
     paths: ControllerPaths,
     defaults: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    parsed = [_capacity_defaults(server) for server in defaults]
     _ensure_controller_tree(paths)
     scheduler = controller_scheduler_paths(paths.root)
     _private_tree(scheduler.scheduler_root)
     with _scheduler_lock(paths.root):
-        servers = _load_server_capacities_unlocked(scheduler)
-        changed = False
-        for name, standard_slots, test_slots in parsed:
-            current = servers.get(name)
+        machines = _ensure_machine_identities_unlocked(
+            scheduler,
+            project_id=paths.project_id,
+            servers=[
+                server
+                for server in defaults
+                if isinstance(server.get("configured_cores"), int)
+                and not isinstance(server.get("configured_cores"), bool)
+                and int(server["configured_cores"]) > 0
+            ],
+        )
+        parsed = [_capacity_defaults(server) for server in defaults]
+        servers, changed = _canonicalize_capacities_unlocked(
+            machines,
+            _load_server_capacities_unlocked(scheduler),
+        )
+        for machine_id, _name, standard_slots, test_slots in parsed:
+            current = servers.get(machine_id)
             if current is None:
-                servers[name] = {
+                servers[machine_id] = {
                     "standard_slots": standard_slots,
                     "test_slots": test_slots,
                     "revision": 0,
@@ -224,7 +702,7 @@ def ensure_server_capacities(
                 current["standard_slots"] != standard_slots
                 or current["test_slots"] != test_slots
             ):
-                servers[name] = {
+                servers[machine_id] = {
                     **current,
                     "standard_slots": standard_slots,
                     "test_slots": test_slots,
@@ -243,9 +721,13 @@ def ensure_server_capacities(
 def list_server_capacities(paths: ControllerPaths) -> dict[str, dict[str, Any]]:
     scheduler = controller_scheduler_paths(paths.root)
     with _scheduler_lock(paths.root):
+        servers, _changed = _canonicalize_capacities_unlocked(
+            _load_machine_identities_unlocked(scheduler),
+            _load_server_capacities_unlocked(scheduler),
+        )
         return {
             name: dict(value)
-            for name, value in _load_server_capacities_unlocked(scheduler).items()
+            for name, value in servers.items()
         }
 
 
@@ -253,12 +735,16 @@ def update_server_capacity(
     paths: ControllerPaths,
     server: str,
     *,
+    machine_id: str | None = None,
     expected_revision: int,
     standard_slots: int,
     test_slots: int,
 ) -> dict[str, Any]:
     if not PROJECT_ID_RE.fullmatch(server):
         raise ValueError(f"invalid server name: {server!r}")
+    capacity_key = machine_id or server
+    if not MACHINE_ID_RE.fullmatch(capacity_key):
+        raise ValueError(f"invalid machine_id: {capacity_key!r}")
     if (
         isinstance(expected_revision, bool)
         or not isinstance(expected_revision, int)
@@ -271,8 +757,18 @@ def update_server_capacity(
     scheduler = controller_scheduler_paths(paths.root)
     _private_tree(scheduler.scheduler_root)
     with _scheduler_lock(paths.root):
-        servers = _load_server_capacities_unlocked(scheduler)
-        current = servers.get(server)
+        machines = _load_machine_identities_unlocked(scheduler)
+        capacity_key = _resolve_machine_request_unlocked(
+            machines,
+            project_id=paths.project_id,
+            server=server,
+            machine_id=capacity_key,
+        )
+        servers, _normalized = _canonicalize_capacities_unlocked(
+            machines,
+            _load_server_capacities_unlocked(scheduler),
+        )
+        current = servers.get(capacity_key)
         if current is None:
             raise FileNotFoundError(f"server capacity does not exist: {server}")
         if int(current["revision"]) != expected_revision:
@@ -292,7 +788,7 @@ def update_server_capacity(
             "updated_at": utc_now(),
             "updated_by_project": paths.project_id,
         }
-        servers[server] = updated
+        servers[capacity_key] = updated
         write_yaml(
             scheduler.capacities_path,
             {"schema_version": 1, "servers": dict(sorted(servers.items()))},
@@ -455,6 +951,7 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
     if schema not in {
         LEGACY_QUEUE_SCHEMA,
         RELATIVE_OUTPUT_QUEUE_SCHEMA,
+        PRIORITY_QUEUE_SCHEMA,
         PREVIOUS_QUEUE_SCHEMA,
         QUEUE_SCHEMA,
     }:
@@ -505,6 +1002,8 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
     else:
         job["minimum_cores"] = normalize_minimum_cores(job["minimum_cores"])
     minimum_cores = int(job["minimum_cores"])
+    requested_cores = normalize_requested_cores(job.get("requested_cores"))
+    job["requested_cores"] = requested_cores
     server_scope = job.get("server_scope", "snapshot")
     if server_scope not in {"snapshot", "all"}:
         raise ValueError("queued job server_scope must be 'snapshot' or 'all'")
@@ -531,13 +1030,30 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
         if name in names:
             raise ValueError(f"duplicate queued prepared server: {name}")
         names.add(name)
+        identity = normalize_server_identity(item)
+        item.update(
+            machine_id=identity["machine_id"],
+            machine_id_source=identity["machine_id_source"],
+            machine_fingerprint=identity["machine_fingerprint"],
+        )
+        memory_gb = item.get("configured_memory_gb")
+        if memory_gb is not None and (
+            isinstance(memory_gb, bool)
+            or not isinstance(memory_gb, int)
+            or memory_gb <= 0
+        ):
+            raise ValueError(
+                "queued prepared server configured_memory_gb must be positive or null"
+            )
+        item["configured_memory_gb"] = memory_gb
         cores = item.get("configured_cores")
         if isinstance(cores, bool) or not isinstance(cores, int) or cores <= 0:
             raise ValueError("queued prepared server configured_cores must be positive")
-        if cores < minimum_cores:
+        required_cores = max(minimum_cores, requested_cores or 1)
+        if cores < required_cores:
             raise ValueError(
                 f"queued prepared server {name!r} has fewer than "
-                f"the required {minimum_cores} cores"
+                f"the required {required_cores} cores"
             )
         priority = item.get("priority")
         if isinstance(priority, bool) or not isinstance(priority, int):
@@ -672,6 +1188,11 @@ def submit_job(
     now: str | None = None,
 ) -> Path:
     job = dict(job)
+    if isinstance(job.get("prepared_servers"), list):
+        job["prepared_servers"] = [
+            dict(server) if isinstance(server, dict) else server
+            for server in job["prepared_servers"]
+        ]
     run_id = str(job.get("run_id") or generate_run_id(runs_dir=paths.queue_dir))
     created_at = now or utc_now()
     job.update(
@@ -1453,54 +1974,89 @@ def _load_drained_servers_unlocked(
     return normalized
 
 
+def _canonicalize_drains_unlocked(
+    machines: dict[str, dict[str, Any]],
+    servers: dict[str, dict[str, str]],
+) -> tuple[dict[str, dict[str, str]], bool]:
+    canonical: dict[str, dict[str, str]] = {}
+    changed = False
+    for stored_id, metadata in servers.items():
+        machine_id = _canonical_machine_id_unlocked(machines, stored_id)
+        changed = changed or machine_id != stored_id or machine_id in canonical
+        current = canonical.get(machine_id)
+        if current is None or metadata["drained_at"] < current["drained_at"]:
+            canonical[machine_id] = metadata
+    return canonical, changed
+
+
 def list_drained_servers(paths: ControllerPaths) -> dict[str, dict[str, str]]:
     scheduler = controller_scheduler_paths(paths.root)
     with _scheduler_lock(paths.root):
-        return _load_drained_servers_unlocked(scheduler)
+        servers, _changed = _canonicalize_drains_unlocked(
+            _load_machine_identities_unlocked(scheduler),
+            _load_drained_servers_unlocked(scheduler),
+        )
+        return servers
 
 
 def set_server_drained(
     paths: ControllerPaths,
     server: str,
     *,
+    machine_id: str | None = None,
     drained: bool,
 ) -> dict[str, Any]:
     if not PROJECT_ID_RE.fullmatch(server):
         raise ValueError(f"invalid server name: {server!r}")
+    requested_machine_id = machine_id or server
+    if not MACHINE_ID_RE.fullmatch(requested_machine_id):
+        raise ValueError(f"invalid machine_id: {requested_machine_id!r}")
     _ensure_controller_tree(paths)
     scheduler = controller_scheduler_paths(paths.root)
     _private_tree(scheduler.scheduler_root)
     with _scheduler_lock(paths.root):
-        servers = _load_drained_servers_unlocked(scheduler)
+        machines = _load_machine_identities_unlocked(scheduler)
+        drain_key = _resolve_machine_request_unlocked(
+            machines,
+            project_id=paths.project_id,
+            server=server,
+            machine_id=requested_machine_id,
+        )
+        servers, normalized = _canonicalize_drains_unlocked(
+            machines,
+            _load_drained_servers_unlocked(scheduler),
+        )
         in_flight_dispatch: dict[str, Any] | None = None
-        lease_path = scheduler.leases_dir / f"{server}.yaml"
-        if lease_path.is_file():
-            try:
-                lease = load_yaml(lease_path)
-                if float(lease.get("expires_at", 0)) > time.time():
-                    in_flight_dispatch = {
-                        "project_id": lease.get("project_id"),
-                        "run_id": lease.get("run_id"),
-                        "expires_at": lease.get("expires_at"),
-                    }
-            except (OSError, RuntimeError, TypeError, ValueError):
-                pass
-        changed = (server in servers) == (not drained)
+        for lease_path in _lease_paths_for_machine_unlocked(
+            scheduler, machines, drain_key
+        ):
+            if not lease_path.is_file():
+                continue
+            lease = load_server_lease(lease_path)
+            if float(lease["expires_at"]) > time.time() or lease["kind"] == "dispatch":
+                in_flight_dispatch = {
+                    "project_id": lease["project_id"],
+                    "run_id": lease["run_id"],
+                    "expires_at": lease["expires_at"],
+                }
+                break
+        changed = (drain_key in servers) == (not drained)
         if drained:
             if changed:
-                servers[server] = {
+                servers[drain_key] = {
                     "drained_at": utc_now(),
                     "requested_by_project": paths.project_id,
                 }
         else:
-            servers.pop(server, None)
-        if changed:
+            servers.pop(drain_key, None)
+        if changed or normalized:
             write_yaml(
                 scheduler.drains_path,
                 {"schema_version": 1, "servers": dict(sorted(servers.items()))},
             )
         return {
             "server": server,
+            "machine_id": drain_key,
             "drained": drained,
             "changed": changed,
             "drained_servers": dict(sorted(servers.items())),
@@ -1508,16 +2064,115 @@ def set_server_drained(
         }
 
 
+def _lease_path(scheduler: ControllerSchedulerPaths, machine_id: str) -> Path:
+    if MACHINE_ID_RE.fullmatch(machine_id) is None:
+        raise ValueError(f"invalid lease machine_id: {machine_id!r}")
+    return scheduler.leases_dir / f"{machine_id}.yaml"
+
+
+def _lease_paths_for_machine_unlocked(
+    scheduler: ControllerSchedulerPaths,
+    machines: dict[str, dict[str, Any]],
+    machine_id: str,
+) -> list[Path]:
+    canonical = _canonical_machine_id_unlocked(machines, machine_id)
+    aliases = machines.get(canonical, {}).get("legacy_machine_ids", [])
+    return [
+        _lease_path(scheduler, candidate)
+        for candidate in dict.fromkeys([canonical, *aliases])
+    ]
+
+
+def load_server_lease(lease_path: Path) -> dict[str, Any]:
+    try:
+        lease = load_yaml(lease_path)
+        schema = lease.get("schema_version", 1)
+        if isinstance(schema, bool) or not isinstance(schema, int) or schema not in {1, 2}:
+            raise ValueError("unsupported schema_version")
+        server = lease.get("server")
+        project_id = lease.get("project_id")
+        run_id = lease.get("run_id")
+        kind = lease.get("kind")
+        machine_id = lease.get("machine_id", server)
+        if not isinstance(server, str) or PROJECT_ID_RE.fullmatch(server) is None:
+            raise ValueError("invalid server")
+        if not isinstance(machine_id, str) or MACHINE_ID_RE.fullmatch(machine_id) is None:
+            raise ValueError("invalid machine_id")
+        if lease_path.stem != machine_id:
+            raise ValueError("lease filename does not match machine_id")
+        if not isinstance(project_id, str) or PROJECT_ID_RE.fullmatch(project_id) is None:
+            raise ValueError("invalid project_id")
+        if not isinstance(run_id, str) or not run_id or "\x00" in run_id:
+            raise ValueError("invalid run_id")
+        if kind not in {"dispatch", "maintenance"}:
+            raise ValueError("invalid lease kind")
+        raw_created_at = lease["created_at"]
+        raw_expires_at = lease["expires_at"]
+        if (
+            isinstance(raw_created_at, bool)
+            or not isinstance(raw_created_at, (int, float))
+            or isinstance(raw_expires_at, bool)
+            or not isinstance(raw_expires_at, (int, float))
+        ):
+            raise ValueError("invalid lease timestamp types")
+        created_at = float(raw_created_at)
+        expires_at = float(raw_expires_at)
+        if (
+            created_at <= 0
+            or expires_at <= created_at
+            or not math.isfinite(created_at)
+            or not math.isfinite(expires_at)
+        ):
+            raise ValueError("invalid lease timestamps")
+        token = lease.get("owner_token")
+        if schema == 2 and (
+            not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None
+        ):
+            raise ValueError("invalid owner_token")
+        if schema == 1:
+            token = None
+            heartbeat_at = None
+        else:
+            raw_heartbeat_at = lease.get("heartbeat_at")
+            if (
+                isinstance(raw_heartbeat_at, bool)
+                or not isinstance(raw_heartbeat_at, (int, float))
+            ):
+                raise ValueError("invalid heartbeat_at")
+            heartbeat_at = float(raw_heartbeat_at)
+            if (
+                not math.isfinite(heartbeat_at)
+                or not created_at <= heartbeat_at < expires_at
+            ):
+                raise ValueError("invalid heartbeat_at")
+    except (KeyError, OSError, RuntimeError, TypeError, UnicodeError, ValueError) as exc:
+        raise MalformedLeaseError(f"malformed dispatch lease {lease_path}: {exc}") from exc
+    return {
+        **lease,
+        "schema_version": schema,
+        "server": server,
+        "machine_id": machine_id,
+        "project_id": project_id,
+        "run_id": run_id,
+        "kind": kind,
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "heartbeat_at": heartbeat_at,
+        "owner_token": token,
+    }
+
+
 def _acquire_server_lease(
     paths: ControllerPaths,
     *,
     server: str,
+    machine_id: str | None,
     run_id: str,
     ttl_seconds: int,
     kind: str,
     allow_drained: bool,
     now: float | None = None,
-) -> bool:
+) -> LeaseOwnership | None:
     if ttl_seconds <= 0:
         raise ValueError("dispatch lease TTL must be positive")
     timestamp = time.time() if now is None else now
@@ -1525,47 +2180,84 @@ def _acquire_server_lease(
     scheduler = controller_scheduler_paths(paths.root)
     _private_tree(scheduler.scheduler_root)
     _private_tree(scheduler.leases_dir)
-    lease_path = scheduler.leases_dir / f"{server}.yaml"
     with _scheduler_lock(paths.root):
-        if not allow_drained and server in _load_drained_servers_unlocked(scheduler):
-            return False
-        if lease_path.is_file():
-            try:
-                existing = load_yaml(lease_path)
-                expires_at = float(existing.get("expires_at", 0))
-            except (OSError, RuntimeError, TypeError, ValueError):
-                expires_at = 0
+        machines = _load_machine_identities_unlocked(scheduler)
+        lease_machine_id = _resolve_machine_request_unlocked(
+            machines,
+            project_id=paths.project_id,
+            server=server,
+            machine_id=machine_id or server,
+        )
+        lease_path = _lease_path(scheduler, lease_machine_id)
+        if (
+            not allow_drained
+            and lease_machine_id
+            in _canonicalize_drains_unlocked(
+                machines,
+                _load_drained_servers_unlocked(scheduler),
+            )[0]
+        ):
+            return None
+        stale_paths: list[Path] = []
+        for existing_path in _lease_paths_for_machine_unlocked(
+            scheduler, machines, lease_machine_id
+        ):
+            if not existing_path.is_file():
+                continue
+            existing = load_server_lease(existing_path)
+            expires_at = float(existing["expires_at"])
             same_owner = (
                 existing.get("project_id") == paths.project_id
                 and existing.get("run_id") == run_id
             )
-            if expires_at > timestamp and not same_owner:
-                return False
+            durable_dispatch = existing["kind"] == "dispatch"
+            if expires_at > timestamp:
+                return None
+            if durable_dispatch and not same_owner:
+                return None
+            stale_paths.append(existing_path)
+        for stale_path in stale_paths:
+            stale_path.unlink()
+        token = secrets.token_hex(32)
+        expires_at = timestamp + ttl_seconds
         write_yaml(
             lease_path,
             {
+                "schema_version": 2,
                 "server": server,
+                "machine_id": lease_machine_id,
                 "project_id": paths.project_id,
                 "run_id": run_id,
                 "kind": kind,
+                "owner_token": token,
                 "created_at": timestamp,
-                "expires_at": timestamp + ttl_seconds,
+                "heartbeat_at": timestamp,
+                "expires_at": expires_at,
             },
         )
-        return True
+        return LeaseOwnership(
+            machine_id=lease_machine_id,
+            server=server,
+            project_id=paths.project_id,
+            run_id=run_id,
+            token=token,
+            expires_at=expires_at,
+        )
 
 
 def acquire_dispatch_lease(
     paths: ControllerPaths,
     *,
     server: str,
+    machine_id: str | None = None,
     run_id: str,
     ttl_seconds: int,
     now: float | None = None,
-) -> bool:
+) -> LeaseOwnership | None:
     return _acquire_server_lease(
         paths,
         server=server,
+        machine_id=machine_id,
         run_id=run_id,
         ttl_seconds=ttl_seconds,
         kind="dispatch",
@@ -1578,13 +2270,15 @@ def acquire_maintenance_lease(
     paths: ControllerPaths,
     *,
     server: str,
+    machine_id: str | None = None,
     run_id: str,
     ttl_seconds: int,
     now: float | None = None,
-) -> bool:
+) -> LeaseOwnership | None:
     return _acquire_server_lease(
         paths,
         server=server,
+        machine_id=machine_id,
         run_id=run_id,
         ttl_seconds=ttl_seconds,
         kind="maintenance",
@@ -1593,20 +2287,117 @@ def acquire_maintenance_lease(
     )
 
 
-def release_dispatch_lease(paths: ControllerPaths, *, server: str, run_id: str) -> bool:
+def renew_dispatch_lease(
+    paths: ControllerPaths,
+    ownership: LeaseOwnership,
+    *,
+    ttl_seconds: int,
+    now: float | None = None,
+) -> LeaseOwnership | None:
+    if ttl_seconds <= 0:
+        raise ValueError("dispatch lease TTL must be positive")
+    timestamp = time.time() if now is None else now
     scheduler = controller_scheduler_paths(paths.root)
-    lease_path = scheduler.leases_dir / f"{server}.yaml"
+    lease_path = _lease_path(scheduler, ownership.machine_id)
     with _scheduler_lock(paths.root):
         if not lease_path.is_file():
+            return None
+        lease = load_server_lease(lease_path)
+        if (
+            lease["schema_version"] != 2
+            or lease["kind"] != "dispatch"
+            or lease["project_id"] != paths.project_id
+            or lease["run_id"] != ownership.run_id
+            or lease["owner_token"] != ownership.token
+            or lease["machine_id"] != ownership.machine_id
+        ):
+            return None
+        expires_at = timestamp + ttl_seconds
+        write_yaml(
+            lease_path,
+            {
+                **lease,
+                "heartbeat_at": timestamp,
+                "expires_at": expires_at,
+            },
+        )
+        return LeaseOwnership(
+            machine_id=ownership.machine_id,
+            server=ownership.server,
+            project_id=ownership.project_id,
+            run_id=ownership.run_id,
+            token=ownership.token,
+            expires_at=expires_at,
+        )
+
+
+def release_dispatch_lease(
+    paths: ControllerPaths,
+    *,
+    server: str,
+    run_id: str,
+    machine_id: str | None = None,
+    owner_token: str | None = None,
+) -> bool:
+    scheduler = controller_scheduler_paths(paths.root)
+    with _scheduler_lock(paths.root):
+        machines = _load_machine_identities_unlocked(scheduler)
+        canonical = _resolve_machine_request_unlocked(
+            machines,
+            project_id=paths.project_id,
+            server=server,
+            machine_id=machine_id or server,
+        )
+        matching: list[Path] = []
+        for lease_path in _lease_paths_for_machine_unlocked(
+            scheduler, machines, canonical
+        ):
+            if not lease_path.is_file():
+                continue
+            lease = load_server_lease(lease_path)
+            if (
+                lease.get("project_id") != paths.project_id
+                or lease.get("run_id") != run_id
+            ):
+                continue
+            if lease["schema_version"] == 2:
+                if owner_token is None or lease.get("owner_token") != owner_token:
+                    continue
+            elif owner_token is not None:
+                continue
+            matching.append(lease_path)
+        if not matching:
             return False
-        try:
-            lease = load_yaml(lease_path)
-        except (OSError, RuntimeError, ValueError):
-            return False
-        if lease.get("project_id") != paths.project_id or lease.get("run_id") != run_id:
-            return False
-        lease_path.unlink()
+        if len(matching) != 1:
+            raise RuntimeError(
+                f"multiple matching leases exist for machine_id {canonical!r}"
+            )
+        matching[0].unlink()
         return True
+
+
+def list_owned_dispatch_leases(paths: ControllerPaths) -> list[dict[str, Any]]:
+    scheduler = controller_scheduler_paths(paths.root)
+    if not scheduler.leases_dir.is_dir():
+        return []
+    with _scheduler_lock(paths.root):
+        machines = _load_machine_identities_unlocked(scheduler)
+        leases = [
+            load_server_lease(lease_path)
+            for lease_path in sorted(scheduler.leases_dir.glob("*.yaml"))
+        ]
+        owned = []
+        for lease in leases:
+            if lease["kind"] != "dispatch" or lease["project_id"] != paths.project_id:
+                continue
+            canonical = _resolve_machine_request_unlocked(
+                machines,
+                project_id=paths.project_id,
+                server=str(lease["server"]),
+                machine_id=str(lease["machine_id"]),
+            )
+            owned.append({**lease, "machine_id": canonical})
+        return owned
 
 
 def has_unexpired_dispatch_lease(
@@ -1622,9 +2413,9 @@ def has_unexpired_dispatch_lease(
     with _scheduler_lock(paths.root):
         for lease_path in scheduler.leases_dir.glob("*.yaml"):
             try:
-                lease = load_yaml(lease_path)
-                expires_at = float(lease.get("expires_at", 0))
-            except (OSError, RuntimeError, TypeError, ValueError):
+                lease = load_server_lease(lease_path)
+                expires_at = float(lease["expires_at"])
+            except FileNotFoundError:
                 continue
             if (
                 lease.get("project_id") == paths.project_id

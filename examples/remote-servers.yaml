@@ -1,5 +1,6 @@
 servers:
   compute-a:
+    machine_id: compute-a-physical
     ssh: compute-a
     cores: 64
     memory_gb: 256
@@ -8,6 +9,7 @@ servers:
     testing:
       slots: 1
   archive:
+    machine_id: archive-physical
     ssh: archive
     cores: 16
     memory_gb: 64

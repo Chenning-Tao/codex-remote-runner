@@ -7,8 +7,9 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import Event, Lock, Thread
 from typing import Any
 
 from .. import launch, monitoring, registration
@@ -21,36 +22,76 @@ from ..execution_registry import (
     utc_now,
     write_yaml,
 )
+from ..machine_identity import normalize_machine_fingerprint, normalize_server_identity
 from ..output_paths import resolve_output_path
 from ..remote_shell import remote_python_stdin_command, ssh_connection_options
 from ..scheduling import CapacityCandidate, rank_candidates
 from ..worktree import prepare_remote_worktree
 from .registry import (
     ControllerPaths,
+    LeaseOwnership,
     acquire_dispatch_lease,
     controller_paths,
     eligible_prepared_servers,
     has_unexpired_dispatch_lease,
     list_drained_servers,
+    load_job,
     list_jobs,
+    list_owned_dispatch_leases,
     list_queued,
     list_server_capacities,
     placement_update_active,
     recover_dispatching_state,
     release_dispatch_lease,
+    resolve_server_identity,
+    renew_dispatch_lease,
     transition_queued_state,
 )
 from .output_sync_worker import ensure_output_sync_worker
 
 
-SERVER_STATE_PROBE_PROGRAM = r"""import json
+SERVER_STATE_PROBE_PROGRAM = r"""import hashlib
+import json
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 
 def exact_tmux_target(session_name):
     return "=" + session_name
+
+
+def machine_fingerprint():
+    material = None
+    for path in (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id")):
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            material = "machine-id:" + value
+            break
+    if material is None and sys.platform == "darwin":
+        try:
+            completed = subprocess.run(
+                ["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            completed = None
+        if completed is not None and completed.returncode == 0:
+            match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', completed.stdout)
+            if match is not None:
+                material = "ioplatformuuid:" + match.group(1)
+    if material is None:
+        return None
+    return "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def memory_snapshot():
@@ -188,6 +229,14 @@ if root.is_dir():
             label = value.get("label")
             if isinstance(label, str) and label:
                 item["label"] = label
+            for field in ("assigned_cores", "server_cores"):
+                field_value = value.get(field)
+                if (
+                    isinstance(field_value, int)
+                    and not isinstance(field_value, bool)
+                    and field_value > 0
+                ):
+                    item[field] = field_value
             active.append(item)
 load1, load5, load15 = os.getloadavg()
 print(json.dumps({
@@ -197,6 +246,7 @@ print(json.dumps({
     "load5": load5,
     "load15": load15,
     "remote_cores": os.cpu_count(),
+    "machine_fingerprint": machine_fingerprint(),
     **memory_snapshot(),
 }))
 """
@@ -217,6 +267,10 @@ class ProbedServer:
     capacity: CapacityCandidate
     active_standard_count: int
     active_test_count: int
+    active_run_ids: tuple[str, ...] = ()
+    active_assigned_cores: int = 0
+    allocation_unknown: bool = False
+    lease_ownership: LeaseOwnership | None = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +286,74 @@ class CapacitySnapshot:
     reachable: dict[tuple[object, ...], ProbedServer]
     failures: tuple[str, ...]
     drained_servers: frozenset[str]
+
+
+class LeaseOwnershipLost(RuntimeError):
+    pass
+
+
+class DispatchLeaseHeartbeat:
+    def __init__(
+        self,
+        paths: ControllerPaths,
+        ownership: LeaseOwnership,
+        *,
+        ttl_seconds: int,
+    ) -> None:
+        self._paths = paths
+        self._ownership = ownership
+        self._ttl_seconds = ttl_seconds
+        self._interval = max(0.1, min(float(ttl_seconds) / 3.0, 10.0))
+        self._stop = Event()
+        self._lock = Lock()
+        self._error: BaseException | None = None
+        self._thread = Thread(
+            target=self._run,
+            name=f"rr-lease-{ownership.run_id}",
+            daemon=True,
+        )
+
+    @property
+    def ownership(self) -> LeaseOwnership:
+        with self._lock:
+            return self._ownership
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _renew(self) -> None:
+        with self._lock:
+            if self._error is not None:
+                raise LeaseOwnershipLost(str(self._error)) from self._error
+            renewed = renew_dispatch_lease(
+                self._paths,
+                self._ownership,
+                ttl_seconds=self._ttl_seconds,
+            )
+            if renewed is None:
+                self._error = LeaseOwnershipLost(
+                    f"dispatch lease ownership lost for {self._ownership.run_id} on "
+                    f"machine_id {self._ownership.machine_id}"
+                )
+                raise self._error
+            self._ownership = renewed
+
+    def assert_owned(self) -> None:
+        self._renew()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._renew()
+            except BaseException as exc:
+                with self._lock:
+                    if self._error is None:
+                        self._error = exc
+                return
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=max(1.0, self._interval * 2.0))
 
 
 def _optional_non_negative_int(value: object, field: str) -> int | None:
@@ -272,6 +394,9 @@ def probe_server_state(ssh: str, python: str, timeout: int) -> dict[str, Any]:
         load5 = float(value["load5"])
         load15 = float(value["load15"])
         remote_cores = value.get("remote_cores")
+        machine_fingerprint = normalize_machine_fingerprint(
+            value.get("machine_fingerprint")
+        )
     except (KeyError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise RuntimeError("active-run probe returned invalid JSON") from exc
     try:
@@ -321,6 +446,20 @@ def probe_server_state(ssh: str, python: str, timeout: int) -> dict[str, Any]:
                 if isinstance(item.get("label"), str) and item["label"]
                 else {}
             ),
+            **(
+                {"assigned_cores": int(item["assigned_cores"])}
+                if isinstance(item.get("assigned_cores"), int)
+                and not isinstance(item["assigned_cores"], bool)
+                and int(item["assigned_cores"]) > 0
+                else {}
+            ),
+            **(
+                {"server_cores": int(item["server_cores"])}
+                if isinstance(item.get("server_cores"), int)
+                and not isinstance(item["server_cores"], bool)
+                and item["server_cores"] > 0
+                else {}
+            ),
         }
         for item in active_runs
     )
@@ -330,6 +469,7 @@ def probe_server_state(ssh: str, python: str, timeout: int) -> dict[str, Any]:
         "load5": load5,
         "load15": load15,
         "remote_cores": remote_cores,
+        "machine_fingerprint": machine_fingerprint,
         "memory_total_bytes": memory_total_bytes,
         "memory_available_bytes": memory_available_bytes,
         "memory_used_bytes": memory_used_bytes,
@@ -339,7 +479,7 @@ def probe_server_state(ssh: str, python: str, timeout: int) -> dict[str, Any]:
     }
 
 
-def _active_runs(probe: dict[str, Any]) -> tuple[dict[str, str], ...]:
+def _active_runs(probe: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     raw = probe.get("active_runs")
     if raw is None:
         raw = tuple(
@@ -357,41 +497,90 @@ def _active_runs(probe: dict[str, Any]) -> tuple[dict[str, str], ...]:
         {
             "run_id": str(item["run_id"]),
             "workload_class": str(item["workload_class"]),
+            **(
+                {"assigned_cores": int(item["assigned_cores"])}
+                if isinstance(item.get("assigned_cores"), int)
+                and not isinstance(item["assigned_cores"], bool)
+                and int(item["assigned_cores"]) > 0
+                else {}
+            ),
         }
         for item in raw
     )
 
 
-def _probe_prepared_server(server: dict[str, Any], timeout: int) -> ProbedServer:
+def _probe_prepared_server(
+    server: dict[str, Any],
+    timeout: int,
+    *,
+    paths: ControllerPaths | None = None,
+) -> ProbedServer:
+    server = (
+        resolve_server_identity(paths, server)
+        if paths is not None
+        else normalize_server_identity(server)
+    )
     probe = probe_server_state(
         str(server["ssh"]),
         str(server["python"]),
         timeout,
     )
+    expected_fingerprint = server.get("machine_fingerprint")
+    observed_fingerprint = probe.get("machine_fingerprint")
+    if expected_fingerprint is not None and observed_fingerprint is None:
+        raise RuntimeError(
+            f"machine identity probe unavailable for {server['name']!r}"
+        )
+    if (
+        expected_fingerprint is not None
+        and observed_fingerprint != expected_fingerprint
+    ):
+        raise RuntimeError(
+            f"machine fingerprint mismatch for machine_id {server['machine_id']!r}"
+        )
+    if paths is not None and observed_fingerprint is not None:
+        server = resolve_server_identity(
+            paths, {**server, "machine_fingerprint": observed_fingerprint}
+        )
     active = _active_runs(probe)
     standard_count = sum(item["workload_class"] == "standard" for item in active)
     test_count = sum(item["workload_class"] == "test" for item in active)
+    assigned = [item.get("assigned_cores") for item in active]
+    allocation_unknown = any(value is None for value in assigned)
+    assigned_cores = sum(int(value) for value in assigned if value is not None)
+    configured_cores = int(server["configured_cores"])
+    if assigned_cores > configured_cores:
+        raise RuntimeError(
+            f"active core allocations exceed configured inventory on {server['name']!r}"
+        )
     return ProbedServer(
         server=server,
         capacity=CapacityCandidate(
             name=str(server["name"]),
-            configured_cores=int(server["configured_cores"]),
+            configured_cores=configured_cores,
             load5=float(probe["load5"]),
             priority=int(server["priority"]),
-            active_run_count=standard_count,
+            active_run_count=len(active),
+            allocated_cores=assigned_cores,
+            allocation_unknown=allocation_unknown,
         ),
         active_standard_count=standard_count,
         active_test_count=test_count,
+        active_run_ids=tuple(str(item["run_id"]) for item in active),
+        active_assigned_cores=assigned_cores,
+        allocation_unknown=allocation_unknown,
     )
 
 
 def _probe_prepared_servers(
     servers: list[dict[str, Any]],
     timeout: int,
+    *,
+    paths: ControllerPaths | None = None,
 ) -> tuple[list[ProbedServer], list[str]]:
     def probe(server: dict[str, Any]) -> tuple[ProbedServer | None, str | None]:
         try:
-            return _probe_prepared_server(server, timeout), None
+            return _probe_prepared_server(server, timeout, paths=paths), None
         except RuntimeError as exc:
             return None, f"{server['name']}: {exc}"
 
@@ -407,24 +596,28 @@ def _probe_prepared_servers(
 
 
 def _server_snapshot_key(server: dict[str, Any]) -> tuple[object, ...]:
+    identity = normalize_server_identity(server)
     return (
-        str(server["name"]),
-        str(server["ssh"]),
-        str(server["python"]),
-        int(server["configured_cores"]),
-        int(server["priority"]),
+        str(identity["machine_id"]),
+        str(identity.get("machine_fingerprint")),
+        int(identity["configured_cores"]),
     )
 
 
 def _with_current_capacity(
+    paths: ControllerPaths,
     server: dict[str, Any],
     capacities: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    current = capacities.get(str(server["name"]))
+    identity = resolve_server_identity(paths, server)
+    current = capacities.get(str(identity["machine_id"]))
     if current is None:
-        return {**server, "standard_slots": int(server.get("standard_slots", 1))}
+        return {
+            **identity,
+            "standard_slots": int(server.get("standard_slots", 1)),
+        }
     return {
-        **server,
+        **identity,
         "standard_slots": int(current["standard_slots"]),
         "test_slots": int(current["test_slots"]),
     }
@@ -440,12 +633,22 @@ def _probe_capacity_snapshot(
     unique_servers: dict[tuple[object, ...], dict[str, Any]] = {}
     for job, _state in queued:
         for prepared_server in eligible_prepared_servers(job):
-            server = _with_current_capacity(prepared_server, capacities)
-            if str(server["name"]) in drained_servers:
+            server = _with_current_capacity(paths, prepared_server, capacities)
+            prepared_server.update(
+                {
+                    key: server[key]
+                    for key in (
+                        "machine_id",
+                        "machine_id_source",
+                        "machine_fingerprint",
+                    )
+                }
+            )
+            if str(server["machine_id"]) in drained_servers:
                 continue
             unique_servers.setdefault(_server_snapshot_key(server), server)
     reachable, failures = _probe_prepared_servers(
-        list(unique_servers.values()), timeout
+        list(unique_servers.values()), timeout, paths=paths
     )
     return CapacitySnapshot(
         reachable={_server_snapshot_key(item.server): item for item in reachable},
@@ -454,15 +657,64 @@ def _probe_capacity_snapshot(
     )
 
 
-def _has_workload_capacity(workload_class: str, candidate: ProbedServer) -> bool:
+def _requested_allocation(job: dict[str, Any], candidate: ProbedServer) -> int:
+    requested = job.get("requested_cores")
+    if requested is None:
+        return candidate.capacity.configured_cores
+    if isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0:
+        raise ValueError("queued requested_cores must be positive or null")
+    return requested
+
+
+def _has_workload_capacity(job: dict[str, Any], candidate: ProbedServer) -> bool:
+    workload_class = str(job["workload_class"])
     if workload_class == "standard":
-        return candidate.active_standard_count < int(
+        lane_available = candidate.active_standard_count < int(
             candidate.server.get("standard_slots", 1)
         )
-    return candidate.active_test_count < int(candidate.server.get("test_slots", 0))
+    else:
+        lane_available = candidate.active_test_count < int(
+            candidate.server.get("test_slots", 0)
+        )
+    if not lane_available or candidate.allocation_unknown:
+        return False
+    return (
+        candidate.active_assigned_cores + _requested_allocation(job, candidate)
+        <= candidate.capacity.configured_cores
+    )
 
 
-def _capacity_message(workload_class: str, candidates: list[ProbedServer]) -> str:
+def _capacity_message(job: dict[str, Any], candidates: list[ProbedServer]) -> str:
+    workload_class = str(job["workload_class"])
+    if workload_class == "standard" and candidates and all(
+        candidate.active_standard_count
+        >= int(candidate.server.get("standard_slots", 1))
+        for candidate in candidates
+    ):
+        used = max(candidate.active_standard_count for candidate in candidates)
+        total = max(
+            int(candidate.server.get("standard_slots", 1))
+            for candidate in candidates
+        )
+        return f"standard slots full ({used}/{total})"
+    if workload_class == "test" and candidates and all(
+        candidate.active_test_count >= int(candidate.server.get("test_slots", 0))
+        for candidate in candidates
+    ):
+        used = max(candidate.active_test_count for candidate in candidates)
+        total = max(int(candidate.server.get("test_slots", 0)) for candidate in candidates)
+        return f"test slots full ({used}/{total})"
+    if any(candidate.allocation_unknown for candidate in candidates):
+        return "core allocation unavailable for an active legacy run"
+    if candidates and all(
+        candidate.active_assigned_cores + _requested_allocation(job, candidate)
+        > candidate.capacity.configured_cores
+        for candidate in candidates
+    ):
+        used = max(candidate.active_assigned_cores for candidate in candidates)
+        requested = min(_requested_allocation(job, candidate) for candidate in candidates)
+        total = max(candidate.capacity.configured_cores for candidate in candidates)
+        return f"core allocation full ({used}+{requested}/{total})"
     if workload_class == "standard":
         used = max(
             (candidate.active_standard_count for candidate in candidates), default=0
@@ -481,13 +733,13 @@ def _capacity_message(workload_class: str, candidates: list[ProbedServer]) -> st
 
 
 def _rank_for_workload(
-    workload_class: str,
+    job: dict[str, Any],
     candidates: list[ProbedServer],
 ) -> list[ProbedServer]:
     eligible = [
         candidate
         for candidate in candidates
-        if _has_workload_capacity(workload_class, candidate)
+        if _has_workload_capacity(job, candidate)
     ]
     if not eligible:
         return eligible
@@ -505,13 +757,12 @@ def _select_server_for_job(
     timeout: int,
     allowed_server_names: set[str] | None = None,
 ) -> tuple[ProbedServer | None, str]:
-    workload_class = str(job["workload_class"])
     drained_servers = set(list_drained_servers(paths))
     capacities = list_server_capacities(paths)
     eligible_servers = []
     for prepared_server in eligible_prepared_servers(job):
-        server = _with_current_capacity(prepared_server, capacities)
-        if str(server["name"]) in drained_servers:
+        server = _with_current_capacity(paths, prepared_server, capacities)
+        if str(normalize_server_identity(server)["machine_id"]) in drained_servers:
             continue
         if (
             allowed_server_names is not None
@@ -519,53 +770,64 @@ def _select_server_for_job(
         ):
             continue
         eligible_servers.append(server)
-    reachable, failures = _probe_prepared_servers(eligible_servers, timeout)
+    reachable, failures = _probe_prepared_servers(
+        eligible_servers,
+        timeout,
+        paths=paths,
+    )
     if not reachable:
         eligible_names = {
-            str(server["name"]) for server in eligible_prepared_servers(job)
+            str(resolve_server_identity(paths, server)["machine_id"])
+            for server in eligible_prepared_servers(job)
         }
         if eligible_names and eligible_names <= drained_servers:
             return None, "all prepared servers are drained"
         return None, "; ".join(failures) or "no reachable prepared server"
 
-    ranked = _rank_for_workload(workload_class, reachable)
+    ranked = _rank_for_workload(job, reachable)
     if not ranked:
-        return None, _capacity_message(workload_class, reachable)
+        return None, _capacity_message(job, reachable)
 
     ttl = int(job.get("lease_seconds", 120))
     acquired = False
     latest = reachable
     for candidate in ranked:
-        if not acquire_dispatch_lease(
+        ownership = acquire_dispatch_lease(
             paths,
             server=candidate.capacity.name,
+            machine_id=str(candidate.server["machine_id"]),
             run_id=str(job["run_id"]),
             ttl_seconds=ttl,
-        ):
+        )
+        if ownership is None:
             continue
         acquired = True
         try:
             current_server = _with_current_capacity(
-                candidate.server, list_server_capacities(paths)
+                paths, candidate.server, list_server_capacities(paths)
             )
-            current = _probe_prepared_server(current_server, timeout)
+            current = _probe_prepared_server(current_server, timeout, paths=paths)
         except RuntimeError:
             release_dispatch_lease(
                 paths,
                 server=candidate.capacity.name,
+                machine_id=ownership.machine_id,
                 run_id=str(job["run_id"]),
+                owner_token=ownership.token,
             )
             continue
-        if _has_workload_capacity(workload_class, current):
-            return current, ""
+        if _has_workload_capacity(job, current):
+            return replace(current, lease_ownership=ownership), ""
         latest = [current]
         release_dispatch_lease(
             paths,
             server=candidate.capacity.name,
+            machine_id=ownership.machine_id,
             run_id=str(job["run_id"]),
+            owner_token=ownership.token,
         )
     if acquired:
-        return None, _capacity_message(workload_class, latest)
+        return None, _capacity_message(job, latest)
     return None, "dispatch leases busy"
 
 
@@ -582,19 +844,27 @@ def _select_backfill_from_lane(
     head_job, _head_state = lane[0]
     drained_servers = set(list_drained_servers(paths))
     # Blocked jobs reserve every server they could use; backfill only elsewhere.
-    protected_servers = {
-        str(server["name"])
+    protected_machines = {
+        str(resolve_server_identity(paths, server)["machine_id"])
         for server in eligible_prepared_servers(head_job)
-        if str(server["name"]) not in drained_servers
+        if str(resolve_server_identity(paths, server)["machine_id"])
+        not in drained_servers
     }
 
     for candidate_job, candidate_state in lane[1:]:
         eligible_servers = {
-            str(server["name"])
+            str(server["name"]): str(
+                resolve_server_identity(paths, server)["machine_id"]
+            )
             for server in eligible_prepared_servers(candidate_job)
-            if str(server["name"]) not in drained_servers
+            if str(resolve_server_identity(paths, server)["machine_id"])
+            not in drained_servers
         }
-        safe_servers = eligible_servers - protected_servers
+        safe_servers = {
+            name
+            for name, machine_id in eligible_servers.items()
+            if machine_id not in protected_machines
+        }
         if safe_servers:
             selected, _message = _select_server_for_job(
                 paths,
@@ -606,7 +876,7 @@ def _select_backfill_from_lane(
             selected = None
         if selected is not None:
             return selected, candidate_job, candidate_state
-        protected_servers.update(eligible_servers)
+        protected_machines.update(eligible_servers.values())
 
     return None, None, None
 
@@ -618,13 +888,14 @@ def _select_from_snapshot(
     reserved_servers: set[str],
     allowed_server_names: set[str] | None = None,
 ) -> tuple[list[ProbedServer], str]:
-    workload_class = str(job["workload_class"])
     prepared = eligible_prepared_servers(job)
     eligible = [
         server
         for server in prepared
-        if str(server["name"]) not in snapshot.drained_servers
-        and str(server["name"]) not in reserved_servers
+        if str(normalize_server_identity(server)["machine_id"])
+        not in snapshot.drained_servers
+        and str(normalize_server_identity(server)["machine_id"])
+        not in reserved_servers
         and (
             allowed_server_names is None or str(server["name"]) in allowed_server_names
         )
@@ -647,21 +918,28 @@ def _select_from_snapshot(
                 capacity=probed.capacity,
                 active_standard_count=probed.active_standard_count,
                 active_test_count=probed.active_test_count,
+                active_run_ids=probed.active_run_ids,
+                active_assigned_cores=probed.active_assigned_cores,
+                allocation_unknown=probed.allocation_unknown,
             )
         )
     if not reachable:
-        prepared_names = {str(server["name"]) for server in prepared}
-        if prepared_names and prepared_names <= snapshot.drained_servers:
+        prepared_machines = {
+            str(normalize_server_identity(server)["machine_id"])
+            for server in prepared
+        }
+        if prepared_machines and prepared_machines <= snapshot.drained_servers:
             return [], "all prepared servers are drained"
+        prepared_names = {str(server["name"]) for server in prepared}
         failures = [
             failure
             for failure in snapshot.failures
             if failure.partition(":")[0] in prepared_names
         ]
         return [], "; ".join(failures) or "no available server in dispatch batch"
-    ranked = _rank_for_workload(workload_class, reachable)
+    ranked = _rank_for_workload(job, reachable)
     if not ranked:
-        return [], _capacity_message(workload_class, reachable)
+        return [], _capacity_message(job, reachable)
     return ranked, ""
 
 
@@ -672,18 +950,24 @@ def _plan_backfill_from_lane(
     reserved_servers: set[str],
 ) -> PlannedDispatch | None:
     head_job, _head_state = lane[0]
-    protected_servers = {
-        str(server["name"])
+    protected_machines = {
+        str(normalize_server_identity(server)["machine_id"])
         for server in eligible_prepared_servers(head_job)
-        if str(server["name"]) not in snapshot.drained_servers
+        if str(normalize_server_identity(server)["machine_id"])
+        not in snapshot.drained_servers
     }
     for candidate_job, candidate_state in lane[1:]:
         eligible_servers = {
-            str(server["name"])
+            str(server["name"]): str(normalize_server_identity(server)["machine_id"])
             for server in eligible_prepared_servers(candidate_job)
-            if str(server["name"]) not in snapshot.drained_servers
+            if str(normalize_server_identity(server)["machine_id"])
+            not in snapshot.drained_servers
         }
-        safe_servers = eligible_servers - protected_servers
+        safe_servers = {
+            name
+            for name, machine_id in eligible_servers.items()
+            if machine_id not in protected_machines
+        }
         if safe_servers:
             candidates, _message = _select_from_snapshot(
                 candidate_job,
@@ -698,7 +982,7 @@ def _plan_backfill_from_lane(
                     candidates[0],
                     tuple(candidates[1:]),
                 )
-        protected_servers.update(eligible_servers)
+        protected_machines.update(eligible_servers.values())
     return None
 
 
@@ -762,7 +1046,7 @@ def _plan_dispatch_batch(
             break
 
         planned.append(choice)
-        reserved_servers.add(choice.selected.capacity.name)
+        reserved_servers.add(str(choice.selected.server["machine_id"]))
         choice_lane.remove((choice.job, choice.state))
         lanes = [lane for lane in lanes if lane]
 
@@ -789,16 +1073,20 @@ def _register_execution(
     output_path: str | None,
 ) -> None:
     _ensure_controller_anchor(paths)
+    server = normalize_server_identity(server)
     args = argparse.Namespace(
         project_config=paths.config_path,
         label=job["label"],
         task_id=job["task_id"],
         workload_class=job.get("workload_class", "standard"),
         server=server["name"],
+        machine_id=server["machine_id"],
+        machine_fingerprint=server.get("machine_fingerprint"),
         ssh=server["ssh"],
         ssh_profile=server["ssh_profile"],
         configured_cores=server["configured_cores"],
         minimum_cores=job["minimum_cores"],
+        requested_cores=job.get("requested_cores"),
         assigned_cores=assigned_cores,
         command=job["submitted_command"],
         remote_workdir=workdir,
@@ -852,6 +1140,44 @@ def _fail_registered_execution(paths: ControllerPaths, run_id: str, error: str) 
     )
 
 
+def _run_visible_on_server(
+    paths: ControllerPaths,
+    server: dict[str, Any],
+    run_id: str,
+    *,
+    timeout: int,
+) -> bool:
+    probed = _probe_prepared_server(server, timeout, paths=paths)
+    return run_id in probed.active_run_ids
+
+
+def _transition_after_launch(
+    paths: ControllerPaths,
+    run_id: str,
+    *,
+    expected_revision: int,
+    status: str,
+    error: str | None,
+) -> None:
+    try:
+        transition_queued_state(
+            paths,
+            run_id,
+            expected_revision=expected_revision,
+            status=status,
+            error=error,
+        )
+    except RuntimeError as exc:
+        if str(exc) != "queued state revision conflict":
+            raise
+        _job, current = load_job(paths, run_id)
+        if current["status"] != status:
+            raise LeaseOwnershipLost(
+                f"queued launch commit ownership lost for {run_id}; "
+                f"current status={current['status']!r}"
+            ) from exc
+
+
 def _launch_dispatching_job(
     paths: ControllerPaths,
     planned: PlannedDispatch,
@@ -862,10 +1188,17 @@ def _launch_dispatching_job(
     state = planned.state
     selected_server = planned.selected.server
     selected_capacity = planned.selected.capacity
+    ownership = planned.selected.lease_ownership
+    if ownership is None:
+        raise RuntimeError("planned dispatch lacks fenced lease ownership")
     run_id = str(job["run_id"])
     execution_registered = False
     release_lease = True
+    ttl = int(job.get("lease_seconds", 120))
+    heartbeat = DispatchLeaseHeartbeat(paths, ownership, ttl_seconds=ttl)
+    heartbeat.start()
     try:
+        heartbeat.assert_owned()
         output_root, output_relpath, output_path = _resolve_selected_output(
             job,
             selected_server,
@@ -878,42 +1211,64 @@ def _launch_dispatching_job(
             revision=str(job["revision"]),
             timeout=timeout,
         )
+        heartbeat.assert_owned()
         _register_execution(
             paths,
             job,
             selected_server,
             workdir=worktree.workdir,
-            assigned_cores=selected_capacity.configured_cores,
+            assigned_cores=_requested_allocation(job, planned.selected),
             output_root=output_root,
             output_relpath=output_relpath,
             output_path=output_path,
         )
         execution_registered = True
+        heartbeat.assert_owned()
         execution_paths = project_paths(paths.config_path)
         launch.launch(execution_paths, run_id, timeout)
-        transition_queued_state(
+        heartbeat.assert_owned()
+        _transition_after_launch(
             paths,
             run_id,
             expected_revision=int(state["revision"]) + 1,
             status="dispatched",
+            error=None,
         )
         return DispatchOutcome(
             action="started", run_id=run_id, server=selected_capacity.name
         )
     except Exception as exc:
-        unknown_launch = execution_registered and isinstance(
-            exc.__cause__,
-            (launch.BootstrapOutcomeUnknown, OSError),
+        unknown_launch = execution_registered and (
+            isinstance(exc, LeaseOwnershipLost)
+            or isinstance(exc.__cause__, (launch.BootstrapOutcomeUnknown, OSError))
         )
         if unknown_launch:
             release_lease = False
-            transition_queued_state(
-                paths,
-                run_id,
-                expected_revision=int(state["revision"]) + 1,
-                status="dispatched",
-                error=str(exc),
-            )
+            try:
+                heartbeat.assert_owned()
+            except (LeaseOwnershipLost, RuntimeError):
+                pass
+            try:
+                visible = _run_visible_on_server(
+                    paths,
+                    selected_server,
+                    run_id,
+                    timeout=timeout,
+                )
+            except (OSError, RuntimeError, ValueError):
+                visible = False
+            if visible:
+                release_lease = True
+            try:
+                _transition_after_launch(
+                    paths,
+                    run_id,
+                    expected_revision=int(state["revision"]) + 1,
+                    status="dispatched",
+                    error=str(exc),
+                )
+            except LeaseOwnershipLost:
+                pass
             return DispatchOutcome(
                 action="unknown",
                 run_id=run_id,
@@ -922,7 +1277,7 @@ def _launch_dispatching_job(
             )
         if execution_registered:
             _fail_registered_execution(paths, run_id, str(exc))
-        transition_queued_state(
+        _transition_after_launch(
             paths,
             run_id,
             expected_revision=int(state["revision"]) + 1,
@@ -936,8 +1291,16 @@ def _launch_dispatching_job(
             message=str(exc),
         )
     finally:
+        heartbeat.stop()
         if release_lease:
-            release_dispatch_lease(paths, server=selected_capacity.name, run_id=run_id)
+            current_ownership = heartbeat.ownership
+            release_dispatch_lease(
+                paths,
+                server=selected_capacity.name,
+                machine_id=current_ownership.machine_id,
+                run_id=run_id,
+                owner_token=current_ownership.token,
+            )
 
 
 def _reconcile_dispatching_jobs(paths: ControllerPaths) -> DispatchOutcome | None:
@@ -959,6 +1322,31 @@ def _reconcile_dispatching_jobs(paths: ControllerPaths) -> DispatchOutcome | Non
                 continue
         if has_unexpired_dispatch_lease(paths, run_id=run_id):
             return DispatchOutcome(action="busy", run_id=run_id)
+        matching = [
+            lease
+            for lease in list_owned_dispatch_leases(paths)
+            if lease["run_id"] == run_id
+        ]
+        if len(matching) > 1:
+            raise RuntimeError(f"run {run_id} owns multiple dispatch leases")
+        if matching:
+            lease = matching[0]
+            fenced = acquire_dispatch_lease(
+                paths,
+                server=str(lease["server"]),
+                machine_id=str(lease["machine_id"]),
+                run_id=run_id,
+                ttl_seconds=int(job.get("lease_seconds", 120)),
+            )
+            if fenced is None:
+                return DispatchOutcome(action="busy", run_id=run_id)
+            release_dispatch_lease(
+                paths,
+                server=fenced.server,
+                machine_id=fenced.machine_id,
+                run_id=run_id,
+                owner_token=fenced.token,
+            )
         recover_dispatching_state(
             paths,
             run_id,
@@ -966,7 +1354,52 @@ def _reconcile_dispatching_jobs(paths: ControllerPaths) -> DispatchOutcome | Non
         )
 
 
+def _reconcile_owned_dispatch_leases(paths: ControllerPaths, *, timeout: int) -> None:
+    leases = list_owned_dispatch_leases(paths)
+    if not leases or not paths.config_path.is_file():
+        return
+    execution_paths = project_paths(paths.config_path)
+    for lease in leases:
+        run_id = str(lease["run_id"])
+        if registry_kind(execution_paths, run_id) != "current":
+            continue
+        _manifest, state = load_current_run(execution_paths, run_id)
+        should_release = state["status"] != "registered"
+        if not should_release:
+            try:
+                job, _queue_state = load_job(paths, run_id)
+                selected = next(
+                    server
+                    for server in eligible_prepared_servers(job)
+                    if resolve_server_identity(paths, server)["machine_id"]
+                    == lease["machine_id"]
+                )
+                should_release = _run_visible_on_server(
+                    paths,
+                    _with_current_capacity(
+                        paths, selected, list_server_capacities(paths)
+                    ),
+                    run_id,
+                    timeout=timeout,
+                )
+            except (FileNotFoundError, OSError, RuntimeError, StopIteration, ValueError):
+                should_release = False
+        if should_release:
+            release_dispatch_lease(
+                paths,
+                server=str(lease["server"]),
+                machine_id=str(lease["machine_id"]),
+                run_id=run_id,
+                owner_token=(
+                    str(lease["owner_token"])
+                    if lease.get("owner_token") is not None
+                    else None
+                ),
+            )
+
+
 def dispatch_once(paths: ControllerPaths, *, timeout: int = 8) -> DispatchOutcome:
+    _reconcile_owned_dispatch_leases(paths, timeout=timeout)
     reconciliation = _reconcile_dispatching_jobs(paths)
     if reconciliation is not None:
         return reconciliation
@@ -1034,10 +1467,13 @@ def dispatch_once(paths: ControllerPaths, *, timeout: int = 8) -> DispatchOutcom
             status="dispatching",
         )
     except RuntimeError as exc:
+        ownership = selected.lease_ownership
         release_dispatch_lease(
             paths,
             server=selected_capacity.name,
+            machine_id=str(selected.server["machine_id"]),
             run_id=run_id,
+            owner_token=ownership.token if ownership is not None else None,
         )
         if str(exc) == "queued state revision conflict":
             return dispatch_once(paths, timeout=timeout)
@@ -1057,33 +1493,51 @@ def _reserve_planned_dispatch(
     other_planned_servers: frozenset[str],
 ) -> PlannedDispatch | DispatchOutcome:
     run_id = str(planned.job["run_id"])
-    workload_class = str(planned.job["workload_class"])
     ttl = int(planned.job.get("lease_seconds", 120))
     last_message = "dispatch leases busy"
     for candidate in (planned.selected, *planned.alternatives):
         server_name = candidate.capacity.name
-        if server_name in other_planned_servers:
+        machine_id = str(candidate.server["machine_id"])
+        if machine_id in other_planned_servers:
             continue
-        if not acquire_dispatch_lease(
+        ownership = acquire_dispatch_lease(
             paths,
             server=server_name,
+            machine_id=machine_id,
             run_id=run_id,
             ttl_seconds=ttl,
-        ):
+        )
+        if ownership is None:
             continue
         try:
             current_server = _with_current_capacity(
-                candidate.server, list_server_capacities(paths)
+                paths, candidate.server, list_server_capacities(paths)
             )
-            current = _probe_prepared_server(current_server, timeout)
+            current = _probe_prepared_server(current_server, timeout, paths=paths)
         except RuntimeError as exc:
             last_message = str(exc)
-            release_dispatch_lease(paths, server=server_name, run_id=run_id)
+            release_dispatch_lease(
+                paths,
+                server=server_name,
+                machine_id=machine_id,
+                run_id=run_id,
+                owner_token=ownership.token,
+            )
             continue
-        if _has_workload_capacity(workload_class, current):
-            return PlannedDispatch(planned.job, planned.state, current)
-        last_message = _capacity_message(workload_class, [current])
-        release_dispatch_lease(paths, server=server_name, run_id=run_id)
+        if _has_workload_capacity(planned.job, current):
+            return PlannedDispatch(
+                planned.job,
+                planned.state,
+                replace(current, lease_ownership=ownership),
+            )
+        last_message = _capacity_message(planned.job, [current])
+        release_dispatch_lease(
+            paths,
+            server=server_name,
+            machine_id=machine_id,
+            run_id=run_id,
+            owner_token=ownership.token,
+        )
     return DispatchOutcome(
         action="queued",
         run_id=run_id,
@@ -1097,6 +1551,7 @@ def dispatch_batch(
     *,
     timeout: int = 8,
 ) -> list[DispatchOutcome]:
+    _reconcile_owned_dispatch_leases(paths, timeout=timeout)
     reconciliation = _reconcile_dispatching_jobs(paths)
     if reconciliation is not None:
         return [reconciliation]
@@ -1110,14 +1565,17 @@ def dispatch_batch(
         return [terminal]
 
     workers = min(MAX_CAPACITY_PROBE_WORKERS, len(planned))
-    planned_servers = frozenset(item.selected.capacity.name for item in planned)
+    planned_servers = frozenset(
+        str(item.selected.server["machine_id"]) for item in planned
+    )
 
     def reserve(item: PlannedDispatch) -> PlannedDispatch | DispatchOutcome:
         return _reserve_planned_dispatch(
             paths,
             item,
             timeout=timeout,
-            other_planned_servers=planned_servers - {item.selected.capacity.name},
+            other_planned_servers=planned_servers
+            - {str(item.selected.server["machine_id"])},
         )
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -1141,7 +1599,13 @@ def dispatch_batch(
                 release_dispatch_lease(
                     paths,
                     server=item.selected.capacity.name,
+                    machine_id=str(item.selected.server["machine_id"]),
                     run_id=run_id,
+                    owner_token=(
+                        item.selected.lease_ownership.token
+                        if item.selected.lease_ownership is not None
+                        else None
+                    ),
                 )
                 if str(exc) == "queued state revision conflict":
                     outcomes.append(
@@ -1161,7 +1625,13 @@ def dispatch_batch(
                 release_dispatch_lease(
                     paths,
                     server=item.selected.capacity.name,
+                    machine_id=str(item.selected.server["machine_id"]),
                     run_id=str(item.job["run_id"]),
+                    owner_token=(
+                        item.selected.lease_ownership.token
+                        if item.selected.lease_ownership is not None
+                        else None
+                    ),
                 )
         raise
 

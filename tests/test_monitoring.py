@@ -167,6 +167,42 @@ def test_remote_status_exposes_workload_class_with_legacy_default() -> None:
     assert current is not None and current["workload_class"] == "test"
 
 
+def test_remote_status_schema_two_exposes_validated_core_allocation() -> None:
+    status, error = monitoring.parse_remote_status(
+        f"remote_status_json={json.dumps({'schema_version': 2, 'run_id': RUN_ID, 'workload_class': 'test', 'assigned_cores': 8, 'server_cores': 64, 'state': 'running', 'exit_code': None})}",
+        expected_run_id=RUN_ID,
+        require_run_id=True,
+    )
+
+    assert error is None
+    assert status is not None
+    assert status["assigned_cores"] == 8
+    assert status["server_cores"] == 64
+
+
+@pytest.mark.parametrize(
+    ("assigned_cores", "server_cores", "message"),
+    [
+        (None, 64, "assigned_cores must be a positive integer"),
+        (8, None, "server_cores must be a positive integer"),
+        (65, 64, "assigned_cores exceeds server_cores"),
+    ],
+)
+def test_remote_status_schema_two_rejects_invalid_core_allocation(
+    assigned_cores: object,
+    server_cores: object,
+    message: str,
+) -> None:
+    status, error = monitoring.parse_remote_status(
+        f"remote_status_json={json.dumps({'schema_version': 2, 'run_id': RUN_ID, 'workload_class': 'standard', 'assigned_cores': assigned_cores, 'server_cores': server_cores, 'state': 'running', 'exit_code': None})}",
+        expected_run_id=RUN_ID,
+        require_run_id=True,
+    )
+
+    assert status is None
+    assert error is not None and message in error
+
+
 def test_remote_probe_uses_exact_tmux_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

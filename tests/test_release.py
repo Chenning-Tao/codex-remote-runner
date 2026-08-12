@@ -12,7 +12,10 @@ from remote_runner._internal.controller import release_gate
 from remote_runner._internal.controller.registry import (
     acquire_dispatch_lease,
     controller_paths,
+    controller_scheduler_paths,
+    MalformedLeaseError,
 )
+from remote_runner._internal.execution_registry import write_yaml
 
 
 def git(*args: str, cwd: Path) -> str:
@@ -205,7 +208,12 @@ def test_controller_staging_rejects_mismatched_runtime_revision(
 
     def capture(argv, **_kwargs):
         calls.append(list(argv))
-        stdout = "/opt/homebrew/bin/uv\n" if list(argv)[0] == "ssh" else ""
+        if list(argv)[0] == "ssh" and "tool dir --bin" in list(argv)[-1]:
+            stdout = "/Users/test/.local/bin\n"
+        elif list(argv)[0] == "ssh":
+            stdout = "/opt/homebrew/bin/uv\n"
+        else:
+            stdout = ""
         return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(release, "_run", capture)
@@ -224,9 +232,11 @@ def test_controller_staging_rejects_mismatched_runtime_revision(
 
     assert calls[0][-2] == "controller_host"
     assert "/opt/homebrew/bin/uv" in calls[0][-1]
-    assert calls[1][0] == "scp"
-    assert calls[1][-1].startswith("controller_host:/tmp/remote-runner-")
-    assert "SOURCE_REVISION" in calls[2][-1]
+    assert calls[1][0] == "ssh"
+    assert "tool dir --bin" in calls[1][-1]
+    assert calls[2][0] == "scp"
+    assert calls[2][-1].startswith("controller_host:/tmp/remote-runner-")
+    assert "SOURCE_REVISION" in calls[3][-1]
 
 
 def test_controller_venv_entrypoint_survives_activation_move(tmp_path: Path) -> None:
@@ -275,6 +285,17 @@ def staged_release(controller_root: Path, revision: str) -> Path:
     release_root.mkdir(parents=True)
     (release_root / ".deployed-revision").write_text(revision + "\n", encoding="utf-8")
     return release_root
+
+
+def fake_release_cli(release_root: Path, version: str, revision: str) -> Path:
+    executable = release_root / "venv" / "bin" / "remote-runner"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' 'remote-runner {version} ({revision})'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    return executable
 
 
 def test_release_activation_stops_dispatch_and_output_sync_workers(
@@ -326,6 +347,136 @@ def test_active_dispatch_lease_blocks_release_activation(
         release_gate.activate_release(root, revision)
 
     assert not (root / "runner" / "current").exists()
+
+
+def test_expired_legacy_dispatch_lease_still_blocks_release_activation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "controller"
+    revision = "e" * 40
+    monkeypatch.setattr(release_gate, "SOURCE_REVISION", revision)
+    staged_release(root, revision)
+    scheduler = controller_scheduler_paths(root)
+    scheduler.leases_dir.mkdir(parents=True)
+    write_yaml(
+        scheduler.leases_dir / "compute-a.yaml",
+        {
+            "server": "compute-a",
+            "project_id": "example",
+            "run_id": "rr-0123456789abcdef",
+            "kind": "dispatch",
+            "created_at": 1000.0,
+            "expires_at": 1001.0,
+        },
+    )
+
+    gate = release_gate.inspect_release_gate(root, now=2000.0)
+
+    assert gate["active_leases"][0]["heartbeat_expired"] is True
+    with pytest.raises(RuntimeError, match="active dispatch lease"):
+        release_gate.activate_release(root, revision)
+    assert not (root / "runner" / "current").exists()
+
+
+def test_malformed_lease_blocks_release_inspection_and_activation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "controller"
+    revision = "f" * 40
+    monkeypatch.setattr(release_gate, "SOURCE_REVISION", revision)
+    staged_release(root, revision)
+    scheduler = controller_scheduler_paths(root)
+    scheduler.leases_dir.mkdir(parents=True)
+    (scheduler.leases_dir / "compute-a.yaml").write_text(
+        "expires_at: [broken\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MalformedLeaseError, match="malformed dispatch lease"):
+        release_gate.inspect_release_gate(root)
+    with pytest.raises(MalformedLeaseError, match="malformed dispatch lease"):
+        release_gate.activate_release(root, revision)
+    assert not (root / "runner" / "current").exists()
+
+
+def test_release_activation_transactionally_aligns_global_and_private_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "controller"
+    old_revision = "1" * 40
+    revision = "2" * 40
+    old_release = staged_release(root, old_revision)
+    fake_release_cli(old_release, "0.9.1", old_revision)
+    new_release = staged_release(root, revision)
+    fake_release_cli(new_release, "0.9.2", revision)
+    current = root / "runner" / "current"
+    current.symlink_to(Path("releases") / old_revision)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    global_cli = bin_dir / "remote-runner"
+    global_cli.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' 'remote-runner 0.3.1 ({'3' * 40})'\n",
+        encoding="utf-8",
+    )
+    global_cli.chmod(0o700)
+    monkeypatch.setattr(release_gate, "SOURCE_REVISION", revision)
+
+    result = release_gate.activate_release(
+        root,
+        revision,
+        global_cli=global_cli,
+    )
+
+    assert current.readlink() == Path("releases") / revision
+    assert global_cli.is_symlink()
+    assert result["controller_global_cli"]["revision"] == revision
+    assert result["controller_private_current"]["revision"] == revision
+    assert subprocess.run(
+        [str(global_cli), "--version"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.strip() == f"remote-runner 0.9.2 ({revision})"
+
+
+def test_release_activation_rolls_back_both_links_on_revision_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "controller"
+    old_revision = "4" * 40
+    revision = "5" * 40
+    old_release = staged_release(root, old_revision)
+    fake_release_cli(old_release, "0.9.1", old_revision)
+    new_release = staged_release(root, revision)
+    fake_release_cli(new_release, "0.9.2", "6" * 40)
+    current = root / "runner" / "current"
+    current.symlink_to(Path("releases") / old_revision)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    global_cli = bin_dir / "remote-runner"
+    old_global = f"remote-runner 0.3.1 ({'3' * 40})"
+    global_cli.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' '{old_global}'\n",
+        encoding="utf-8",
+    )
+    global_cli.chmod(0o700)
+    monkeypatch.setattr(release_gate, "SOURCE_REVISION", revision)
+
+    with pytest.raises(RuntimeError, match="private current revision"):
+        release_gate.activate_release(root, revision, global_cli=global_cli)
+
+    assert current.readlink() == Path("releases") / old_revision
+    assert not global_cli.is_symlink()
+    assert subprocess.run(
+        [str(global_cli), "--version"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.strip() == old_global
 
 
 def test_release_activation_switches_runner_pointer_and_migrates_retired_state(
