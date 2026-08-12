@@ -8,6 +8,12 @@ source:
   mode: git-worktree
   local_repo: .
 
+dev:
+  stale_after_seconds: 86400
+  include: []
+  exclude:
+    - local-large-data/
+
 remote:
   compute-a:
     enabled: true

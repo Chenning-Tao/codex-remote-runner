@@ -4,6 +4,7 @@ servers:
     ssh: compute-a
     cores: 64
     memory_gb: 256
+    dev_root: /srv/remote-runner-dev
     enabled: true
     priority: 10
     testing:

@@ -13,6 +13,7 @@ from .output_paths import normalize_output_root
 PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_LEASE_SECONDS = 120
 DEFAULT_PROBE_INTERVAL_SECONDS = 60
+DEFAULT_DEV_STALE_AFTER_SECONDS = 86400
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,17 @@ class ManagedProjectConfig:
         )
 
 
+@dataclass(frozen=True)
+class DevProjectConfig:
+    path: Path
+    project_root: Path
+    project_id: str
+    source_root: Path
+    stale_after_seconds: int
+    include: tuple[str, ...]
+    exclude: tuple[str, ...]
+
+
 def _mapping(value: Any, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"project config {field} must be a mapping")
@@ -124,6 +136,85 @@ def _positive_int(value: Any, field: str, *, default: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"project config {field} must be a positive integer")
     return value
+
+
+def _pattern_list(value: Any, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(f"project config {field} must be a list")
+    patterns: list[str] = []
+    for item in value:
+        pattern = _text(item, field)
+        if pattern.startswith("/") or "\\" in pattern:
+            raise ValueError(
+                f"project config {field} entries must be relative POSIX patterns"
+            )
+        directory_pattern = pattern.endswith("/")
+        normalized = pattern.rstrip("/")
+        parts = PurePosixPath(normalized).parts
+        canonical = PurePosixPath(*parts).as_posix() if parts else ""
+        if (
+            not parts
+            or any(part in {"", ".", ".."} for part in parts)
+            or normalized != canonical
+            or (directory_pattern and pattern != canonical + "/")
+        ):
+            raise ValueError(
+                f"project config {field} entries must be normalized relative patterns"
+            )
+        patterns.append(pattern)
+    if len(set(patterns)) != len(patterns):
+        raise ValueError(f"project config {field} must not contain duplicates")
+    return tuple(patterns)
+
+
+def load_dev_project_config(path: Path) -> DevProjectConfig:
+    """Load only the project fields owned by foreground development execution."""
+
+    resolved = path.expanduser().resolve(strict=True)
+    raw = load_yaml(resolved)
+    project_root = resolved.parent
+
+    project_id = _text(raw.get("project_id", project_root.name), "project_id")
+    if not PROJECT_ID_RE.fullmatch(project_id):
+        raise ValueError(
+            "project config project_id must start with an alphanumeric character and "
+            "contain only letters, digits, dots, underscores, or hyphens"
+        )
+
+    source_value: Any = "."
+    if raw.get("source") is not None:
+        source = _mapping(raw.get("source"), "source")
+        source_value = source.get("local_repo", ".")
+    local_repo_value = _text(source_value, "source.local_repo")
+    source_root = Path(local_repo_value).expanduser()
+    if not source_root.is_absolute():
+        source_root = project_root / source_root
+    source_root = source_root.resolve()
+    if not source_root.is_dir():
+        raise ValueError(f"development source root does not exist: {source_root}")
+
+    dev_raw = raw.get("dev", {})
+    dev = _mapping(dev_raw, "dev")
+    unknown = sorted(set(dev) - {"stale_after_seconds", "include", "exclude"})
+    if unknown:
+        raise ValueError(
+            "project config dev contains unsupported fields: " + ", ".join(unknown)
+        )
+    return DevProjectConfig(
+        path=resolved,
+        project_root=project_root,
+        project_id=project_id,
+        source_root=source_root,
+        stale_after_seconds=_positive_int(
+            dev.get("stale_after_seconds"),
+            "dev.stale_after_seconds",
+            default=DEFAULT_DEV_STALE_AFTER_SECONDS,
+        ),
+        include=_pattern_list(dev.get("include"), "dev.include"),
+        exclude=_pattern_list(dev.get("exclude"), "dev.exclude"),
+    )
 
 
 def load_managed_project_config(path: Path) -> ManagedProjectConfig:

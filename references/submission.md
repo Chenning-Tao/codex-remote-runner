@@ -17,6 +17,32 @@ revisions. An explicit `--source-repo` never falls back. If no candidate passes 
 check, preparation fails closed without changing queue eligibility. This flow never
 stashes, commits, resets, copies, or submits uncommitted file contents.
 
+This clean-revision contract belongs specifically to durable `run`/`prepare` and is
+not relaxed by `remote-runner dev`. The separate dev path transfers current working
+tree bytes directly to one server, creates no controller record, and is not a source
+of formal or scientific provenance.
+
+## Foreground Development Transfer
+
+`remote-runner dev --server NAME --command TEXT` selects exactly one enabled global
+server. It uses the configured `source.local_repo` or an absolute `--source-root`,
+builds a NUL-delimited file list, and rsyncs directly into a fresh private session.
+There is no controller or remote bare-repository hop and no `--delete` against a
+persistent directory.
+
+For a Git root the candidate set is tracked files at their current on-disk bytes plus
+non-ignored untracked files. Tracked deletions stay absent. Ignored files enter only
+through `dev.include`. A non-Git root uses a filtered walk. Project excludes win over
+includes; includes can override ordinary defaults but never structural VCS/tool-state
+exclusions. The copy is a best-effort live-tree snapshot, so files changing during
+rsync do not gain atomicity or revision provenance.
+
+The remote command runs unchanged in the transferred source directory. It receives
+`RR_SERVER_CORES=N`, `RR_ASSIGNED_CORES=N`, and `RR_DEV_CACHE_DIR`. Explicit local
+values of `MAKEFLAGS`, `CMAKE_BUILD_PARALLEL_LEVEL`, and `CARGO_BUILD_JOBS` win;
+otherwise they default to `-jN`, `N`, and `N`. No pytest flags or other arguments are
+added automatically.
+
 ## Detached Submission
 
 `run` is detached by default. A successful call returns the exact run ID and queue

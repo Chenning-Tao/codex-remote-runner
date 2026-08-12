@@ -7,6 +7,7 @@ or compute server.
 
 - [Registry And Project Ownership](#registry-and-project-ownership)
 - [Project Configuration](#project-configuration)
+- [Development Execution](#development-execution)
 - [Eligibility And Maintenance](#eligibility-and-maintenance)
 - [Scheduling And Test Lanes](#scheduling-and-test-lanes)
 - [Output Synchronization](#output-synchronization)
@@ -29,6 +30,7 @@ servers:
     ssh: compute-a
     cores: 256
     memory_gb: 512
+    dev_root: /srv/remote-runner-dev
     testing:
       slots: 1
 ```
@@ -120,6 +122,43 @@ output_sync:
   retry_seconds: 60
   paused: false
 ```
+
+## Development Execution
+
+`remote-runner dev` reuses only the selected global server's SSH endpoints,
+`machine_id`, optional `machine_fingerprint`, positive `cores`, enabled state, and
+absolute `dev_root`. It does not require or consult the project's controller, remote
+Git repositories, scheduling lanes, output roots, drains, slots, or leases.
+
+`dev_root` must be a normalized absolute non-root POSIX path containing only letters,
+digits, dots, underscores, hyphens, and slashes. The remote login must own it (or be
+able to create and own it). Sessions and caches are derived only as:
+
+```text
+<dev_root>/<project_id>/tmp/dev-<16-hex>/
+<dev_root>/<project_id>/cache/
+```
+
+The dev-only project fields are optional:
+
+```yaml
+project_id: example
+source:
+  local_repo: .
+dev:
+  stale_after_seconds: 86400
+  include:
+    - build/generated-schema.py
+  exclude:
+    - local-large-data/
+```
+
+`source.local_repo` may point at dirty, untracked, or non-Git source for `dev`. This is
+also the authority boundary for nested repositories: configure the nested code root,
+not an outer notes/results repository. Unknown `dev` fields, duplicate/non-normalized
+patterns, and non-positive stale thresholds fail closed. A project file containing
+only `project_id`, optional `source.local_repo`, and optional `dev` is sufficient for
+`dev`; the managed `run` loader remains strict and unchanged.
 
 ## Eligibility And Maintenance
 
