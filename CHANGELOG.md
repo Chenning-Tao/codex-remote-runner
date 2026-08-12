@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## 0.9.4 - 2026-08-12
+
+### Added
+
+- Added `remote-runner dev`, a foreground-only path that transfers a filtered dirty,
+  untracked, or non-Git source snapshot directly to one trusted compute server without
+  weakening the clean-revision controller lifecycle. It streams workload output and
+  status, provides whole-machine build parallelism defaults, keeps an explicit project
+  cache, and guard-cleans the private session source on completion or recovery.
+
 ## 0.9.3 - 2026-08-12
 
 ### Added

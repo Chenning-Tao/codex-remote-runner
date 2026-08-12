@@ -10,6 +10,7 @@ from . import __version__
 from ._internal import (
     cleanup,
     decommissioned_run,
+    dev_execution,
     monitoring,
     output_prune,
     output_sync_client,
@@ -108,7 +109,10 @@ def _add_wait_options(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="remote-runner",
-        description="Manage durable workloads on a project-configured remote server pool.",
+        description=(
+            "Run disposable development tests or manage durable workloads on "
+            "project-configured remote servers."
+        ),
     )
     parser.add_argument(
         "--version",
@@ -183,6 +187,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="wait for the submitted run according to --until",
     )
     _add_wait_options(run_parser)
+
+    dev_parser = subparsers.add_parser(
+        "dev",
+        help="run the current filtered source tree directly on one server",
+    )
+    _add_project_config(dev_parser)
+    dev_parser.add_argument(
+        "--source-root",
+        type=Path,
+        help="absolute dirty, untracked, or non-Git source root to transfer",
+    )
+    dev_parser.add_argument(
+        "--server-registry",
+        type=Path,
+        default=DEFAULT_SERVER_REGISTRY,
+    )
+    dev_parser.add_argument("--server", required=True)
+    dev_parser.add_argument("--ssh-profile", default="auto")
+    dev_parser.add_argument("--timeout", type=_positive_int, default=8)
+    dev_parser.add_argument("--command", required=True)
 
     monitor_parser = subparsers.add_parser(
         "monitor",
@@ -507,6 +531,12 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.subcommand == "dev":
+        try:
+            return dev_execution.run_dev(args)
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"[remote-runner dev] {exc}", file=sys.stderr)
+            return dev_execution.INFRASTRUCTURE_EXIT_CODE
     if args.subcommand == "web":
         try:
             from .web_app import run_web

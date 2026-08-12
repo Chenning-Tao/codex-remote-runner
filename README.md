@@ -6,6 +6,9 @@ Codex Remote Runner is a command-line application for submitting durable work to
 a project-owned pool of remote machines. It keeps queue and execution state on a
 controller host, runs an exact clean Git revision, and lets clients reconnect to
 monitor, wait for, stop, or archive a run without depending on the original shell.
+It also provides a separate foreground `dev` command for quickly testing a filtered
+dirty working tree on one trusted compute server without entering that durable
+lifecycle.
 
 The project is currently pre-1.0. State formats and deployment workflows are
 tested, but operators should review upgrades before applying them to active pools.
@@ -19,6 +22,7 @@ tested, but operators should review upgrades before applying them to active pool
 - Local browser dashboard with confirmed run stopping.
 - Opaque workload commands with selected resources exposed through `RR_ASSIGNED_CORES`.
 - Explicit stop, cleanup, purge, server drain/retirement, and output archival workflows.
+- Direct foreground development tests from dirty, untracked, or non-Git source trees.
 
 ```text
 local CLI / Codex skill
@@ -37,7 +41,8 @@ local CLI / Codex skill
 - macOS or Linux on the local and controller hosts.
 - Python 3.12 or newer and [uv](https://docs.astral.sh/uv/).
 - Git, OpenSSH, and tmux on the controller and compute hosts.
-- rsync when output synchronization is enabled.
+- rsync on the local and selected compute host for `dev`, and when output
+  synchronization is enabled.
 - Key-based, non-interactive SSH aliases for every configured connection.
 
 Windows is not currently supported. The application executes operator-supplied
@@ -49,7 +54,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.3'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.4'
 remote-runner --help
 ```
 
@@ -89,7 +94,7 @@ binary cannot recreate the removed subsystem; no normal controller API reads it.
 Remote Runner uses two YAML files:
 
 1. `~/.codex/remote-servers.yaml` describes stable `machine_id` values, shared
-   physical capacity, and SSH endpoints.
+   physical capacity, SSH endpoints, and an optional per-server `dev_root`.
 2. A project-owned `.remote-runner.yaml` describes the controller, source
    repository, project remotes, scheduling, and optional output archival.
 
@@ -97,6 +102,11 @@ Start with [examples/remote-servers.yaml](examples/remote-servers.yaml) and
 [examples/project.remote-runner.yaml](examples/project.remote-runner.yaml). See
 [references/configuration.md](references/configuration.md) for the complete
 contract and provisioning requirements.
+
+For example, enable direct development runs on one server with
+`dev_root: /srv/remote-runner-dev`. A project may then add `dev.include`,
+`dev.exclude`, and `dev.stale_after_seconds`; see the linked examples for the minimal
+schema.
 
 ## Web Dashboard
 
@@ -163,6 +173,39 @@ reportable` only for an explicitly requested foreground wait.
 Output synchronization proves path identity, transferred bytes, checksum verification,
 and receipt identity. It can archive failed or stopped checkpoints and never rewrites
 execution state or interprets scientific validity.
+
+## Development Run
+
+Use `dev` for a disposable foreground test of the current working tree:
+
+```bash
+remote-runner dev \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --server compute-a \
+  --command 'python3 -m pytest -q'
+```
+
+`dev` resolves `source.local_repo` unless `--source-root` supplies another absolute
+directory. For Git roots it sends current tracked-file bytes plus non-ignored
+untracked files; ignored files require an explicit `dev.include`. For non-Git roots
+it performs a filtered filesystem walk. VCS/tool state, virtual environments,
+dependency trees, build/results directories, and common credential files are excluded
+by default, with structural exclusions remaining non-overridable.
+
+Each invocation creates a fresh private
+`<dev_root>/<project_id>/tmp/dev-.../source` directory and rsyncs only the selected
+file list. It therefore does not resend excluded trees such as `node_modules` or
+results, but it is a complete filtered snapshot rather than an incremental persistent
+source checkout. The session directory is removed after success, failure, or handled
+interruption. `<dev_root>/<project_id>/cache` remains and may contain source-derived
+data; secure erase is not claimed.
+
+The command inherits workload stdout/stderr and returns its exit status. It creates no
+formal run ID, queue record, Web entry, output sync, or scientific provenance. It also
+acquires no controller lease: `RR_ASSIGNED_CORES` and `RR_SERVER_CORES` both expose the
+registered server core count, so selecting a busy server can contend with durable
+runs. `MAKEFLAGS`, `CMAKE_BUILD_PARALLEL_LEVEL`, and `CARGO_BUILD_JOBS` default to all
+registered cores unless explicitly set locally; the opaque command is never rewritten.
 
 Common follow-up commands:
 

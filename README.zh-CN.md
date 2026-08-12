@@ -3,6 +3,7 @@
 [English](README.md)
 
 Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任务提交到项目自有的远程机器池。它把队列和执行状态保存在控制器主机上，严格运行一个干净且确定的 Git revision，并允许客户端在原始 shell 退出后重新连接，继续监控、等待、停止或归档任务。
+它还提供完全独立的前台 `dev` 命令，用于把经过过滤的 dirty working tree 直接放到一台可信计算服务器上做快速测试，不进入正式持久生命周期。
 
 项目目前处于 1.0 之前的阶段。状态格式和部署流程已经过测试，但在活跃机器池上升级前，运维人员仍应审查版本变更。
 
@@ -15,6 +16,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 - 提供本地网页控制面板，并支持确认后停止任务。
 - 原样执行 opaque workload 命令，并通过 `RR_ASSIGNED_CORES` 暴露分配资源。
 - 提供明确的停止、清理、彻底删除、服务器排空/下线和输出归档流程。
+- 可从 dirty、未跟踪或非 Git 源码目录直接执行一次性前台开发测试。
 
 ```text
 本地 CLI / Codex skill
@@ -33,7 +35,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 - 本地和控制器主机使用 macOS 或 Linux。
 - Python 3.12 或更高版本，以及 [uv](https://docs.astral.sh/uv/)。
 - 控制器和计算主机安装 Git、OpenSSH 与 tmux。
-- 启用输出同步时需要 rsync。
+- 使用 `dev` 时本地和目标计算服务器都需要 rsync；启用输出同步时也需要 rsync。
 - 为所有已配置连接准备基于密钥、无需交互的 SSH alias。
 
 目前不支持 Windows。本应用会在远程机器上执行运维人员提供的命令，适用于可信的项目基础设施，不应作为面向不可信租户的多租户调度器。
@@ -43,7 +45,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.3'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.4'
 remote-runner --help
 ```
 
@@ -81,10 +83,12 @@ pending output-sync intent 只有在 run ID、终态 execution record、revision
 
 Remote Runner 使用两个 YAML 文件：
 
-1. `~/.codex/remote-servers.yaml` 描述稳定的 `machine_id`、共享物理容量和 SSH 端点。
+1. `~/.codex/remote-servers.yaml` 描述稳定的 `machine_id`、共享物理容量、SSH 端点和可选的服务器级 `dev_root`。
 2. 项目自有的 `.remote-runner.yaml` 描述控制器、源码仓库、项目远程服务器、调度策略以及可选的输出归档。
 
 可以从 [examples/remote-servers.yaml](examples/remote-servers.yaml) 和 [examples/project.remote-runner.yaml](examples/project.remote-runner.yaml) 开始。完整配置契约和环境准备要求见 [references/configuration.md](references/configuration.md)。
+
+例如，为一台服务器设置 `dev_root: /srv/remote-runner-dev` 即可启用直接开发测试。项目可选配置 `dev.include`、`dev.exclude` 和 `dev.stale_after_seconds`；最小 schema 见上述示例。
 
 ## 网页控制台
 
@@ -136,6 +140,36 @@ workload 命令不会被追加 `--num-workers` 或做其他改写；程序自行
 
 输出同步只证明路径、传输字节、checksum 和 receipt。failed/stopped run 也可以
 同步 checkpoint；同步完成不会改写 execution 状态，也不会判断科学有效性。
+
+## 开发测试
+
+用 `dev` 对当前 working tree 做一次性前台测试：
+
+```bash
+remote-runner dev \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --server compute-a \
+  --command 'python3 -m pytest -q'
+```
+
+除非用 `--source-root` 指定另一个绝对目录，`dev` 会使用
+`source.local_repo`。Git 源码根会传输 tracked 文件的当前磁盘字节和未被 ignore
+的 untracked 文件；被 ignore 的文件必须通过 `dev.include` 明确加入。非 Git 根
+使用过滤后的文件系统遍历。默认排除 VCS/工具状态、虚拟环境、依赖目录、构建/
+结果目录和常见凭据文件，结构性排除项不能被覆盖。
+
+每次调用都会新建私有的
+`<dev_root>/<project_id>/tmp/dev-.../source`，并只 rsync 最终文件清单。因此
+`node_modules`、results 等已排除目录不会反复上传，但这仍是一次完整的过滤快照，
+不是长期源码目录上的增量更新。成功、失败或可处理的中断后会删除本次 session；
+`<dev_root>/<project_id>/cache` 会长期保留，也可能包含源码衍生信息，不承诺安全擦除。
+
+命令原样继承 workload 的 stdout/stderr 并返回其 exit code，不创建正式 run ID、
+队列记录、Web 条目、output sync 或科学 provenance。它也不申请 controller lease：
+`RR_ASSIGNED_CORES` 与 `RR_SERVER_CORES` 都使用注册表中的整机核心数，因此选中忙碌
+服务器可能与正式任务争用资源。若本地未显式设置，`MAKEFLAGS`、
+`CMAKE_BUILD_PARALLEL_LEVEL` 与 `CARGO_BUILD_JOBS` 默认使用全部注册核心；opaque
+命令本身不会被改写。
 
 常用的后续命令：
 

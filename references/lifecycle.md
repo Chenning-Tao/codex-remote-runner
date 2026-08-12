@@ -10,6 +10,9 @@ minimal replay-prevention state is not model- or Web-facing.
 `unknown`, `unreachable`, and `unsupported` are observations and never overwrite an
 authoritative run state.
 
+`remote-runner dev` has no queue or execution record to query. Its foreground process,
+stdout/stderr, and exit status are the complete observable lifecycle.
+
 ## Explicit Waits
 
 Submission is detached by default. Use `wait` or `run --wait` only when requested.
@@ -26,6 +29,19 @@ checkpoint synchronization can continue independently.
 Stop one exact queued or running run through controller authority. Cleanup remains a
 dry run by default and removes only verified stopped runtime/records selected by the
 operator. Transport ambiguity is reported rather than converted into success.
+
+Development sessions use a separate exact cleanup contract. The remote wrapper removes
+its private session after normal success or workload failure. On handled local
+interruption or lost foreground SSH, the client requests cancellation only when the
+session token, process group, and process-start identity match, then performs bounded
+TERM/KILL and guarded removal. Cleanup never accepts an arbitrary remote path and never
+deletes the project cache, tmp root, project root, or sibling sessions.
+
+Before creating a later session, `dev` scans only the selected project's tmp directory
+and removes eligible expired orphans. Fresh, live, malformed, foreign-owned, symlinked,
+or identity-ambiguous entries are retained. SIGKILL, reboot, or total network loss can
+therefore leave source until a later successful invocation. Cleanup is ordinary file
+removal, not secure erase; the persistent cache may retain source-derived data.
 
 If a physical server was permanently destroyed before the normal stop handshake,
 use `close-decommissioned-run` for one exact run. The command is preview-first and

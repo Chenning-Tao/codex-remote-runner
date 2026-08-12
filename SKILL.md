@@ -1,12 +1,14 @@
 ---
 name: remote-runner
-description: Submit, monitor, wait for, stop, purge, and synchronize durable workloads on project-configured remote servers. Use for work that must survive the current shell or queue across a server pool. Execute only an exact clean committed Git revision through the controller-owned lifecycle.
+description: Run disposable dirty-tree development tests or submit, monitor, wait for, stop, purge, and synchronize durable workloads on project-configured remote servers. Use dev only for foreground direct execution; durable work executes an exact clean committed Git revision through the controller-owned lifecycle.
 ---
 
 # Remote Runner
 
 Use direct SSH only for short probes. Use `remote-runner` when work must persist,
 queue, remain discoverable, or support later status, wait, stop, and artifact sync.
+Use `remote-runner dev` only for an explicitly requested foreground test of current
+local source that does not need those durable properties.
 
 ## Load Relevant Context
 
@@ -27,6 +29,25 @@ queue, remain discoverable, or support later status, wait, stop, and artifact sy
 - Store and cite exact run IDs. Trellis may retain exact run IDs and cross-session
   decisions; it must not copy Remote Runner queue or execution records.
 - Treat `unknown`, `unreachable`, and `unsupported` as observations, not authority.
+
+## Run Disposable Development Tests
+
+`remote-runner dev` is separate from the controller-owned lifecycle. It accepts dirty,
+untracked, or non-Git source; rsyncs a filtered snapshot directly to one explicitly
+selected compute server; streams stdout/stderr; returns the workload exit status; and
+removes the private session source afterward.
+
+```bash
+remote-runner dev \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --server compute-a \
+  --command 'python3 -m pytest -q'
+```
+
+It creates no run ID, queue record, Web entry, output sync, or scientific provenance.
+It also acquires no controller lease. Treat both core variables as whole-machine usage
+hints, avoid contention with durable work, and remember that the persistent dev cache
+may retain source-derived information even after plaintext session cleanup.
 
 ## Submit Detached By Default
 
@@ -102,6 +123,8 @@ or destruction remains the user's responsibility.
 
 ## Command Map
 
+- `remote-runner dev`: foreground filtered dirty-tree execution on one server; no
+  durable lifecycle.
 - `remote-runner prepare`: prepare one reusable revision.
 - `remote-runner run`: submit detached work; wait only with explicit `--wait`.
 - `remote-runner monitor`: query bounded status.
