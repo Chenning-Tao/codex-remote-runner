@@ -9,6 +9,7 @@ from typing import Any
 from . import __version__
 from ._internal import (
     cleanup,
+    decommissioned_run,
     monitoring,
     output_prune,
     output_sync_client,
@@ -241,6 +242,21 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser.add_argument("--run-id", required=True)
     stop_parser.add_argument("--timeout", type=int, default=10)
 
+    decommissioned_parser = subparsers.add_parser(
+        "close-decommissioned-run",
+        help="close one unreachable run after its physical server was destroyed",
+    )
+    _add_project_config(decommissioned_parser)
+    decommissioned_parser.add_argument("--run-id", required=True)
+    decommissioned_parser.add_argument("--server", required=True)
+    decommissioned_parser.add_argument("--reason", required=True)
+    decommissioned_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="record the run as stopped; omission performs a guarded dry run",
+    )
+    decommissioned_parser.add_argument("--timeout", type=int, default=10)
+
     cleanup_parser = subparsers.add_parser(
         "cleanup",
         help="review or purge authoritative stopped records",
@@ -449,6 +465,8 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return result, waiting.wait_exit_code(result)
     if args.subcommand == "stop":
         return stopping.request_stop(args), 0
+    if args.subcommand == "close-decommissioned-run":
+        return decommissioned_run.request_close(args), 0
     if args.subcommand == "cleanup":
         result = cleanup.request_cleanup(args)
         failed = args.apply and int(result.get("failed_count", 0)) > 0

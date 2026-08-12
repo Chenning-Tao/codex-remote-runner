@@ -88,6 +88,11 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
     assert parsed_wait.connection_grace is None
     assert "--run-id" in help_text("stop")
     assert "--apply" in help_text("cleanup")
+    decommissioned_help = help_text("close-decommissioned-run")
+    assert "--run-id" in decommissioned_help
+    assert "--server" in decommissioned_help
+    assert "--reason" in decommissioned_help
+    assert "--apply" in decommissioned_help
     run_purge_help = help_text("purge-run")
     assert "--run-id" in run_purge_help
     assert "--apply" in run_purge_help

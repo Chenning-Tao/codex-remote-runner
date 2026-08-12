@@ -107,6 +107,8 @@ or destruction remains the user's responsibility.
 - `remote-runner monitor`: query bounded status.
 - `remote-runner wait`: attach to one exact run.
 - `remote-runner stop`: stop one exact run.
+- `remote-runner close-decommissioned-run`: preview and close one exact unreachable
+  run only after its physical server has been explicitly confirmed destroyed.
 - `remote-runner cleanup`: clean verified stopped records.
 - `remote-runner purge-run`: remove one exact failed record.
 - `remote-runner purge-task`: preview and remove exact expanded run IDs.

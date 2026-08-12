@@ -43,7 +43,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.2'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.3'
 remote-runner --help
 ```
 
@@ -144,6 +144,8 @@ remote-runner monitor --project-config /path/to/.remote-runner.yaml
 remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-... --until reportable
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
+remote-runner close-decommissioned-run --project-config /path/to/.remote-runner.yaml --run-id rr-... --server compute-a --reason "云厂商已销毁该实例"
+remote-runner close-decommissioned-run --project-config /path/to/.remote-runner.yaml --run-id rr-... --server compute-a --reason "云厂商已销毁该实例" --apply
 remote-runner retire-server --project-config /path/to/.remote-runner.yaml --server compute-a
 remote-runner retire-server --project-config /path/to/.remote-runner.yaml --server compute-a --apply
 ```

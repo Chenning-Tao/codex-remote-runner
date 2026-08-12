@@ -27,6 +27,15 @@ Stop one exact queued or running run through controller authority. Cleanup remai
 dry run by default and removes only verified stopped runtime/records selected by the
 operator. Transport ambiguity is reported rather than converted into success.
 
+If a physical server was permanently destroyed before the normal stop handshake,
+use `close-decommissioned-run` for one exact run. The command is preview-first and
+requires the frozen server name plus an operator reason. Apply repeats the remote
+probe and refuses closure if the endpoint is reachable, the queue is still active,
+the run or physical machine has a controller lease, output synchronization is
+configured for the run, or any controller record is malformed. A successful apply
+records `stopped` with the decommissioning reason while preserving queue, execution,
+event, runtime, and output history; it never deletes remote or controller bytes.
+
 ## Purge
 
 `purge-run` selects one exact failed run. It requires no replacement and makes no claim
