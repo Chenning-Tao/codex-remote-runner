@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## 0.9.3 - 2026-08-12
+
+### Added
+
+- Added a preview-first `close-decommissioned-run` lifecycle for exact nonterminal
+  runs whose physical server was explicitly confirmed destroyed. Closure requires a
+  fresh unreachable probe, no active queue or machine lease, no output-sync contract,
+  and an operator reason; it records a stopped terminal state without deleting
+  controller history, remote runtime, or output bytes.
+
 ## 0.9.2 - 2026-08-12
 
 ### Added

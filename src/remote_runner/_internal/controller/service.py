@@ -12,6 +12,7 @@ from typing import Any
 
 from .. import monitoring
 from ..cleanup import CleanupOutcomeUnknown, cleanup_remote_runtime
+from ..decommissioned_run import inspect_or_close, validate_request
 from ..execution_registry import (
     load_current_run,
     project_paths,
@@ -1182,6 +1183,19 @@ def stop(args: argparse.Namespace) -> dict[str, Any]:
     raise FileNotFoundError(f"controller run does not exist: {args.run_id}")
 
 
+def close_decommissioned_run(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    request = validate_request(_read_object("decommissioned-run request"))
+    return inspect_or_close(
+        paths,
+        args.run_id,
+        server=request["server"],
+        reason=request["reason"],
+        timeout=args.timeout,
+        apply=args.apply,
+    )
+
+
 def _stopped_cleanup_candidates(paths: ControllerPaths) -> list[dict[str, Any]]:
     queue_by_id = {str(job["run_id"]): (job, state) for job, state in list_jobs(paths)}
     records: dict[str, dict[str, Any]] = {}
@@ -1350,6 +1364,9 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser.set_defaults(run_id=None, task_id=None)
     stop_parser = subparsers.add_parser("stop")
     stop_parser.add_argument("--run-id", required=True)
+    decommissioned_parser = subparsers.add_parser("close-decommissioned-run")
+    decommissioned_parser.add_argument("--run-id", required=True)
+    decommissioned_parser.add_argument("--apply", action="store_true")
     cleanup_parser = subparsers.add_parser("cleanup-stopped")
     cleanup_parser.add_argument("--run-id")
     cleanup_parser.add_argument("--apply", action="store_true")
@@ -1419,6 +1436,8 @@ def main(argv: list[str] | None = None) -> int:
             result = assess_server_retirement(args)
         elif args.action == "stop":
             result = stop(args)
+        elif args.action == "close-decommissioned-run":
+            result = close_decommissioned_run(args)
         elif args.action == "cleanup-stopped":
             result = cleanup_records(args)
         elif args.action == "purge-run":

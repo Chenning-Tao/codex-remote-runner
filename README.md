@@ -49,7 +49,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.2'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.3'
 remote-runner --help
 ```
 
@@ -171,6 +171,8 @@ remote-runner monitor --project-config /path/to/.remote-runner.yaml
 remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-... --until reportable
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
+remote-runner close-decommissioned-run --project-config /path/to/.remote-runner.yaml --run-id rr-... --server compute-a --reason "provider destroyed the instance"
+remote-runner close-decommissioned-run --project-config /path/to/.remote-runner.yaml --run-id rr-... --server compute-a --reason "provider destroyed the instance" --apply
 remote-runner retire-server --project-config /path/to/.remote-runner.yaml --server compute-a
 remote-runner retire-server --project-config /path/to/.remote-runner.yaml --server compute-a --apply
 ```

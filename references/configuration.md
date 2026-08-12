@@ -184,6 +184,12 @@ The command still requires every other assessment to pass. If the source public 
 cannot be revoked, it removes the corresponding exclusive archive private key so the
 remaining authorization cannot be used and reports that degraded cleanup outcome.
 
+If the instance was destroyed before a nonterminal run completed its normal stop
+handshake, close each exact run with the preview-first
+`remote-runner close-decommissioned-run` lifecycle before retiring its configuration.
+This path requires explicit operator attestation and a fresh unreachable probe; it
+does not infer termination from a missing configuration entry.
+
 After adding and provisioning an automatic project remote, run
 `remote-runner sync-pool --project-config /path/to/.remote-runner.yaml`. This
 prepares the queued revisions for tasks submitted with `--server all` and makes
