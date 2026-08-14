@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -251,3 +253,92 @@ def test_remote_preparation_uses_managed_ssh_for_push_and_verification(
         assert "ControlPersist=60" in ssh_command
         assert "ControlPath=~/.ssh/remote-runner-%C" in ssh_command
     assert result.prepared_servers == ("compute-a",)
+
+
+def test_fanout_push_and_verify_run_concurrently(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    revision = "b" * 40
+    ref = f"refs/remote-runner/example/{revision}"
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def runner(
+        args: list[str], *, cwd: Path | None = None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal active, peak
+        if "--show-toplevel" in args:
+            stdout = str(source)
+        elif "HEAD^{commit}" in args:
+            stdout = revision
+        elif "status" in args:
+            stdout = ""
+        elif "ls-remote" in args:
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.2)
+            with lock:
+                active -= 1
+            stdout = f"{revision}\t{ref}"
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    result = prepare_revision(
+        source,
+        project_id="example",
+        targets=[
+            DeploymentTarget("compute-a", "compute-a:/srv/a.git"),
+            DeploymentTarget("compute-b", "compute-b:/srv/b.git"),
+        ],
+        timeout=17,
+        runner=runner,
+    )
+
+    assert result.prepared_servers == ("compute-a", "compute-b")
+    assert peak == 2
+
+
+def test_parallel_fanout_preserves_order_and_collects_partial_failures(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    revision = "c" * 40
+    ref = f"refs/remote-runner/example/{revision}"
+
+    def runner(
+        args: list[str], *, cwd: Path | None = None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        if "--show-toplevel" in args:
+            stdout = str(source)
+        elif "HEAD^{commit}" in args:
+            stdout = revision
+        elif "status" in args:
+            stdout = ""
+        elif "ls-remote" in args:
+            if "compute-b:/srv/b.git" in args:
+                return subprocess.CompletedProcess(
+                    args, 128, stdout="", stderr="unreachable"
+                )
+            stdout = f"{revision}\t{ref}"
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    result = prepare_revision(
+        source,
+        project_id="example",
+        targets=[
+            DeploymentTarget("compute-a", "compute-a:/srv/a.git"),
+            DeploymentTarget("compute-b", "compute-b:/srv/b.git"),
+            DeploymentTarget("compute-c", "compute-c:/srv/c.git"),
+        ],
+        timeout=17,
+        runner=runner,
+    )
+
+    assert result.prepared_servers == ("compute-a", "compute-c")
+    assert [item.name for item in result.failures] == ["compute-b"]

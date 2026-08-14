@@ -14,8 +14,9 @@ from remote_runner._internal.controller.registry import (
     controller_paths,
     controller_scheduler_paths,
     MalformedLeaseError,
+    submit_job,
 )
-from remote_runner._internal.execution_registry import write_yaml
+from remote_runner._internal.execution_registry import sha256_bytes, write_yaml
 
 
 def git(*args: str, cwd: Path) -> str:
@@ -357,6 +358,34 @@ def test_expired_legacy_dispatch_lease_still_blocks_release_activation(
     revision = "e" * 40
     monkeypatch.setattr(release_gate, "SOURCE_REVISION", revision)
     staged_release(root, revision)
+    command = "python experiment.py"
+    submit_job(
+        controller_paths(root, "example"),
+        {
+            "run_id": "rr-0123456789abcdef",
+            "revision": "a" * 40,
+            "label": "experiment",
+            "task_id": "task-1",
+            "submitted_command": command,
+            "submitted_command_sha256": sha256_bytes(command.encode()),
+            "prepared_servers": [
+                {
+                    "name": "compute-a",
+                    "ssh": "compute-a",
+                    "ssh_profile": "intranet",
+                    "configured_cores": 256,
+                    "priority": 100,
+                    "bare_repo": "/srv/example/repo.git",
+                    "worktree_root": "/srv/example/worktrees",
+                    "python": "/opt/example/bin/python3",
+                    "output_root": None,
+                }
+            ],
+            "output_relpath": None,
+            "output_path": None,
+            "output_metadata": {},
+        },
+    )
     scheduler = controller_scheduler_paths(root)
     scheduler.leases_dir.mkdir(parents=True)
     write_yaml(
@@ -377,6 +406,42 @@ def test_expired_legacy_dispatch_lease_still_blocks_release_activation(
     with pytest.raises(RuntimeError, match="active dispatch lease"):
         release_gate.activate_release(root, revision)
     assert not (root / "runner" / "current").exists()
+    assert (scheduler.leases_dir / "compute-a.yaml").is_file()
+
+
+def test_expired_dispatch_lease_without_owner_records_is_cleaned_during_activation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "controller"
+    revision = "d" * 40
+    monkeypatch.setattr(release_gate, "SOURCE_REVISION", revision)
+    staged_release(root, revision)
+    scheduler = controller_scheduler_paths(root)
+    scheduler.leases_dir.mkdir(parents=True)
+    write_yaml(
+        scheduler.leases_dir / "compute-a.yaml",
+        {
+            "schema_version": 2,
+            "server": "compute-a",
+            "project_id": "example",
+            "run_id": "rr-0123456789abcdef",
+            "kind": "dispatch",
+            "owner_token": "a" * 64,
+            "created_at": 1000.0,
+            "heartbeat_at": 1000.5,
+            "expires_at": 1001.0,
+        },
+    )
+
+    result = release_gate.activate_release(root, revision)
+
+    assert [
+        lease["run_id"]
+        for lease in result["released_orphaned_dispatch_leases"]
+    ] == ["rr-0123456789abcdef"]
+    assert not (scheduler.leases_dir / "compute-a.yaml").exists()
+    assert (root / "runner" / "current").is_symlink()
 
 
 def test_malformed_lease_blocks_release_inspection_and_activation(

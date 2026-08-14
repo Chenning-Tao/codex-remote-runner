@@ -668,6 +668,7 @@ def test_dispatch_lease_is_fenced_and_cannot_be_stolen_after_heartbeat_expiry(
     tmp_path: Path,
 ) -> None:
     paths = controller_paths(tmp_path / "controller", "example")
+    submit_job(paths, queued_job())
 
     original = acquire_dispatch_lease(
         paths,
@@ -1012,6 +1013,7 @@ def test_expired_legacy_dispatch_lease_is_fenced_during_identity_migration(
     root = tmp_path / "controller"
     first = controller_paths(root, "project-a")
     second = controller_paths(root, "project-b")
+    submit_job(first, queued_job())
     fingerprint = "sha256:" + "1" * 64
     legacy = _identified_server("compute-a", "compute-a", fingerprint)
     legacy["machine_id_source"] = "legacy-name"

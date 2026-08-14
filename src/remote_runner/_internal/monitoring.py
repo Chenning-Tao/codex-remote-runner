@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import re
 import shlex
@@ -24,6 +25,7 @@ from .execution_registry import (
     runtime_path,
     update_current_state,
     utc_now,
+    validate_current_run_id,
 )
 from .progress import parse_progress
 from .remote_shell import shell_quote_remote_path, ssh_capture
@@ -49,6 +51,12 @@ REMOTE_END_RE = re.compile(
 LEGACY_END_RE = re.compile(r"^\s*\[END\].*\brc=(?P<rc>\d+)\s*$", re.IGNORECASE)
 REMOTE_STATUS_PREFIX = "remote_status_json="
 LOG_TAIL_MARKER = "__REMOTE_RUNNER_LOG_TAIL__"
+BATCH_TAIL_MARKER_RE = re.compile(
+    r"^__REMOTE_RUNNER_LOG_TAIL__ run=(rr-[0-9a-f]{16})$"
+)
+BATCH_END_MARKER_RE = re.compile(
+    r"^__REMOTE_RUNNER_LOG_END__ run=(rr-[0-9a-f]{16})$"
+)
 TERMINAL_STATUSES = {"succeeded", "failed", "stopped"}
 REMOTE_STATUS_STATES = TERMINAL_STATUSES | {"running"}
 MAX_MONITOR_WORKERS = 8
@@ -397,49 +405,13 @@ def load_registry_rows(
     return rows
 
 
-def remote_probe(row: dict[str, Any], timeout: int) -> dict[str, Any]:
-    for field in ("ssh", "tmux_session", "remote_status", "remote_log", "remote_pgid"):
-        if not isinstance(row.get(field), str) or not row[field]:
-            return {
-                "observation": "unsupported",
-                "error": f"run has no usable {field}",
-                "progress": {"kind": "unknown_eta"},
-            }
-    tmux_arg = shlex.quote(exact_tmux_target(str(row["tmux_session"])))
-    log_arg = shell_quote_remote_path(str(row["remote_log"]))
-    status_arg = shell_quote_remote_path(str(row["remote_status"]))
-    pgid_arg = shell_quote_remote_path(str(row["remote_pgid"]))
-    remote_command = "\n".join(
-        [
-            "set +e",
-            f"tmux has-session -t {tmux_arg} >/dev/null 2>&1; echo tmux_alive=$?",
-            f"test -f {log_arg}; echo log_exists=$?",
-            f"test -f {status_arg}; echo status_exists=$?",
-            f"test -f {pgid_arg}; echo pgid_exists=$?",
-            f"pgid=$(head -n 1 {pgid_arg} 2>/dev/null); "
-            'if test -n "$pgid"; then kill -0 -- "-$pgid" >/dev/null 2>&1; '
-            "echo pgid_alive=$?; else echo pgid_alive=1; fi",
-            f"if test -f {status_arg}; then printf '{REMOTE_STATUS_PREFIX}'; head -n 1 {status_arg}; fi",
-            f"test -f {log_arg} && stat -c 'log_mtime=%Y log_size=%s' {log_arg}",
-            f"echo {LOG_TAIL_MARKER}",
-            f"test -f {log_arg} && tail -200 {log_arg}",
-            "true",
-        ]
-    )
-    code, stdout, stderr = ssh_capture(str(row["ssh"]), remote_command, timeout)
-    if code != 0:
-        return {
-            "observation": "unreachable",
-            "ssh_reachable": False,
-            "error": stderr.strip() or f"ssh exited {code}",
-            "failure": {
-                "category": "infra",
-                "reason": stderr.strip() or f"ssh exited {code}",
-            },
-            "progress": {"kind": "unknown_eta"},
-        }
-
-    metadata, log_tail = split_probe_output(stdout)
+def _probe_from_parts(
+    row: dict[str, Any],
+    *,
+    metadata: str,
+    log_tail: str,
+    stderr: str,
+) -> dict[str, Any]:
     tmux_alive = _probe_value(metadata, "tmux_alive") == "0"
     pgid_alive = _probe_value(metadata, "pgid_alive") == "0"
     log_exists = _probe_value(metadata, "log_exists") == "0"
@@ -513,6 +485,196 @@ def remote_probe(row: dict[str, Any], timeout: int) -> dict[str, Any]:
     if failure is not None:
         result["failure"] = failure
     return result
+
+
+def remote_probe(row: dict[str, Any], timeout: int) -> dict[str, Any]:
+    for field in ("ssh", "tmux_session", "remote_status", "remote_log", "remote_pgid"):
+        if not isinstance(row.get(field), str) or not row[field]:
+            return {
+                "observation": "unsupported",
+                "error": f"run has no usable {field}",
+                "progress": {"kind": "unknown_eta"},
+            }
+    tmux_arg = shlex.quote(exact_tmux_target(str(row["tmux_session"])))
+    log_arg = shell_quote_remote_path(str(row["remote_log"]))
+    status_arg = shell_quote_remote_path(str(row["remote_status"]))
+    pgid_arg = shell_quote_remote_path(str(row["remote_pgid"]))
+    remote_command = "\n".join(
+        [
+            "set +e",
+            f"tmux has-session -t {tmux_arg} >/dev/null 2>&1; echo tmux_alive=$?",
+            f"test -f {log_arg}; echo log_exists=$?",
+            f"test -f {status_arg}; echo status_exists=$?",
+            f"test -f {pgid_arg}; echo pgid_exists=$?",
+            f"pgid=$(head -n 1 {pgid_arg} 2>/dev/null); "
+            'if test -n "$pgid"; then kill -0 -- "-$pgid" >/dev/null 2>&1; '
+            "echo pgid_alive=$?; else echo pgid_alive=1; fi",
+            f"if test -f {status_arg}; then printf '{REMOTE_STATUS_PREFIX}'; head -n 1 {status_arg}; fi",
+            f"test -f {log_arg} && stat -c 'log_mtime=%Y log_size=%s' {log_arg}",
+            f"echo {LOG_TAIL_MARKER}",
+            f"test -f {log_arg} && tail -200 {log_arg}",
+            "true",
+        ]
+    )
+    code, stdout, stderr = ssh_capture(str(row["ssh"]), remote_command, timeout)
+    if code != 0:
+        return {
+            "observation": "unreachable",
+            "ssh_reachable": False,
+            "error": stderr.strip() or f"ssh exited {code}",
+            "failure": {
+                "category": "infra",
+                "reason": stderr.strip() or f"ssh exited {code}",
+            },
+            "progress": {"kind": "unknown_eta"},
+        }
+
+    metadata, log_tail = split_probe_output(stdout)
+    return _probe_from_parts(
+        row,
+        metadata=metadata,
+        log_tail=log_tail,
+        stderr=stderr,
+    )
+
+
+def build_batch_probe_script(run_ids: list[str]) -> str:
+    """Build one read-only remote shell script probing several current runs.
+
+    Current-format runtime paths derive from the validated run id, so the
+    script loops over ``~/.rr/<run_id>`` blocks without accepting any remote
+    path from the controller. The log tail is base64-encoded per run so
+    arbitrary workload output can never forge a block delimiter (the base64
+    alphabet has no underscores).
+    """
+
+    if not run_ids:
+        raise ValueError("batch probe requires at least one run id")
+    quoted = " ".join(shlex.quote(validate_current_run_id(run_id)) for run_id in run_ids)
+    return "\n".join(
+        [
+            "set +e",
+            f"for run_id in {quoted}; do",
+            '  runtime="$HOME/.rr/$run_id"',
+            '  log="$runtime/log"',
+            '  status="$runtime/status.json"',
+            '  pgid="$runtime/pgid"',
+            '  tmux has-session -t "=$run_id" >/dev/null 2>&1; echo "run=$run_id tmux_alive=$?"',
+            '  test -f "$log"; echo "run=$run_id log_exists=$?"',
+            '  test -f "$status"; echo "run=$run_id status_exists=$?"',
+            '  test -f "$pgid"; echo "run=$run_id pgid_exists=$?"',
+            '  pgid_value=$(head -n 1 "$pgid" 2>/dev/null)',
+            '  if test -n "$pgid_value"; then kill -0 -- "-$pgid_value" >/dev/null 2>&1; echo "run=$run_id pgid_alive=$?"; else echo "run=$run_id pgid_alive=1"; fi',
+            '  if test -f "$status"; then printf \'run=%s remote_status_json=\' "$run_id"; head -n 1 "$status"; fi',
+            '  if test -f "$log"; then',
+            '    case $(uname -s) in',
+            '      Darwin) stat -f \'log_mtime=%m log_size=%z\' "$log" ;;',
+            '      *) stat -c \'log_mtime=%Y log_size=%s\' "$log" ;;',
+            '    esac',
+            "  fi",
+            '  echo "__REMOTE_RUNNER_LOG_TAIL__ run=$run_id"',
+            '  test -f "$log" && tail -200 "$log" | base64',
+            '  echo "__REMOTE_RUNNER_LOG_END__ run=$run_id"',
+            "done",
+            "true",
+        ]
+    )
+
+
+def _split_batch_output(
+    stdout: str,
+    run_ids: list[str],
+) -> list[tuple[str, str]]:
+    """Split batched probe output into per-run (metadata, log_tail) segments.
+
+    Output order per run is: generated metadata lines, a tail-start marker,
+    base64-encoded tail lines, an end marker. Generated metadata lines are
+    prefixed with ``run=<id> `` except the stat line, which is left in the
+    same shape the single-run probe parses.
+    """
+
+    blocks: dict[str, list[str]] = {}
+    tails: dict[str, list[str]] = {}
+    current_tail_run: str | None = None
+    pending_metadata: list[str] = []
+    for line in stdout.splitlines():
+        tail_marker = BATCH_TAIL_MARKER_RE.fullmatch(line)
+        end_marker = BATCH_END_MARKER_RE.fullmatch(line)
+        if tail_marker is not None:
+            marker_run_id = tail_marker.group(1)
+            blocks[marker_run_id] = pending_metadata
+            pending_metadata = []
+            current_tail_run = marker_run_id
+            tails.setdefault(marker_run_id, [])
+            continue
+        if (
+            end_marker is not None
+            and current_tail_run is not None
+            and end_marker.group(1) == current_tail_run
+        ):
+            current_tail_run = None
+            continue
+        if current_tail_run is not None:
+            tails[current_tail_run].append(line)
+        else:
+            pending_metadata.append(line)
+
+    segments: list[tuple[str, str]] = []
+    for run_id in run_ids:
+        raw_metadata = blocks.get(run_id, [])
+        metadata_lines: list[str] = []
+        prefix = f"run={run_id} "
+        for line in raw_metadata:
+            if line.startswith(prefix):
+                line = line[len(prefix) :]
+            metadata_lines.append(line)
+        encoded = "".join(tails.get(run_id, []))
+        try:
+            tail = base64.b64decode(
+                "".join(encoded.split()), validate=True
+            ).decode("utf-8", errors="replace")
+        except ValueError:
+            tail = ""
+        segments.append(("\n".join(metadata_lines), tail))
+    return segments
+
+
+def remote_probe_many(rows: list[dict[str, Any]], timeout: int) -> list[dict[str, Any]]:
+    """Probe several current-format runs on one ssh target with one ssh call."""
+
+    if not rows:
+        return []
+    ssh = str(rows[0].get("ssh"))
+    run_ids: list[str] = []
+    for row in rows:
+        if row.get("registry_kind") != "current" or not isinstance(ssh, str) or not ssh:
+            raise ValueError("batch probe requires current rows on one ssh target")
+        if str(row.get("ssh")) != ssh:
+            raise ValueError("batch probe rows must share one ssh target")
+        run_ids.append(str(row["run_id"]))
+    code, stdout, stderr = ssh_capture(ssh, build_batch_probe_script(run_ids), timeout)
+    if code != 0:
+        detail = stderr.strip() or f"ssh exited {code}"
+        return [
+            {
+                "observation": "unreachable",
+                "ssh_reachable": False,
+                "error": detail,
+                "failure": {"category": "infra", "reason": detail},
+                "progress": {"kind": "unknown_eta"},
+            }
+            for _row in rows
+        ]
+    segments = _split_batch_output(stdout, run_ids)
+    return [
+        _probe_from_parts(
+            row,
+            metadata=metadata,
+            log_tail=log_tail,
+            stderr=stderr,
+        )
+        for row, (metadata, log_tail) in zip(rows, segments, strict=True)
+    ]
 
 
 def reconcile_current(
@@ -606,6 +768,7 @@ def monitor_row(
     timeout: int,
     *,
     no_write: bool,
+    probe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if row.get("observation") == "unsupported":
         return row
@@ -617,7 +780,8 @@ def monitor_row(
         cached["observation"] = row["authoritative_status"]
         cached["observation_source"] = "local_terminal"
         return cached
-    probe = remote_probe(row, timeout)
+    if probe is None:
+        probe = remote_probe(row, timeout)
     combined = dict(row)
     combined.update(probe)
     if row.get("registry_kind") == "current" and not no_write:
@@ -629,6 +793,17 @@ def monitor_row(
     return combined
 
 
+def _needs_probe(row: dict[str, Any]) -> bool:
+    if row.get("observation") == "unsupported":
+        return False
+    if (
+        row.get("registry_kind") == "current"
+        and row.get("authoritative_status") in TERMINAL_STATUSES
+    ):
+        return False
+    return True
+
+
 def monitor_rows(
     paths: ProjectPaths,
     rows: list[dict[str, Any]],
@@ -637,9 +812,9 @@ def monitor_rows(
     no_write: bool,
     isolate_errors: bool = False,
 ) -> list[dict[str, Any]]:
-    def monitor(row: dict[str, Any]) -> dict[str, Any]:
+    def monitor(row: dict[str, Any], probe: dict[str, Any] | None) -> dict[str, Any]:
         try:
-            return monitor_row(paths, row, timeout, no_write=no_write)
+            return monitor_row(paths, row, timeout, no_write=no_write, probe=probe)
         except Exception as exc:
             if not isolate_errors:
                 raise
@@ -649,10 +824,61 @@ def monitor_rows(
             return failed
 
     if len(rows) <= 1:
-        return [monitor(row) for row in rows]
-    workers = min(MAX_MONITOR_WORKERS, len(rows))
+        return [monitor(row, None) for row in rows]
+
+    # Current-format rows on the same ssh target share one probe call per
+    # cycle; legacy/v2 rows keep the single-run probe (their remote paths are
+    # not derivable from the run id).
+    groups: dict[str, list[dict[str, Any]]] = {}
+    singles: list[dict[str, Any]] = []
+    for row in rows:
+        if not _needs_probe(row):
+            continue
+        ssh = row.get("ssh")
+        if row.get("registry_kind") == "current" and isinstance(ssh, str) and ssh:
+            groups.setdefault(ssh, []).append(row)
+        else:
+            singles.append(row)
+
+    units: list[list[dict[str, Any]]] = [*groups.values(), *[[row] for row in singles]]
+
+    def probe_unit(
+        unit: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        try:
+            if len(unit) > 1:
+                return unit, remote_probe_many(unit, timeout)
+            return unit, [remote_probe(unit[0], timeout)]
+        except Exception as exc:
+            if not isolate_errors:
+                raise
+            return unit, [
+                {
+                    "observation": "unknown",
+                    "error": f"monitor failed for this run: {exc}",
+                    "progress": {"kind": "unknown_eta"},
+                }
+                for _row in unit
+            ]
+
+    workers = min(MAX_MONITOR_WORKERS, len(units))
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        return list(executor.map(monitor, rows))
+        probed_units = list(executor.map(probe_unit, units))
+
+    probes_by_id: dict[int, dict[str, Any]] = {}
+    for unit, probes in probed_units:
+        for row, probe in zip(unit, probes, strict=True):
+            probes_by_id[id(row)] = probe
+
+    # The reconcile pass stays per run (it may write state), but runs
+    # concurrently exactly like the pre-batching implementation.
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(
+            executor.map(
+                lambda row: monitor(row, probes_by_id.get(id(row))),
+                rows,
+            )
+        )
 
 
 def summarize(rows: list[dict[str, Any]]) -> str:

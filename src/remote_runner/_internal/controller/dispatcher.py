@@ -32,6 +32,7 @@ from .registry import (
     LeaseOwnership,
     acquire_dispatch_lease,
     controller_paths,
+    dispatch_lease_authority_gone,
     eligible_prepared_servers,
     has_unexpired_dispatch_lease,
     list_drained_servers,
@@ -1356,13 +1357,42 @@ def _reconcile_dispatching_jobs(paths: ControllerPaths) -> DispatchOutcome | Non
 
 def _reconcile_owned_dispatch_leases(paths: ControllerPaths, *, timeout: int) -> None:
     leases = list_owned_dispatch_leases(paths)
-    if not leases or not paths.config_path.is_file():
+    if not leases:
         return
-    execution_paths = project_paths(paths.config_path)
+    execution_paths = (
+        project_paths(paths.config_path) if paths.config_path.is_file() else None
+    )
     for lease in leases:
         run_id = str(lease["run_id"])
-        if registry_kind(execution_paths, run_id) != "current":
+        kind = (
+            None
+            if execution_paths is None
+            else registry_kind(execution_paths, run_id)
+        )
+        if (
+            kind is None
+            and float(lease["expires_at"]) <= time.time()
+            and dispatch_lease_authority_gone(
+                paths,
+                project_id=str(lease["project_id"]),
+                run_id=run_id,
+            )
+        ):
+            release_dispatch_lease(
+                paths,
+                server=str(lease["server"]),
+                machine_id=str(lease["machine_id"]),
+                run_id=run_id,
+                owner_token=(
+                    str(lease["owner_token"])
+                    if lease.get("owner_token") is not None
+                    else None
+                ),
+            )
             continue
+        if kind != "current":
+            continue
+        assert execution_paths is not None
         _manifest, state = load_current_run(execution_paths, run_id)
         should_release = state["status"] != "registered"
         if not should_release:
@@ -1657,40 +1687,50 @@ def dispatch_loop(
     if interval_seconds <= 0:
         raise ValueError("dispatcher interval must be positive")
     while True:
-        active = False
-        if paths.config_path.is_file():
-            execution_paths = project_paths(paths.config_path)
-            rows = [
-                row
-                for row in monitoring.load_registry_rows(execution_paths)
-                if row.get("registry_kind") == "current"
-            ]
-            for monitored in monitoring.monitor_rows(
-                execution_paths,
-                rows,
-                timeout,
-                no_write=False,
-            ):
-                if monitored.get("authoritative_status") not in TERMINAL_STATUSES:
-                    active = True
-        while True:
-            outcomes = dispatch_batch(paths, timeout=timeout)
-            started = any(outcome.action == "started" for outcome in outcomes)
-            if not started:
-                break
-            active = True
         try:
-            ensure_output_sync_worker(
-                paths,
-                timeout=timeout,
-                interval=interval_seconds,
-            )
+            active = False
+            if paths.config_path.is_file():
+                execution_paths = project_paths(paths.config_path)
+                rows = [
+                    row
+                    for row in monitoring.load_registry_rows(execution_paths)
+                    if row.get("registry_kind") == "current"
+                ]
+                for monitored in monitoring.monitor_rows(
+                    execution_paths,
+                    rows,
+                    timeout,
+                    no_write=False,
+                    isolate_errors=True,
+                ):
+                    if monitored.get("authoritative_status") not in TERMINAL_STATUSES:
+                        active = True
+            while True:
+                outcomes = dispatch_batch(paths, timeout=timeout)
+                started = any(outcome.action == "started" for outcome in outcomes)
+                if not started:
+                    break
+                active = True
+            try:
+                ensure_output_sync_worker(
+                    paths,
+                    timeout=timeout,
+                    interval=interval_seconds,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(
+                    f"output-sync worker start failed: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if any(outcome.action == "idle" for outcome in outcomes) and not active:
+                return 0
         except (OSError, RuntimeError, ValueError) as exc:
             print(
-                f"output-sync worker start failed: {exc}", file=sys.stderr, flush=True
+                f"[remote-runner dispatcher] cycle failed: {exc}",
+                file=sys.stderr,
+                flush=True,
             )
-        if any(outcome.action == "idle" for outcome in outcomes) and not active:
-            return 0
         time.sleep(interval_seconds)
 
 

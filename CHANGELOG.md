@@ -3,6 +3,32 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## 0.9.5 - 2026-08-14
+
+### Performance
+
+- Batched controller monitoring probes per compute server: current-format runs
+  on the same SSH target share one probe call per cycle instead of one SSH
+  session per run, and the batch probe uses a portable stat fallback so log
+  telemetry also works on BSD/macOS compute hosts.
+- Parallelized revision fan-out: `prepare_revision` now pushes and verifies
+  reachable servers concurrently (bounded worker pool) while preserving input
+  order and partial-failure collection.
+
+### Fixed
+
+- Released expired dispatch leases whose owning queue and execution records are both
+  gone. A lease in that state cannot protect any authorized live workload, so it is
+  now cleaned during lease acquisition, by the owning dispatcher's reconciliation,
+  and by release activation instead of permanently pinning a machine or blocking
+  controller upgrades. Leases with remaining owner records keep their durable
+  fail-closed behavior.
+- Made the controller dispatcher and output-sync worker loops survive per-cycle
+  failures: single-run monitoring errors are isolated, and cycle errors are logged
+  and retried after the configured interval instead of killing the worker session.
+- Bounded output-sync transfers with a hard timeout. A stuck transfer is recorded as
+  retryable and no longer stalls every other pending synchronization.
+
 ## 0.9.4 - 2026-08-12
 
 ### Added

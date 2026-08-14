@@ -45,7 +45,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.4'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.5'
 remote-runner --help
 ```
 
@@ -70,7 +70,10 @@ uv run pytest -q
 `web` extra 是可选的。核心生命周期命令只依赖 PyYAML。
 
 激活这次边界变更后的 controller release 时，会在阻止 dispatch lease 并停止
-controller worker 后执行一次历史状态迁移。旧实验 registry 的字节会原子移出
+controller worker 后执行一次历史状态迁移。queue 记录与执行记录都已不存在的过期
+dispatch lease 会先被释放——purge 只允许删除 terminal 执行记录，因此这类 lease
+不可能还保护着仍在运行的授权 workload；其余 lease 仍然阻止激活。旧实验 registry
+的字节会原子移出
 活跃项目状态，保存到
 `<controller-root>/retired-state/experiment-registry-v1/<project-id>`。旧 schema-1
 pending output-sync intent 只有在 run ID、终态 execution record、revision、server、

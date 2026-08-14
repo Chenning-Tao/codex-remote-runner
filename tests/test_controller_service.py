@@ -948,7 +948,7 @@ def test_status_filters_queue_and_runs_by_normalized_task_id(
     monkeypatch.setattr(
         monitoring,
         "monitor_row",
-        lambda _paths, row, _timeout, *, no_write: (
+        lambda _paths, row, _timeout, *, no_write, probe=None: (
             monitored.append(str(row["run_id"])) or row
         ),
     )
@@ -1131,7 +1131,7 @@ def test_status_defaults_to_active_records_with_complete_summary(
     monkeypatch.setattr(
         monitoring,
         "monitor_row",
-        lambda _paths, row, _timeout, *, no_write: (
+        lambda _paths, row, _timeout, *, no_write, probe=None: (
             monitored.append(str(row["run_id"])) or row
         ),
     )

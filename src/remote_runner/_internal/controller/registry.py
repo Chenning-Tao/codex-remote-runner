@@ -19,6 +19,8 @@ from typing import Any
 from ..execution_registry import (
     generate_run_id,
     load_yaml,
+    project_paths,
+    registry_kind,
     sha256_bytes,
     utc_now,
     validate_current_run_id,
@@ -2162,6 +2164,43 @@ def load_server_lease(lease_path: Path) -> dict[str, Any]:
     }
 
 
+def dispatch_lease_authority_gone(
+    paths: ControllerPaths,
+    *,
+    project_id: str,
+    run_id: str,
+    kind: str = "dispatch",
+) -> bool:
+    """Report whether a dispatch lease's owning project and run records are gone.
+
+    A lease whose queue record and execution record no longer exist can be
+    released safely: purge only removes terminal execution records, and a
+    terminal record means no authorized live workload remains on the machine.
+    Unknown-launch outcomes keep a non-terminal ``registered`` execution
+    record, so this rule never converts transport ambiguity into release
+    authority. Any resolution failure fails closed (authority still present).
+    """
+
+    if kind != "dispatch":
+        return False
+    try:
+        owner_paths = controller_paths(paths.root, project_id)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    try:
+        queue_gone = not _queue_entry_dir(owner_paths, run_id).is_dir()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if not queue_gone:
+        return False
+    if not owner_paths.config_path.is_file():
+        return True
+    try:
+        return registry_kind(project_paths(owner_paths.config_path), run_id) is None
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _acquire_server_lease(
     paths: ControllerPaths,
     *,
@@ -2213,7 +2252,16 @@ def _acquire_server_lease(
             durable_dispatch = existing["kind"] == "dispatch"
             if expires_at > timestamp:
                 return None
-            if durable_dispatch and not same_owner:
+            if (
+                durable_dispatch
+                and not same_owner
+                and not dispatch_lease_authority_gone(
+                    paths,
+                    project_id=str(existing["project_id"]),
+                    run_id=str(existing["run_id"]),
+                    kind=str(existing["kind"]),
+                )
+            ):
                 return None
             stale_paths.append(existing_path)
         for stale_path in stale_paths:

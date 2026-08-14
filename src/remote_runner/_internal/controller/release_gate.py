@@ -26,7 +26,9 @@ from .registry import (
     ControllerPaths,
     controller_paths,
     controller_scheduler_paths,
+    dispatch_lease_authority_gone,
     load_server_lease,
+    release_dispatch_lease,
     scheduler_lock,
 )
 
@@ -44,6 +46,7 @@ class ActiveLease:
     run_id: str
     expires_at: float
     heartbeat_expired: bool
+    owner_token: str | None = None
 
 
 def _project_ids(controller_root: Path) -> list[str]:
@@ -81,6 +84,11 @@ def _active_leases(
                     run_id=str(lease["run_id"]),
                     expires_at=expires_at,
                     heartbeat_expired=expires_at <= timestamp,
+                    owner_token=(
+                        str(lease["owner_token"])
+                        if lease.get("owner_token") is not None
+                        else None
+                    ),
                 )
             )
 
@@ -133,7 +141,14 @@ def inspect_release_gate(
     return {
         "revision": SOURCE_REVISION,
         "projects": project_ids,
-        "active_leases": [lease.__dict__ for lease in leases],
+        "active_leases": [
+            {
+                key: value
+                for key, value in lease.__dict__.items()
+                if key != "owner_token"
+            }
+            for lease in leases
+        ],
         "controller_global_cli": _optional_executable_receipt(global_cli),
         "controller_private_current": _optional_executable_receipt(current_cli),
     }
@@ -405,6 +420,42 @@ def _activate_runtime_links(
     return previous, global_receipt, private_receipt
 
 
+def _release_authority_gone_dispatch_leases(
+    root: Path,
+    leases: list[ActiveLease],
+) -> list[ActiveLease]:
+    """Release expired dispatch leases whose owning project and run records are gone.
+
+    Purge only ever removes terminal execution records, and a terminal record
+    means no authorized live workload remains, so those leases cannot protect
+    anything anymore. Every other lease keeps blocking activation.
+    """
+
+    released: list[ActiveLease] = []
+    for lease in leases:
+        if not lease.heartbeat_expired:
+            continue
+        try:
+            owner_paths = controller_paths(root, lease.project_id)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not dispatch_lease_authority_gone(
+            owner_paths,
+            project_id=lease.project_id,
+            run_id=lease.run_id,
+        ):
+            continue
+        release_dispatch_lease(
+            owner_paths,
+            server=lease.server,
+            machine_id=lease.machine_id,
+            run_id=lease.run_id,
+            owner_token=lease.owner_token,
+        )
+        released.append(lease)
+    return released
+
+
 def activate_release(
     controller_root: Path,
     revision: str,
@@ -425,6 +476,13 @@ def activate_release(
         raise ValueError("staged controller release revision receipt does not match")
 
     project_ids = _project_ids(root)
+    # Clean expired dispatch leases whose queue and execution records are both
+    # gone. Each release is token-guarded and lock-serialized internally, so a
+    # concurrent owner recovery can never lose its freshly fenced lease; the
+    # authoritative active-lease check below still runs under the scheduler lock.
+    released_orphaned_leases = _release_authority_gone_dispatch_leases(
+        root, _active_leases(root)
+    )
     with scheduler_lock(root):
         leases = _active_leases(root)
         if leases:
@@ -451,6 +509,14 @@ def activate_release(
         "stopped_output_sync_workers": stopped["output_sync_workers"],
         "state_migrations": migrations,
         "projects": project_ids,
+        "released_orphaned_dispatch_leases": [
+            {
+                key: value
+                for key, value in lease.__dict__.items()
+                if key != "owner_token"
+            }
+            for lease in released_orphaned_leases
+        ],
         "controller_global_cli": global_receipt,
         "controller_private_current": private_receipt,
     }
