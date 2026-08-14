@@ -67,6 +67,20 @@ overlap detection, terminal authority, and server maintenance leases.
 A minimal internal run-ID tombstone may prevent replay or ID reuse. It contains no
 replacement or scientific provenance and is invisible to status, Web, and run views.
 
+## Dispatch Lease Recovery
+
+Dispatch leases are durable: an expired lease whose owner project or run records still
+exist keeps blocking acquisition for every project and blocks controller release
+activation, because a crashed dispatch may have started an unknown live workload.
+The owning dispatcher reconciles such leases when it next runs.
+
+A lease whose owning queue record and execution record are both gone can no longer
+protect any authorized live workload: purge only removes terminal execution records,
+and terminal records mean the remote workload already ended. Such orphaned leases are
+released during lease acquisition, by the owning project's reconciliation, and during
+release activation. Unknown-launch outcomes keep a non-terminal `registered` execution
+record, so transport ambiguity is never converted into lease release authority.
+
 ## Output Synchronization
 
 Every terminal run with a declared output path may enqueue transfer, including
@@ -79,13 +93,18 @@ changes execution status and never declares scientific validity, eligibility, or
 official result. Pruning source output requires a matching completed receipt and keeps
 the archive plus run history.
 
+Each transfer is bounded by a hard timeout. A stuck transfer is recorded as retryable
+and does not stall other pending synchronizations; controller worker cycles survive
+per-cycle errors and retry after the configured interval.
+
 ## Boundary Migration
 
 The controller release that removes experiment management performs one bounded,
-idempotent migration during activation. With dispatch leases excluded and controller
-workers stopped, it moves the legacy experiment registry as opaque bytes into private
-controller `retired-state` storage. Normal status, Web, run views, and model-facing
-context never read that archive.
+idempotent migration during activation. Orphaned dispatch leases with no remaining
+owner records are released first; any other dispatch lease still blocks activation.
+With controller workers stopped, the migration moves the legacy experiment registry
+as opaque bytes into private controller `retired-state` storage. Normal status, Web,
+run views, and model-facing context never read that archive.
 The move holds the legacy registry lock and leaves a minimal private retirement
 marker at the former path, preventing an in-flight old binary from resurrecting the
 removed subsystem. Normal controller readers never expose the marker.

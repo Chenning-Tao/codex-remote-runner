@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -507,3 +508,59 @@ def test_controller_host_does_not_start_worker_while_sync_is_paused(
         )
         is False
     )
+
+
+def test_invoke_target_has_a_hard_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = sync_config()
+    intent = {
+        "run_id": RUN_ID,
+        "source_server": "compute-b",
+        "source_path": "/srv/project/output/run",
+        "revision": "a" * 40,
+        "task_id": "task-1",
+        "label": "sync-test",
+        "output_metadata": {},
+        "authoritative_status": "succeeded",
+        "terminal_at": "2026-07-22T00:00:00Z",
+    }
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **_kwargs):
+        captured["argv"] = argv
+        captured["timeout"] = _kwargs.get("timeout")
+        raise subprocess.TimeoutExpired(list(argv), 428)
+
+    monkeypatch.setattr(output_sync.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        output_sync.invoke_target(config, intent, connect_timeout=8)
+
+    assert captured["timeout"] == 8 + output_sync.SYNC_TARGET_BUDGET_SECONDS
+
+
+def test_timeout_error_marks_intent_retryable_without_removing_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _config, paths = make_run(tmp_path)
+    mark_succeeded(paths)
+    intent_path = (
+        output_sync.output_sync_paths(paths.registry_root).pending_dir
+        / f"{RUN_ID}.json"
+    )
+    assert intent_path.is_file()
+
+    def stuck(_config, _intent, *, connect_timeout):
+        raise RuntimeError("archive output-sync worker timed out after 428s")
+
+    monkeypatch.setattr(output_sync, "invoke_target", stuck)
+
+    result = output_sync.process_pending_once(paths, connect_timeout=8)
+
+    assert result["retryable"] == 1
+    assert intent_path.is_file()
+    attempt = output_sync._attempt_state(paths.registry_root, RUN_ID)
+    assert attempt["status"] == "retryable"
+    assert "timed out" in attempt["last_error"]

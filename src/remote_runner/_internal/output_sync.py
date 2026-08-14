@@ -21,6 +21,9 @@ RUN_ID_RE = re.compile(r"^rr-[0-9a-f]{16}$")
 SERVER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 CONFIG_SCHEMA = 1
 INTENT_SCHEMA = 2
+# The remote rsync uses --timeout=300; this budget adds SSH setup and Python
+# startup margin so a stuck sync can never hang the worker indefinitely.
+SYNC_TARGET_BUDGET_SECONDS = 420
 
 PURGE_TARGET_PROGRAM = r"""import json
 import re
@@ -626,28 +629,38 @@ def invoke_target(
             "-",
         )
     )
-    completed = subprocess.run(
-        [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            f"ConnectTimeout={connect_timeout}",
-            "-o",
-            "ServerAliveInterval=30",
-            "-o",
-            "ServerAliveCountMax=3",
-            config.target_ssh,
-            remote_command,
-        ],
-        input=_remote_program(),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    # The remote rsync uses --timeout=300; bound the whole invocation so one
+    # hung sync can never stall the worker (and every other pending intent).
+    overall_timeout = connect_timeout + SYNC_TARGET_BUDGET_SECONDS
+    try:
+        completed = subprocess.run(
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                f"ConnectTimeout={connect_timeout}",
+                "-o",
+                "ServerAliveInterval=30",
+                "-o",
+                "ServerAliveCountMax=3",
+                config.target_ssh,
+                remote_command,
+            ],
+            input=_remote_program(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=overall_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"{config.target_server} output-sync worker timed out after "
+            f"{exc.timeout}s"
+        ) from exc
     lines = [line for line in completed.stdout.splitlines() if line.strip()]
     try:
         result = json.loads(lines[-1]) if lines else None

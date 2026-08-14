@@ -80,6 +80,9 @@ The `web` extra is optional. Core lifecycle commands only require PyYAML.
 
 Activating this boundary-changing controller release performs a one-time state
 migration while dispatch leases are blocked and controller workers are stopped.
+Expired dispatch leases whose owning queue and execution records are both gone are
+released first, since purge only removes terminal execution records and no
+authorized live workload can remain; every other lease still blocks activation.
 Legacy experiment-registry bytes move atomically out of active project state to
 `<controller-root>/retired-state/experiment-registry-v1/<project-id>`. Pending
 schema-1 output-sync intents are rewritten to the transport-only schema only after

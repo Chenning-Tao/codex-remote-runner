@@ -99,36 +99,58 @@ def run_worker(
         return 0
     execution_paths = project_paths(paths.config_path)
     while True:
-        result = process_pending_once(execution_paths, connect_timeout=timeout)
-        config = load_config(execution_paths.registry_root)
-        if config is not None and not config.paused and config.prune_source_servers:
-            result["prune_after_sync"] = prune_outputs(
-                argparse.Namespace(
-                    controller_root=paths.root,
-                    project_id=paths.project_id,
-                    run_id=None,
-                    server=list(config.prune_source_servers),
-                    apply=True,
-                    timeout=timeout,
+        config = None
+        try:
+            result = process_pending_once(execution_paths, connect_timeout=timeout)
+            config = load_config(execution_paths.registry_root)
+            if config is not None and not config.paused and config.prune_source_servers:
+                result["prune_after_sync"] = prune_outputs(
+                    argparse.Namespace(
+                        controller_root=paths.root,
+                        project_id=paths.project_id,
+                        run_id=None,
+                        server=list(config.prune_source_servers),
+                        apply=True,
+                        timeout=timeout,
+                    )
                 )
-            )
-        else:
-            result["prune_after_sync"] = {
-                "applied": False,
-                "servers": [],
-                "candidate_count": 0,
-                "pruned_count": 0,
-                "failed_count": 0,
+            else:
+                result["prune_after_sync"] = {
+                    "applied": False,
+                    "servers": [],
+                    "candidate_count": 0,
+                    "pruned_count": 0,
+                    "failed_count": 0,
+                }
+        except (OSError, RuntimeError, ValueError) as exc:
+            # A corrupted intent, transport error, or transient storage failure
+            # must not kill the worker. Report it and retry after the delay;
+            # remaining=1 assumes work may still exist so the loop stays alive.
+            result = {
+                "status": "worker_error",
+                "error": str(exc),
+                "enabled": True,
+                "remaining": 1,
             }
         print(json.dumps(result, sort_keys=True), flush=True)
-        prune_remaining = (
-            config is not None
-            and not config.paused
-            and has_unpruned_completed_syncs(
-                execution_paths.registry_root,
-                config.prune_source_servers,
+        prune_remaining = False
+        try:
+            config = load_config(execution_paths.registry_root)
+            prune_remaining = (
+                config is not None
+                and not config.paused
+                and has_unpruned_completed_syncs(
+                    execution_paths.registry_root,
+                    config.prune_source_servers,
+                )
             )
-        )
+        except (OSError, RuntimeError, ValueError) as exc:
+            prune_remaining = True
+            print(
+                f"[remote-runner output-sync worker] prune state unreadable: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
         if (
             once
             or not result.get("enabled")
