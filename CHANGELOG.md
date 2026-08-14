@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
-## Unreleased
+## 0.9.5 - 2026-08-14
 
 ### Performance
 
