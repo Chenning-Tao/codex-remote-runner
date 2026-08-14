@@ -4,6 +4,7 @@ import re
 import shlex
 import subprocess
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -282,6 +283,61 @@ def _git_with_managed_ssh(timeout: int) -> list[str]:
     return ["git", "-c", f"core.sshCommand={ssh_command}"]
 
 
+MAX_PREPARE_WORKERS = 8
+
+
+def _prepare_target(
+    source_repo: Path,
+    ref: str,
+    revision: str,
+    target: DeploymentTarget,
+    *,
+    timeout: int,
+    runner: CommandRunner,
+) -> tuple[PreparedServer | None, PreparationFailure | None]:
+    try:
+        _checked(
+            runner,
+            [
+                *_git_with_managed_ssh(timeout),
+                "-C",
+                str(source_repo),
+                "push",
+                "--porcelain",
+                target.remote_url,
+                f"{revision}:{ref}",
+            ],
+            timeout=timeout,
+        )
+        listed = _checked(
+            runner,
+            [
+                *_git_with_managed_ssh(timeout),
+                "ls-remote",
+                "--exit-code",
+                target.remote_url,
+                ref,
+            ],
+            timeout=timeout,
+        )
+        fields = listed.split()
+        if len(fields) != 2 or fields[0] != revision or fields[1] != ref:
+            raise RuntimeError(
+                f"remote ref verification mismatch for {target.name}: {listed!r}"
+            )
+        return (
+            PreparedServer(
+                name=target.name,
+                remote_url=target.remote_url,
+                ref=ref,
+                revision=revision,
+            ),
+            None,
+        )
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        return None, PreparationFailure(name=target.name, error=str(exc))
+
+
 def prepare_revision(
     source_repo: Path,
     *,
@@ -302,50 +358,37 @@ def prepare_revision(
     else:
         _verified_revisions(source_repo, (revision,), runner=runner)
     ref = runner_ref(project_id, revision)
-    prepared: list[PreparedServer] = []
-    failures: list[PreparationFailure] = []
 
-    for target in targets:
-        try:
-            _checked(
-                runner,
-                [
-                    *_git_with_managed_ssh(timeout),
-                    "-C",
-                    str(source_repo),
-                    "push",
-                    "--porcelain",
-                    target.remote_url,
-                    f"{revision}:{ref}",
-                ],
+    if len(targets) <= 1:
+        results = [
+            _prepare_target(
+                source_repo,
+                ref,
+                revision,
+                target,
                 timeout=timeout,
+                runner=runner,
             )
-            listed = _checked(
-                runner,
-                [
-                    *_git_with_managed_ssh(timeout),
-                    "ls-remote",
-                    "--exit-code",
-                    target.remote_url,
-                    ref,
-                ],
-                timeout=timeout,
-            )
-            fields = listed.split()
-            if len(fields) != 2 or fields[0] != revision or fields[1] != ref:
-                raise RuntimeError(
-                    f"remote ref verification mismatch for {target.name}: {listed!r}"
-                )
-            prepared.append(
-                PreparedServer(
-                    name=target.name,
-                    remote_url=target.remote_url,
-                    ref=ref,
-                    revision=revision,
+            for target in targets
+        ]
+    else:
+        workers = min(MAX_PREPARE_WORKERS, len(targets))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(
+                executor.map(
+                    lambda target: _prepare_target(
+                        source_repo,
+                        ref,
+                        revision,
+                        target,
+                        timeout=timeout,
+                        runner=runner,
+                    ),
+                    targets,
                 )
             )
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-            failures.append(PreparationFailure(name=target.name, error=str(exc)))
+    prepared = [item for item, _failure in results if item is not None]
+    failures = [failure for _item, failure in results if failure is not None]
 
     if explicit_server is not None:
         if len(targets) != 1 or targets[0].name != explicit_server:

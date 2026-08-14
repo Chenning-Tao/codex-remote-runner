@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sys
 from pathlib import Path
@@ -124,8 +125,9 @@ def run_probe(
 def test_monitor_rows_runs_concurrently_and_preserves_order(monkeypatch) -> None:
     started = Barrier(2)
 
-    def monitor_row(_paths, item, _timeout, *, no_write):
+    def monitor_row(_paths, item, _timeout, *, no_write, probe=None):
         assert no_write is False
+        assert probe is not None
         started.wait(timeout=1)
         return {**item, "observation": "running"}
 
@@ -859,3 +861,153 @@ def test_main_rejects_run_and_task_selectors_together() -> None:
         cli.main(["monitor", "--run-id", RUN_ID, "--task-id", "07-18-example"])
     with pytest.raises(SystemExit):
         cli.main(["monitor", "--all"])
+
+
+OTHER_RUN_ID = "rr-fedcba9876543210"
+
+
+def test_batch_probe_script_covers_every_run_with_uname_branch() -> None:
+    script = monitoring.build_batch_probe_script([RUN_ID, OTHER_RUN_ID])
+
+    assert f"for run_id in {RUN_ID} {OTHER_RUN_ID}; do" in script
+    assert script.count('echo "__REMOTE_RUNNER_LOG_TAIL__ run=$run_id"') == 1
+    assert script.count('echo "__REMOTE_RUNNER_LOG_END__ run=$run_id"') == 1
+    assert "case $(uname -s)" in script
+    assert "Darwin) stat -f 'log_mtime=%m log_size=%z'" in script
+    assert "stat -c 'log_mtime=%Y log_size=%s'" in script
+    assert "| base64" in script
+
+
+def test_batch_probe_script_rejects_invalid_run_ids() -> None:
+    with pytest.raises(ValueError):
+        monitoring.build_batch_probe_script(["not-a-run-id"])
+
+
+def batch_probe_text(
+    run_id: str,
+    log: str = "",
+    *,
+    tmux_alive: bool = False,
+    pgid_alive: bool = False,
+    log_exists: bool = True,
+    status: dict[str, object] | str | None = None,
+) -> str:
+    lines = [
+        f"run={run_id} tmux_alive={0 if tmux_alive else 1}",
+        f"run={run_id} log_exists={0 if log_exists else 1}",
+        f"run={run_id} status_exists={0 if status is not None else 1}",
+        f"run={run_id} pgid_exists=0",
+        f"run={run_id} pgid_alive={0 if pgid_alive else 1}",
+    ]
+    if status is not None:
+        encoded = (
+            status
+            if isinstance(status, str)
+            else json.dumps(status, separators=(",", ":"))
+        )
+        lines.append(f"run={run_id} remote_status_json={encoded}")
+    if log_exists:
+        lines.append("log_mtime=1783828420 log_size=1234")
+    lines.append(f"__REMOTE_RUNNER_LOG_TAIL__ run={run_id}")
+    if log:
+        lines.extend(base64.b64encode(log.encode()).decode().split("\n"))
+    lines.append(f"__REMOTE_RUNNER_LOG_END__ run={run_id}")
+    return "\n".join(lines)
+
+
+def test_batch_probe_matches_single_run_probe_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = "experiment line\n[SUCCESS] done\n"
+    status = {"schema_version": 1, "run_id": RUN_ID, "state": "running", "exit_code": None}
+    single = run_probe(monkeypatch, probe_text(log, tmux_alive=True, status=status))
+    monkeypatch.setattr(
+        monitoring,
+        "ssh_capture",
+        lambda *_args, **_kwargs: (
+            0,
+            batch_probe_text(RUN_ID, log, tmux_alive=True, status=status),
+            "",
+        ),
+    )
+    batched = monitoring.remote_probe_many([row()], timeout=1)[0]
+
+    assert batched == single
+
+
+def test_batch_probe_terminal_status_matches_single_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = {"schema_version": 1, "run_id": RUN_ID, "state": "succeeded", "exit_code": 0}
+    single = run_probe(monkeypatch, probe_text(status=status))
+    monkeypatch.setattr(
+        monitoring,
+        "ssh_capture",
+        lambda *_args, **_kwargs: (0, batch_probe_text(RUN_ID, status=status), ""),
+    )
+    batched = monitoring.remote_probe_many([row()], timeout=1)[0]
+
+    assert batched["observation"] == "succeeded"
+    assert batched == single
+
+
+def test_batch_probe_group_failure_marks_all_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        monitoring, "ssh_capture", lambda *_args, **_kwargs: (255, "", "boom")
+    )
+    rows = [row(), dict(row(), run_id=OTHER_RUN_ID)]
+
+    probes = monitoring.remote_probe_many(rows, timeout=1)
+
+    assert [item["observation"] for item in probes] == ["unreachable", "unreachable"]
+    assert all(item["ssh_reachable"] is False for item in probes)
+
+
+def test_batch_probe_rejects_mixed_ssh_targets() -> None:
+    with pytest.raises(ValueError, match="share one ssh target"):
+        monitoring.remote_probe_many(
+            [row(), dict(row(), run_id=OTHER_RUN_ID, ssh="other")],
+            timeout=1,
+        )
+
+
+def test_monitor_rows_batches_current_runs_by_ssh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, int] = {}
+    batched_rows: list[list[dict[str, object]]] = []
+
+    def fake_many(rows, _timeout):
+        calls["many"] = calls.get("many", 0) + 1
+        batched_rows.append(list(rows))
+        return [
+            {"observation": "running", "progress": {"kind": "unknown_eta"}}
+            for _row in rows
+        ]
+
+    def fake_single(_row, _timeout):
+        calls["single"] = calls.get("single", 0) + 1
+        return {"observation": "running", "progress": {"kind": "unknown_eta"}}
+
+    monkeypatch.setattr(monitoring, "remote_probe_many", fake_many)
+    monkeypatch.setattr(monitoring, "remote_probe", fake_single)
+    rows = [
+        row("current", "running"),
+        dict(row("current", "running"), run_id="rr-1111111111111111"),
+        dict(row("current", "running"), run_id="rr-2222222222222222"),
+        row("legacy", None),
+    ]
+
+    results = monitoring.monitor_rows(None, rows, 1, no_write=True, isolate_errors=True)
+
+    assert [item["run_id"] for item in results] == [
+        item["run_id"] for item in rows
+    ]
+    assert calls == {"many": 1, "single": 1}
+    assert [item["run_id"] for item in batched_rows[0]] == [
+        rows[0]["run_id"],
+        rows[1]["run_id"],
+        rows[2]["run_id"],
+    ]
