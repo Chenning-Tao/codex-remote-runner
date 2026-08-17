@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- Kept dispatcher monitoring cycles running when all current runs are already
+  terminal, avoiding an empty monitor worker pool that otherwise blocked queued
+  jobs from reaching dispatch.
+
 ## 0.9.5 - 2026-08-14
 
 ### Performance

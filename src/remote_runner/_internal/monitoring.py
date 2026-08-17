@@ -842,6 +842,9 @@ def monitor_rows(
 
     units: list[list[dict[str, Any]]] = [*groups.values(), *[[row] for row in singles]]
 
+    if not units:
+        return [monitor(row, None) for row in rows]
+
     def probe_unit(
         unit: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
