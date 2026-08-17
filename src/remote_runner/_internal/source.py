@@ -204,6 +204,45 @@ def _linked_worktrees(
     return tuple(dict.fromkeys(worktrees))
 
 
+def resolve_source_repo(
+    configured_repo: Path,
+    override: Path | None,
+    *,
+    start: Path | None = None,
+    runner: CommandRunner = _run,
+) -> Path:
+    """Prefer the calling linked worktree over the configured primary checkout.
+
+    An explicit source is always authoritative. Without one, a command running in a
+    linked worktree of the configured repository must not silently upload the
+    primary checkout named by an ignored project config.
+    """
+
+    if override is not None:
+        if not override.is_absolute():
+            raise ValueError("--source-repo must be an absolute path")
+        return override.expanduser().resolve()
+
+    configured = configured_repo.expanduser().resolve()
+    current = (start or Path.cwd()).expanduser().resolve()
+    try:
+        top = Path(
+            _checked(
+                runner,
+                ["git", "-C", str(current), "rev-parse", "--show-toplevel"],
+            )
+        ).resolve()
+        if top == configured:
+            return configured
+        if _git_common_dir(top, runner=runner) != _git_common_dir(
+            configured, runner=runner
+        ):
+            return configured
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        return configured
+    return top
+
+
 def select_historical_source_repo(
     configured_repo: Path,
     override: Path | None,

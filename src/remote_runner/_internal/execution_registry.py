@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import stat
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -121,9 +122,56 @@ def resolve_project_config(
         candidate = directory / PROJECT_CONFIG_NAME
         if candidate.is_file():
             return candidate.resolve()
+
+    linked_config = _linked_worktree_project_config(search_root)
+    if linked_config is not None:
+        return linked_config
     raise FileNotFoundError(
         f"could not find {PROJECT_CONFIG_NAME} from {search_root} or its parents"
     )
+
+
+def _linked_worktree_project_config(search_root: Path) -> Path | None:
+    """Return the primary checkout's ignored config for a linked worktree only."""
+
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(search_root), "rev-parse", "--show-toplevel"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        common = subprocess.run(
+            ["git", "-C", str(search_root), "rev-parse", "--git-common-dir"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError:
+        return None
+    if top.returncode != 0 or common.returncode != 0:
+        return None
+
+    top_level = Path(top.stdout.strip())
+    common_dir = Path(common.stdout.strip())
+    if not top_level.is_absolute() or not common_dir:
+        return None
+    if not common_dir.is_absolute():
+        common_dir = top_level / common_dir
+    try:
+        top_level = top_level.resolve(strict=True)
+        common_dir = common_dir.resolve(strict=True)
+    except OSError:
+        return None
+    if common_dir.name != ".git":
+        return None
+    primary_root = common_dir.parent
+    if top_level == primary_root:
+        return None
+    candidate = primary_root / PROJECT_CONFIG_NAME
+    return candidate.resolve() if candidate.is_file() else None
 
 
 def project_paths(config_path: Path) -> ProjectPaths:

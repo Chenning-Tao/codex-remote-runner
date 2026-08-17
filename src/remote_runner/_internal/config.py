@@ -99,6 +99,10 @@ class DevProjectConfig:
     stale_after_seconds: int
     include: tuple[str, ...]
     exclude: tuple[str, ...]
+    project_python_by_server: dict[str, str]
+
+    def project_python_for(self, server: str) -> str | None:
+        return self.project_python_by_server.get(server)
 
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
@@ -169,6 +173,24 @@ def _pattern_list(value: Any, field: str) -> tuple[str, ...]:
     return tuple(patterns)
 
 
+def _dev_project_pythons(raw: dict[str, Any]) -> dict[str, str]:
+    """Reuse optional managed remote Python paths for foreground dev sessions."""
+
+    remote_raw = raw.get("remote")
+    if not isinstance(remote_raw, dict):
+        return {}
+    values: dict[str, str] = {}
+    for server, runtime in remote_raw.items():
+        if not isinstance(server, str) or not isinstance(runtime, dict):
+            continue
+        project_python = runtime.get("python")
+        if project_python is not None:
+            values[server] = _absolute_posix(
+                project_python, f"remote.{server}.python"
+            )
+    return values
+
+
 def load_dev_project_config(path: Path) -> DevProjectConfig:
     """Load only the project fields owned by foreground development execution."""
 
@@ -214,6 +236,7 @@ def load_dev_project_config(path: Path) -> DevProjectConfig:
         ),
         include=_pattern_list(dev.get("include"), "dev.include"),
         exclude=_pattern_list(dev.get("exclude"), "dev.exclude"),
+        project_python_by_server=_dev_project_pythons(raw),
     )
 
 

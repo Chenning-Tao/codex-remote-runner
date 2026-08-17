@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from remote_runner._internal.config import load_managed_project_config
+from remote_runner._internal.config import load_dev_project_config, load_managed_project_config
 from remote_runner._internal.controller.layout import controller_release_layout
 from remote_runner._internal.execution_registry import load_yaml, write_yaml
 
@@ -83,6 +83,25 @@ def test_loads_managed_config_and_separates_explicit_pool(tmp_path: Path) -> Non
     assert config.scheduling.lease_seconds == 90
     assert config.scheduling.testing_servers == ("archive", "compute-a")
     assert config.output_sync is None
+
+
+def test_dev_config_reuses_selected_remote_project_python(tmp_path: Path) -> None:
+    config_path = tmp_path / ".remote-runner.yaml"
+    write_yaml(
+        config_path,
+        {
+            "project_id": "example",
+            "source": {"local_repo": "."},
+            "remote": {
+                "compute-a": {"python": "/srv/envs/example/bin/python3"},
+            },
+        },
+    )
+
+    config = load_dev_project_config(config_path)
+
+    assert config.project_python_for("compute-a") == "/srv/envs/example/bin/python3"
+    assert config.project_python_for("compute-b") is None
 
 
 def test_loads_default_all_succeeded_output_sync_config(tmp_path: Path) -> None:

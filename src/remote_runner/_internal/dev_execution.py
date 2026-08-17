@@ -23,6 +23,7 @@ from .machine_identity import (
 )
 from .pool import DEFAULT_SERVER_REGISTRY, probe_endpoint, resolve_ssh_targets
 from .remote_shell import remote_python_stdin_command, ssh_connection_options
+from .source import resolve_source_repo
 
 
 DEV_SESSION_RE = re.compile(r"^dev-[0-9a-f]{16}$")
@@ -346,6 +347,7 @@ expected_keys = {
     "cores",
     "cache_root",
     "build_environment",
+    "project_python",
 }
 if not isinstance(config, dict) or set(config) != expected_keys or config.get("schema_version") != 1:
     print("[remote-runner dev] runner configuration is invalid", file=sys.stderr)
@@ -356,6 +358,25 @@ cores = str(config["cores"])
 environment["RR_SERVER_CORES"] = cores
 environment["RR_ASSIGNED_CORES"] = cores
 environment["RR_DEV_CACHE_DIR"] = config["cache_root"]
+project_python = config["project_python"]
+if project_python is not None:
+    if (
+        not isinstance(project_python, str)
+        or not project_python.startswith("/")
+        or "\\x00" in project_python
+        or "\\n" in project_python
+        or "\\r" in project_python
+    ):
+        print("[remote-runner dev] runner project Python is invalid", file=sys.stderr)
+        raise SystemExit(125)
+    environment["RR_PROJECT_PYTHON"] = project_python
+tool_bins = [
+    os.path.join(os.path.expanduser("~"), ".local", "bin"),
+    os.path.join(os.path.expanduser("~"), ".cargo", "bin"),
+]
+environment["PATH"] = os.pathsep.join(
+    [*tool_bins, environment.get("PATH", os.defpath)]
+)
 defaults = {
     "MAKEFLAGS": "-j" + cores,
     "CMAKE_BUILD_PARALLEL_LEVEL": cores,
@@ -1001,6 +1022,7 @@ def validate_runner_config(config, dev_root, project_id, session_id, token):
         "cores",
         "cache_root",
         "build_environment",
+        "project_python",
     }
     if not isinstance(config, dict) or set(config) != expected_keys:
         raise ValueError("runner configuration is invalid")
@@ -1024,6 +1046,15 @@ def validate_runner_config(config, dev_root, project_id, session_id, token):
         not isinstance(value, str) for value in build_environment.values()
     ):
         raise ValueError("runner build environment is invalid")
+    project_python = config.get("project_python")
+    if project_python is not None and (
+        not isinstance(project_python, str)
+        or not project_python.startswith("/")
+        or "\x00" in project_python
+        or "\n" in project_python
+        or "\r" in project_python
+    ):
+        raise ValueError("runner project Python is invalid")
 
 
 def action_create():
@@ -1376,6 +1407,7 @@ def _session_payload(
                     "cores": server.cores,
                     "cache_root": session.cache_root,
                     "build_environment": build_environment,
+                    "project_python": config.project_python_for(server.name),
                 },
             }
         )
@@ -1430,7 +1462,7 @@ def _run_foreground(server: DevServer, session: DevSession, timeout: int) -> int
 
 def resolve_source_root(config: DevProjectConfig, override: Path | None) -> Path:
     if override is None:
-        return config.source_root
+        return resolve_source_repo(config.source_root, None)
     if not override.is_absolute():
         raise ValueError("--source-root must be an absolute path")
     resolved = override.expanduser().resolve()

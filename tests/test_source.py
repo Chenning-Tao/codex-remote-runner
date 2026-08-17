@@ -11,6 +11,7 @@ from remote_runner._internal.source import (
     DeploymentTarget,
     prepare_revision,
     resolve_clean_head,
+    resolve_source_repo,
     select_historical_source_repo,
 )
 
@@ -42,6 +43,14 @@ def make_bare(tmp_path: Path, name: str) -> Path:
     bare = tmp_path / name
     run("git", "init", "-q", "--bare", str(bare))
     return bare
+
+
+def test_implicit_source_prefers_the_calling_linked_worktree(tmp_path: Path) -> None:
+    source, revision = make_source(tmp_path)
+    linked = tmp_path / "linked"
+    run("git", "worktree", "add", "--detach", "-q", str(linked), revision, cwd=source)
+
+    assert resolve_source_repo(source, None, start=linked) == linked.resolve()
 
 
 def test_resolve_clean_head_rejects_dirty_source(tmp_path: Path) -> None:

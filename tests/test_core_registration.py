@@ -127,6 +127,28 @@ def test_missing_project_config_fails_instead_of_guessing(tmp_path: Path) -> Non
         resolve_project_config(start=tmp_path)
 
 
+def test_linked_worktree_discovers_ignored_primary_project_config(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    linked = tmp_path / "linked"
+    subprocess.run(["git", "init", "-q", str(primary)], check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=primary, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=primary, check=True
+    )
+    (primary / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=primary, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=primary, check=True)
+    config = primary / ".remote-runner.yaml"
+    write_yaml(config, {"project_id": "primary"})
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", "-q", str(linked), "HEAD"],
+        cwd=primary,
+        check=True,
+    )
+
+    assert resolve_project_config(start=linked) == config.resolve()
+
+
 def test_explicit_server_never_probes_another_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

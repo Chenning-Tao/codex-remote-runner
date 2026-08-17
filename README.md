@@ -54,7 +54,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.6'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.7'
 remote-runner --help
 ```
 
@@ -105,6 +105,13 @@ Start with [examples/remote-servers.yaml](examples/remote-servers.yaml) and
 [examples/project.remote-runner.yaml](examples/project.remote-runner.yaml). See
 [references/configuration.md](references/configuration.md) for the complete
 contract and provisioning requirements.
+
+The project file can remain ignored and exist only in the primary checkout. When
+a command starts from a linked Git worktree and does not find a config by walking
+its parents, Remote Runner resolves only `<git-common-dir>/../.remote-runner.yaml`.
+It never searches sibling directories by name. In that case `dev`, `prepare`, and
+`run` use the calling linked worktree as their default source; an explicit
+`--project-config`, `--source-root`, or `--source-repo` remains authoritative.
 
 For example, enable direct development runs on one server with
 `dev_root: /srv/remote-runner-dev`. A project may then add `dev.include`,
@@ -188,8 +195,9 @@ remote-runner dev \
   --command 'python3 -m pytest -q'
 ```
 
-`dev` resolves `source.local_repo` unless `--source-root` supplies another absolute
-directory. For Git roots it sends current tracked-file bytes plus non-ignored
+`dev` resolves the calling linked worktree when it belongs to `source.local_repo`,
+unless `--source-root` supplies another absolute directory. For Git roots it sends
+current tracked-file bytes plus non-ignored
 untracked files; ignored files require an explicit `dev.include`. For non-Git roots
 it performs a filtered filesystem walk. VCS/tool state, virtual environments,
 dependency trees, build/results directories, and common credential files are excluded
