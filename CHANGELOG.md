@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## Unreleased
+
+### Added
+
+- Added `remote-runner wait-cohort` for one event-driven, exact-ID cohort wait.
+  It uses the existing batched controller long poll, returns immediately when any
+  member needs attention, and completes successfully only when every member is
+  reportable, without one CLI process or model polling loop per run.
+
 ## 0.9.7 - 2026-08-17
 
 ### Added

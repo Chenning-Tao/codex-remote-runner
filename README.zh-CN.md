@@ -179,6 +179,7 @@ remote-runner dev \
 ```bash
 remote-runner monitor --project-config /path/to/.remote-runner.yaml
 remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-... --until reportable
+remote-runner wait-cohort --project-config /path/to/.remote-runner.yaml --run-id rr-... --run-id rr-...
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
 remote-runner close-decommissioned-run --project-config /path/to/.remote-runner.yaml --run-id rr-... --server compute-a --reason "云厂商已销毁该实例"
@@ -193,17 +194,19 @@ remote-runner retire-server --project-config /path/to/.remote-runner.yaml --serv
 
 [SKILL.md](SKILL.md) 和 [agents/openai.yaml](agents/openai.yaml) 提供 Codex skill 的元数据与运行契约。它们用于补充 CLI；Python wheel 不会安装任何用户专属的 Codex 配置。
 
-明确要求当前 Codex App 任务自动回报时，发起任务的这一轮必须让 `run --wait` 或
-`remote-runner wait --until reportable` 保持为尚未完成的工具调用。这是一条
-附着式完成链路，不是后台回调：
+明确要求当前 Codex App 任务自动回报时，发起任务的这一轮必须让 `run --wait`、
+`remote-runner wait --until reportable` 或一个 `remote-runner wait-cohort` 保持为
+尚未完成的工具调用。精确的多 run cohort 必须使用 `wait-cohort`，不得为每个 run
+分别启动 wait 进程。这是一条附着式完成链路，不是后台回调：
 
-1. CLI 首先读取精确 run 的权威聚合状态。
-2. run 尚不可回报时，CLI 使用状态 etag 在 controller 上发起有界的
-   `wait-run` 长等待。状态一旦变化，controller 会立即返回；状态未变化时的
-   超时只会让 CLI 在内部续接传输，不会结束工具调用、启动模型回合，也不会
-   增加一套对计算服务器的探测循环。
+1. CLI 首先读取精确 run 或按顺序排列的 exact cohort 权威聚合状态。
+2. 尚不可回报时，CLI 使用状态 etag 在 controller 上发起有界的 `wait-run` 或
+   批量 `wait-runs` 长等待。相关状态一旦变化，controller 会立即返回；状态未变化时的
+   超时只会让 CLI 在内部续接传输，不会结束工具调用、启动模型回合，也不会增加一套
+   对计算服务器的探测循环。
 3. 达到所选条件后，CLI 只向 stdout 写入一份最终权威 JSON，然后退出。
-   状态变化和未变化的长等待超时只属于 stderr 状态信息。
+   `wait-cohort` 在任一成员失败、停止、缺失或同步状态无效时立即以 attention required
+   退出；只有所有成员都达到 reportable 时才成功退出。
 4. 正常的工具完成事件随后恢复发起等待的 Codex 回合。Codex 此时才能检查
    已有日志或同步产物并生成最终回复。是否显示未读标记或系统通知，由 Codex
    App 根据任务焦点和通知设置自行决定；Remote Runner 不写入 App 状态，也不

@@ -227,6 +227,38 @@ def build_parser() -> argparse.ArgumentParser:
     wait_parser.add_argument("--timeout", type=int, default=8)
     _add_wait_options(wait_parser)
 
+    cohort_wait_parser = subparsers.add_parser(
+        "wait-cohort",
+        help="wait for an exact run cohort to become reportable",
+    )
+    _add_project_config(cohort_wait_parser)
+    cohort_wait_parser.add_argument(
+        "--run-id",
+        dest="run_ids",
+        action="append",
+        required=True,
+        help="exact run ID in the cohort; repeat for every member",
+    )
+    cohort_wait_parser.add_argument("--timeout", type=int, default=8)
+    cohort_wait_parser.add_argument(
+        "--until",
+        choices=("reportable",),
+        default="reportable",
+    )
+    cohort_wait_parser.add_argument(
+        "--max-wait",
+        type=_positive_int,
+        help="stop waiting after this many seconds without stopping any run",
+    )
+    cohort_wait_parser.add_argument(
+        "--connection-grace",
+        type=_positive_int,
+        help=(
+            "stop after this many seconds of continuous controller transport failure; "
+            "default: retry indefinitely"
+        ),
+    )
+
     web_parser = subparsers.add_parser(
         "web",
         help="open the optional local dashboard and queue controls",
@@ -486,6 +518,9 @@ def _execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return monitoring.query_controller(args), 0
     if args.subcommand == "wait":
         result = waiting.wait_for_run(args)
+        return result, waiting.wait_exit_code(result)
+    if args.subcommand == "wait-cohort":
+        result = waiting.wait_for_cohort(args)
         return result, waiting.wait_exit_code(result)
     if args.subcommand == "stop":
         return stopping.request_stop(args), 0

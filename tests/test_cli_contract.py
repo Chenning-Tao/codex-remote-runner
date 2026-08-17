@@ -34,6 +34,7 @@ def test_public_cli_has_exact_lifecycle_subcommands() -> None:
         "run",
         "monitor",
         "wait",
+        "wait-cohort",
         "stop",
         "cleanup",
         "purge-run",
@@ -86,6 +87,21 @@ def test_public_subcommands_preserve_lifecycle_arguments() -> None:
     parsed_wait = cli.build_parser().parse_args(["wait", "--run-id", "rr-test"])
     assert parsed_wait.max_wait is None
     assert parsed_wait.connection_grace is None
+    cohort_wait_help = help_text("wait-cohort")
+    assert "--run-id" in cohort_wait_help
+    assert "reportable" in cohort_wait_help
+    assert "--max-wait" in cohort_wait_help
+    assert "--connection-grace" in cohort_wait_help
+    parsed_cohort_wait = cli.build_parser().parse_args(
+        [
+            "wait-cohort",
+            "--run-id",
+            "rr-first",
+            "--run-id",
+            "rr-second",
+        ]
+    )
+    assert parsed_cohort_wait.run_ids == ["rr-first", "rr-second"]
     assert "--run-id" in help_text("stop")
     assert "--apply" in help_text("cleanup")
     decommissioned_help = help_text("close-decommissioned-run")
@@ -162,6 +178,7 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
         "remote-runner run",
         "remote-runner monitor",
         "remote-runner wait",
+        "remote-runner wait-cohort",
         "remote-runner stop",
         "remote-runner cleanup",
         "remote-runner purge-run",

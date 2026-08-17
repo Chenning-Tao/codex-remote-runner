@@ -88,6 +88,45 @@ def test_controller_timeout_is_reported_as_runtime_error(tmp_path: Path, monkeyp
         controller_client.call_controller(config, "status", timeout=8)
 
 
+def test_unsupported_controller_action_has_a_distinct_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / ".remote-runner.yaml"
+    write_yaml(
+        path,
+        {
+            "project_id": "example",
+            "controller": {"ssh": "controller_host", "root": "/srv/controller"},
+            "source": {"local_repo": "code"},
+            "remote": {
+                "compute-a": {
+                    "bare_repo": "/srv/repo.git",
+                    "worktree_root": "/srv/worktrees",
+                    "python": "/opt/python3",
+                }
+            },
+        },
+    )
+    config = load_managed_project_config(path)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["ssh"],
+            2,
+            stdout="",
+            stderr="argument action: invalid choice: 'wait-runs'",
+        ),
+    )
+
+    with pytest.raises(
+        controller_client.ControllerActionUnsupportedError,
+        match="does not support action 'wait-runs'",
+    ):
+        controller_client.call_controller(config, "wait-runs", timeout=8)
+
+
 def test_bounded_long_poll_enables_ssh_keepalive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
