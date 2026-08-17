@@ -11,6 +11,10 @@ from ..remote_shell import ssh_connection_options
 from .layout import controller_release_layout
 
 
+class ControllerActionUnsupportedError(RuntimeError):
+    """The connected controller predates a requested CLI action."""
+
+
 def _controller_failure_detail(
     *,
     action: str,
@@ -91,13 +95,16 @@ def call_controller(
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"controller {action} timed out after {exc.timeout}s") from exc
     if completed.returncode != 0:
-        raise RuntimeError(
-            _controller_failure_detail(
-                action=action,
-                ssh_target=config.controller.ssh,
-                stderr=completed.stderr,
-            )
+        detail = _controller_failure_detail(
+            action=action,
+            ssh_target=config.controller.ssh,
+            stderr=completed.stderr,
         )
+        if "invalid choice" in detail.lower() and repr(action) in detail:
+            raise ControllerActionUnsupportedError(
+                f"controller does not support action {action!r}; {detail}"
+            )
+        raise RuntimeError(detail)
     try:
         value = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:

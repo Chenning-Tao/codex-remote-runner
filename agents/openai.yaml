@@ -1,4 +1,4 @@
 interface:
   display_name: "Remote Runner"
   short_description: "Run and follow durable remote workloads"
-  default_prompt: "Use $remote-runner to submit my clean committed HEAD and return the exact run ID after the durable queue record is accepted. Detach by default; use an attached --wait --until reportable only when I explicitly ask to wait. Never add model polling, interpret scientific validity, or copy the run record into Trellis."
+  default_prompt: "Use $remote-runner to submit my clean committed HEAD and return the exact run ID after the durable queue record is accepted. Detach by default; use an attached --wait --until reportable only when I explicitly ask to wait, and use one wait-cohort call for all exact IDs when I request a cohort wait. Never add model polling, interpret scientific validity, or copy the run record into Trellis."

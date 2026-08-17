@@ -15,14 +15,23 @@ stdout/stderr, and exit status are the complete observable lifecycle.
 
 ## Explicit Waits
 
-Submission is detached by default. Use `wait` or `run --wait` only when requested.
-Waiting uses bounded controller-local long polls keyed by the exact run-view etag.
+Submission is detached by default. Use `wait`, `wait-cohort`, or `run --wait` only when
+requested. Waiting uses bounded controller-local long polls keyed by exact run-view
+etags. `wait-cohort` carries one ordered set of exact run IDs through the controller's
+batched `wait-runs` endpoint instead of starting one wait process per run.
 Unchanged timeouts renew CLI transport without a model turn or compute-server polling
-loop. Final process exit and stdout JSON are the completion signal.
+loop.
+Final process exit and stdout JSON are the completion signal.
 
 `--until reportable` waits for checksum-verified output only when the execution outcome
 is `succeeded`. Failed and stopped runs return at execution terminal state; their
 checkpoint synchronization can continue independently.
+
+For a cohort, any failed, stopped, missing, purged, attention-required, or invalidly
+synchronized member returns `attention_required` immediately. A successful cohort wait
+returns only after every member is reportable. For an event-driven Codex completion
+path, keep one `wait-cohort` tool call attached without `--max-wait`; do not poll its
+PTY or restart bounded waits from model turns.
 
 ## Stop And Cleanup
 

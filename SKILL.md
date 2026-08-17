@@ -81,18 +81,26 @@ allocation through `RR_ASSIGNED_CORES`; the workload decides whether and how to 
 
 Use `monitor --run-id` for an immediate exact status query. It performs no model loop.
 Status and synchronization do not trigger model polling.
-Use `wait` only when explicitly requested:
+Use `wait` only when explicitly requested. For an exact multi-run cohort, use one
+`wait-cohort` command instead of one process per run:
 
 ```bash
 remote-runner wait \
   --project-config /absolute/path/to/.remote-runner.yaml \
   --run-id rr-0123456789abcdef \
   --until reportable
+
+remote-runner wait-cohort \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --run-id rr-0123456789abcdef \
+  --run-id rr-fedcba9876543210 \
+  --until reportable
 ```
 
 Keep one explicit wait attached to the same tool session. The CLI uses controller
-long polls keyed by an etag; unchanged timeouts renew transport inside the CLI and do
-not trigger model polling. Process exit plus final stdout JSON is the completion signal.
+long polls keyed by exact etags; cohort waits use one batched controller request rather
+than one process per run. Unchanged timeouts renew transport inside the CLI and do not
+trigger model polling. Process exit plus final stdout JSON is the completion signal.
 
 ## Keep Execution And Bytes Orthogonal
 
@@ -129,6 +137,8 @@ or destruction remains the user's responsibility.
 - `remote-runner run`: submit detached work; wait only with explicit `--wait`.
 - `remote-runner monitor`: query bounded status.
 - `remote-runner wait`: attach to one exact run.
+- `remote-runner wait-cohort`: attach once to an ordered exact-ID cohort until every
+  member is reportable or one member requires attention.
 - `remote-runner stop`: stop one exact run.
 - `remote-runner close-decommissioned-run`: preview and close one exact unreachable
   run only after its physical server has been explicitly confirmed destroyed.

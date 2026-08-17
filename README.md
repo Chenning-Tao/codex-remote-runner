@@ -223,6 +223,7 @@ Common follow-up commands:
 ```bash
 remote-runner monitor --project-config /path/to/.remote-runner.yaml
 remote-runner wait --project-config /path/to/.remote-runner.yaml --run-id rr-... --until reportable
+remote-runner wait-cohort --project-config /path/to/.remote-runner.yaml --run-id rr-... --run-id rr-...
 remote-runner web --project-config /path/to/.remote-runner.yaml
 remote-runner stop --project-config /path/to/.remote-runner.yaml --run-id rr-...
 remote-runner close-decommissioned-run --project-config /path/to/.remote-runner.yaml --run-id rr-... --server compute-a --reason "provider destroyed the instance"
@@ -242,19 +243,22 @@ operations.
 skill metadata and operating contract. They complement the CLI; the Python wheel
 does not install user-specific Codex configuration.
 
-For an explicitly requested automatic report in the current Codex App task, the originating turn must keep
-`run --wait` or `remote-runner wait --until reportable` as an unfinished tool call.
-This is an attached completion path, not a background callback:
+For an explicitly requested automatic report in the current Codex App task, the
+originating turn must keep `run --wait`, `remote-runner wait --until reportable`, or
+one `remote-runner wait-cohort` as an unfinished tool call. Use `wait-cohort` for an
+exact multi-run cohort instead of starting one wait process per run. This is an
+attached completion path, not a background callback:
 
-1. The CLI reads the exact run's authoritative aggregate view.
-2. While the run is not reportable, the CLI blocks in bounded controller `wait-run`
-   requests keyed by the view etag. The controller returns early when that view
-   changes. An unchanged timeout only renews the transport inside the CLI; it does not
-   complete the tool call, start a model turn, or add another compute-server probe
-   loop.
+1. The CLI reads the exact run or ordered exact cohort's authoritative aggregate view.
+2. While the selected run or cohort is not reportable, the CLI blocks in bounded
+   controller `wait-run` or batched `wait-runs` requests keyed by view etags. The
+   controller returns early when a relevant view changes. An unchanged timeout only
+   renews the transport inside the CLI; it does not complete the tool call, start a
+   model turn, or add another compute-server probe loop.
 3. At the selected condition, the CLI writes one final authoritative JSON document to
-   stdout and exits. State changes and unchanged long-poll timeouts are status-only
-   stderr output.
+   stdout and exits. `wait-cohort` exits immediately with attention required if any
+   member fails, stops, disappears, or reaches an invalid synchronization state; it
+   exits successfully only after every member is reportable.
 4. Normal tool completion resumes the originating Codex turn. Codex can then inspect
    existing logs or synchronized artifacts and produce the final response. The App
    itself decides whether that response gets an unread indicator or notification from

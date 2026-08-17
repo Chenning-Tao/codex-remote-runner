@@ -12,6 +12,7 @@ from remote_runner._internal.execution_registry import write_yaml
 
 
 RUN_ID = "rr-0123456789abcdef"
+SECOND_RUN_ID = "rr-fedcba9876543210"
 
 
 def config(tmp_path: Path) -> Path:
@@ -55,12 +56,43 @@ def view(
     }
 
 
+def cohort_view(
+    run_id: str,
+    phase: str,
+    *,
+    outcome: str | None = None,
+    etag_character: str = "a",
+    output_sync_status: str = "not_enqueued",
+) -> dict[str, object]:
+    result = view(
+        phase,
+        outcome=outcome,
+        etag_character=etag_character,
+        output_sync_status=output_sync_status,
+    )
+    result["run_id"] = run_id
+    return result
+
+
 def args(config_path: Path, **changes: object) -> argparse.Namespace:
     values: dict[str, object] = {
         "project_config": config_path,
         "run_id": RUN_ID,
         "timeout": 8,
         "until": "execution-terminal",
+        "max_wait": None,
+        "connection_grace": None,
+    }
+    values.update(changes)
+    return argparse.Namespace(**values)
+
+
+def cohort_args(config_path: Path, **changes: object) -> argparse.Namespace:
+    values: dict[str, object] = {
+        "project_config": config_path,
+        "run_ids": [RUN_ID, SECOND_RUN_ID],
+        "timeout": 8,
+        "until": "reportable",
         "max_wait": None,
         "connection_grace": None,
     }
@@ -137,6 +169,269 @@ def test_wait_uses_etag_long_poll_until_terminal(
         "50",
     )
     assert observed[1][2] == 68
+
+
+def test_cohort_wait_uses_one_ordered_etag_long_poll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[str, dict[str, object], int | None]] = []
+    responses = iter(
+        [
+            {
+                "run_views": [
+                    cohort_view(RUN_ID, "queued"),
+                    cohort_view(SECOND_RUN_ID, "running"),
+                ]
+            },
+            {
+                "changed": True,
+                "ready": True,
+                "timed_out": False,
+                "run_views": [
+                    cohort_view(
+                        RUN_ID,
+                        "terminal",
+                        outcome="succeeded",
+                        etag_character="b",
+                        output_sync_status="completed",
+                    ),
+                    cohort_view(
+                        SECOND_RUN_ID,
+                        "terminal",
+                        outcome="succeeded",
+                        etag_character="c",
+                        output_sync_status="completed",
+                    ),
+                ],
+            },
+        ]
+    )
+
+    def call(
+        _config,
+        action: str,
+        *,
+        timeout: int,
+        payload: dict[str, object],
+        overall_timeout: int,
+    ):
+        assert timeout == 8
+        observed.append((action, payload, overall_timeout))
+        return next(responses)
+
+    monkeypatch.setattr(waiting, "call_controller", call)
+    result = waiting.wait_for_cohort(
+        cohort_args(config(tmp_path)),
+        reporter=lambda _line: pytest.fail("normal cohort wait must stay silent"),
+    )
+
+    assert result["wait_status"] == "completed"
+    assert result["controller_calls"] == 2
+    assert [view["run_id"] for view in result["run_views"]] == [
+        RUN_ID,
+        SECOND_RUN_ID,
+    ]
+    assert observed[0] == (
+        "wait-runs",
+        {
+            "schema_version": 1,
+            "wait_seconds": 0,
+            "runs": [
+                {"run_id": RUN_ID, "after_etag": None},
+                {"run_id": SECOND_RUN_ID, "after_etag": None},
+            ],
+        },
+        18,
+    )
+    assert observed[1][0] == "wait-runs"
+    assert observed[1][1] == {
+        "schema_version": 1,
+        "wait_seconds": 50,
+        "runs": [
+            {"run_id": RUN_ID, "after_etag": "sha256:" + "a" * 64},
+            {"run_id": SECOND_RUN_ID, "after_etag": "sha256:" + "a" * 64},
+        ],
+    }
+    assert observed[1][2] == 68
+
+
+def test_cohort_wait_returns_attention_as_soon_as_one_run_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        waiting,
+        "call_controller",
+        lambda *_args, **_kwargs: {
+            "run_views": [
+                cohort_view(RUN_ID, "running"),
+                cohort_view(
+                    SECOND_RUN_ID,
+                    "terminal",
+                    outcome="failed",
+                    output_sync_status="pending",
+                ),
+            ]
+        },
+    )
+
+    result = waiting.wait_for_cohort(
+        cohort_args(config(tmp_path)), reporter=lambda _line: None
+    )
+
+    assert result["wait_status"] == "attention_required"
+    assert waiting.wait_exit_code(result) == 4
+
+
+def test_cohort_wait_silently_renews_an_unchanged_long_poll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued_views = [
+        cohort_view(RUN_ID, "queued"),
+        cohort_view(SECOND_RUN_ID, "running"),
+    ]
+    responses = iter(
+        [
+            {"run_views": queued_views},
+            {
+                "changed": False,
+                "ready": False,
+                "timed_out": True,
+                "run_views": queued_views,
+            },
+            {
+                "changed": True,
+                "ready": True,
+                "timed_out": False,
+                "run_views": [
+                    cohort_view(
+                        RUN_ID,
+                        "terminal",
+                        outcome="succeeded",
+                        etag_character="b",
+                        output_sync_status="completed",
+                    ),
+                    cohort_view(
+                        SECOND_RUN_ID,
+                        "terminal",
+                        outcome="succeeded",
+                        etag_character="c",
+                        output_sync_status="completed",
+                    ),
+                ],
+            },
+        ]
+    )
+    calls = 0
+
+    def call(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return next(responses)
+
+    monkeypatch.setattr(waiting, "call_controller", call)
+    result = waiting.wait_for_cohort(
+        cohort_args(config(tmp_path)),
+        reporter=lambda _line: pytest.fail("unchanged cohort wait must stay silent"),
+    )
+
+    assert result["wait_status"] == "completed"
+    assert result["controller_calls"] == 3
+    assert calls == 3
+
+
+def test_cohort_wait_rejects_an_unsupported_controller_without_retrying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    def call(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise waiting.ControllerActionUnsupportedError("invalid choice: 'wait-runs'")
+
+    monkeypatch.setattr(waiting, "call_controller", call)
+
+    with pytest.raises(RuntimeError, match="does not support wait-cohort"):
+        waiting.wait_for_cohort(
+            cohort_args(config(tmp_path)), reporter=lambda _line: None
+        )
+
+    assert attempts == 1
+
+
+def test_cohort_wait_connection_grace_ends_a_controller_outage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    attempts = 0
+
+    def call(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            now[0] = 301.0
+        raise RuntimeError("controller unavailable")
+
+    monkeypatch.setattr(waiting.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(waiting.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(waiting, "call_controller", call)
+
+    with pytest.raises(RuntimeError, match="beyond --connection-grace"):
+        waiting.wait_for_cohort(
+            cohort_args(config(tmp_path), connection_grace=300),
+            reporter=lambda _line: None,
+        )
+
+    assert attempts == 2
+
+
+def test_cohort_wait_deadline_returns_the_last_ordered_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moments = iter((0.0, 0.0, 1.1, 1.1))
+    monkeypatch.setattr(waiting.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(
+        waiting,
+        "call_controller",
+        lambda *_args, **_kwargs: {
+            "run_views": [
+                cohort_view(RUN_ID, "queued"),
+                cohort_view(SECOND_RUN_ID, "running"),
+            ]
+        },
+    )
+
+    result = waiting.wait_for_cohort(
+        cohort_args(config(tmp_path), max_wait=1), reporter=lambda _line: None
+    )
+
+    assert result["wait_status"] == "timed_out"
+    assert [view["run_id"] for view in result["run_views"]] == [
+        RUN_ID,
+        SECOND_RUN_ID,
+    ]
+    assert waiting.wait_exit_code(result) == 3
+
+
+@pytest.mark.parametrize(
+    "run_ids",
+    [[], [RUN_ID, RUN_ID], [RUN_ID] * (waiting.MAX_COHORT_RUNS + 1)],
+)
+def test_cohort_wait_rejects_invalid_exact_run_sets(
+    tmp_path: Path,
+    run_ids: list[str],
+) -> None:
+    with pytest.raises(ValueError):
+        waiting.wait_for_cohort(
+            cohort_args(config(tmp_path), run_ids=run_ids),
+            reporter=lambda _line: None,
+        )
 
 
 def test_reportable_wait_continues_until_output_sync_completes(
@@ -456,6 +751,45 @@ def test_wait_cli_writes_one_final_json_result_to_stdout(
             RUN_ID,
             "--until",
             "reportable",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert returncode == 0
+    assert json.loads(captured.out) == completed
+    assert captured.err == ""
+
+
+def test_wait_cohort_cli_writes_one_final_json_result_to_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    completed = {
+        "wait_status": "completed",
+        "run_views": [
+            cohort_view(
+                RUN_ID,
+                "terminal",
+                outcome="succeeded",
+                output_sync_status="completed",
+            ),
+            cohort_view(
+                SECOND_RUN_ID,
+                "terminal",
+                outcome="succeeded",
+                output_sync_status="completed",
+            ),
+        ],
+    }
+    monkeypatch.setattr(cli.waiting, "wait_for_cohort", lambda _args: completed)
+
+    returncode = cli.main(
+        [
+            "wait-cohort",
+            "--run-id",
+            RUN_ID,
+            "--run-id",
+            SECOND_RUN_ID,
         ]
     )
 
