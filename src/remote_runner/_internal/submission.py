@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import secrets
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any
 
 from .config import load_managed_project_config
@@ -22,15 +22,12 @@ from .scheduling import (
     normalize_requested_cores,
     normalize_workload_class,
 )
-from .source import DeploymentTarget, PreparationResult, prepare_revision
-
-
-def resolve_source_repo(config_repo: Path, override: Path | None) -> Path:
-    if override is None:
-        return config_repo
-    if not override.is_absolute():
-        raise ValueError("--source-repo must be an absolute path")
-    return override.expanduser().resolve()
+from .source import (
+    DeploymentTarget,
+    PreparationResult,
+    prepare_revision,
+    resolve_source_repo,
+)
 
 
 def _remote_url(ssh: str, bare_repo: str) -> str:

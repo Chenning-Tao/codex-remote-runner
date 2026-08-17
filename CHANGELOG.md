@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## 0.9.7 - 2026-08-17
+
+### Added
+
+- Linked Git worktrees can resolve an ignored primary-checkout project config through
+  their exact Git common directory, and foreground/durable source selection defaults
+  to that calling worktree instead of silently using the primary checkout.
+- Foreground development sessions prepend the remote user's standard local tool
+  directories and expose the selected project's configured Python as
+  `RR_PROJECT_PYTHON` when available.
+
 ## 0.9.6 - 2026-08-17
 
 ### Fixed
