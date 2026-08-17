@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,10 @@ def git(*args: str, cwd: Path) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     ).stdout.strip()
+
+
+def test_cli_version_matches_installed_distribution_metadata() -> None:
+    assert __version__ == version("codex-remote-runner")
 
 
 def clean_repository(tmp_path: Path) -> tuple[Path, str]:
