@@ -62,6 +62,73 @@ def test_dispatch_loop_monitors_with_isolated_errors(
     assert seen["isolate_errors"] is True
 
 
+def test_dispatch_loop_reaches_queue_after_multiple_terminal_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    paths = controller_paths(tmp_path / "controller", "example")
+    paths.project_root.mkdir(parents=True)
+    write_yaml(paths.config_path, {"controller_registry": True})
+    terminal_rows = [
+        {
+            "run_id": "rr-1111111111111111",
+            "registry_kind": "current",
+            "authoritative_status": "succeeded",
+        },
+        {
+            "run_id": "rr-2222222222222222",
+            "registry_kind": "current",
+            "authoritative_status": "failed",
+        },
+    ]
+    monkeypatch.setattr(
+        dispatcher.monitoring, "load_registry_rows", lambda _paths: terminal_rows
+    )
+    monkeypatch.setattr(
+        dispatcher.monitoring,
+        "remote_probe",
+        lambda *_args, **_kwargs: pytest.fail("terminal runs must not be probed"),
+    )
+    monkeypatch.setattr(
+        dispatcher.monitoring,
+        "remote_probe_many",
+        lambda *_args, **_kwargs: pytest.fail("terminal runs must not be probed"),
+    )
+    batches = iter(
+        (
+            [DispatchOutcome(action="started", run_id="rr-3333333333333333")],
+            [DispatchOutcome(action="idle", run_id=None)],
+            [DispatchOutcome(action="idle", run_id=None)],
+        )
+    )
+    actions: list[str] = []
+
+    def dispatch_batch(_paths, *, timeout=8):
+        outcomes = next(batches)
+        actions.extend(outcome.action for outcome in outcomes)
+        return outcomes
+
+    sleeps = 0
+
+    def bounded_sleep(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            pytest.fail("dispatcher never reached the queued job")
+
+    monkeypatch.setattr(dispatcher, "dispatch_batch", dispatch_batch)
+    monkeypatch.setattr(
+        dispatcher, "ensure_output_sync_worker", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(dispatcher.time, "sleep", bounded_sleep)
+
+    assert dispatcher.dispatch_loop(paths, timeout=8, interval_seconds=0.01) == 0
+    assert actions == ["started", "idle", "idle"]
+    assert sleeps == 1
+    assert "cycle failed" not in capsys.readouterr().err
+
+
 def test_output_sync_worker_survives_cycle_failures(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

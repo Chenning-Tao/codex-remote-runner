@@ -1011,3 +1011,63 @@ def test_monitor_rows_batches_current_runs_by_ssh(
         rows[1]["run_id"],
         rows[2]["run_id"],
     ]
+
+
+def test_monitor_rows_with_multiple_terminal_runs_needs_no_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        monitoring,
+        "remote_probe",
+        lambda *_args, **_kwargs: pytest.fail("terminal runs must not be probed"),
+    )
+    monkeypatch.setattr(
+        monitoring,
+        "remote_probe_many",
+        lambda *_args, **_kwargs: pytest.fail("terminal runs must not be probed"),
+    )
+    rows = [
+        row("current", "succeeded"),
+        dict(row("current", "failed"), run_id=OTHER_RUN_ID),
+    ]
+
+    results = monitoring.monitor_rows(None, rows, 1, no_write=True)
+
+    assert [item["observation"] for item in results] == ["succeeded", "failed"]
+    assert [item["observation_source"] for item in results] == [
+        "local_terminal",
+        "local_terminal",
+    ]
+
+
+def test_monitor_rows_only_probes_active_run_when_mixed_with_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probed: list[str] = []
+
+    def fake_probe(item, _timeout):
+        probed.append(str(item["run_id"]))
+        return {
+            "observation": "unreachable",
+            "error": "ssh probe failed",
+            "progress": {"kind": "unknown_eta"},
+        }
+
+    monkeypatch.setattr(monitoring, "remote_probe", fake_probe)
+    monkeypatch.setattr(
+        monitoring,
+        "remote_probe_many",
+        lambda *_args, **_kwargs: pytest.fail("only one active run needs a probe"),
+    )
+    rows = [
+        row("current", "succeeded"),
+        dict(row("current", "running"), run_id=OTHER_RUN_ID),
+    ]
+
+    results = monitoring.monitor_rows(None, rows, 1, no_write=True)
+
+    assert probed == [OTHER_RUN_ID]
+    assert results[0]["observation"] == "succeeded"
+    assert results[0]["observation_source"] == "local_terminal"
+    assert results[1]["observation"] == "unreachable"
+    assert results[1]["error"] == "ssh probe failed"
