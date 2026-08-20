@@ -115,8 +115,8 @@ It never searches sibling directories by name. In that case `dev`, `prepare`, an
 
 For example, enable direct development runs on one server with
 `dev_root: /srv/remote-runner-dev`. A project may then add `dev.include`,
-`dev.exclude`, and `dev.stale_after_seconds`; see the linked examples for the minimal
-schema.
+`dev.exclude`, `dev.stale_after_seconds`, and named `dev.profiles`; see the linked
+examples for the minimal schema.
 
 ## Web Dashboard
 
@@ -195,6 +195,20 @@ remote-runner dev \
   --command 'python3 -m pytest -q'
 ```
 
+When a project defines a stable dev profile, select it instead of reconstructing the
+command and ignored source inputs on every invocation:
+
+```bash
+remote-runner dev \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --server compute-a \
+  --profile full-tests
+```
+
+`--profile` and `--command` are mutually exclusive. A profile contributes one opaque
+command and additional include/exclude patterns on top of the project-wide dev source
+filters; Remote Runner still does not interpret or rewrite that command.
+
 `dev` resolves the calling linked worktree when it belongs to `source.local_repo`,
 unless `--source-root` supplies another absolute directory. For Git roots it sends
 current tracked-file bytes plus non-ignored
@@ -217,6 +231,12 @@ acquires no controller lease: `RR_ASSIGNED_CORES` and `RR_SERVER_CORES` both exp
 registered server core count, so selecting a busy server can contend with durable
 runs. `MAKEFLAGS`, `CMAKE_BUILD_PARALLEL_LEVEL`, and `CARGO_BUILD_JOBS` default to all
 registered cores unless explicitly set locally; the opaque command is never rewritten.
+Every workload also receives compact `RR_RESOURCE_JSON` containing the selected server
+and stable machine identity, configured/assigned cores, observed logical CPUs, live
+total/available memory when supported, platform facts, and the selected profile or
+null. A profile run additionally receives `RR_DEV_PROFILE`. These values are facts for
+the project command; memory remains telemetry and Remote Runner does not choose its
+worker topology.
 
 Common follow-up commands:
 

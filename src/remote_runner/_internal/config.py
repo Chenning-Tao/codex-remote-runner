@@ -91,6 +91,14 @@ class ManagedProjectConfig:
 
 
 @dataclass(frozen=True)
+class DevProfile:
+    name: str
+    command: str
+    include: tuple[str, ...]
+    exclude: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class DevProjectConfig:
     path: Path
     project_root: Path
@@ -99,10 +107,29 @@ class DevProjectConfig:
     stale_after_seconds: int
     include: tuple[str, ...]
     exclude: tuple[str, ...]
+    profiles: dict[str, DevProfile]
     project_python_by_server: dict[str, str]
 
     def project_python_for(self, server: str) -> str | None:
         return self.project_python_by_server.get(server)
+
+    def profile_for(self, name: str) -> DevProfile:
+        try:
+            return self.profiles[name]
+        except KeyError as exc:
+            raise ValueError(f"development profile {name!r} is not configured") from exc
+
+    def source_patterns(self, profile: DevProfile | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        if profile is None:
+            return self.include, self.exclude
+
+        def merged(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
+            return tuple(dict.fromkeys((*left, *right)))
+
+        return (
+            merged(self.include, profile.include),
+            merged(self.exclude, profile.exclude),
+        )
 
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
@@ -116,6 +143,12 @@ def _text(value: Any, field: str) -> str:
         raise ValueError(f"project config {field} must be a non-empty string")
     if "\n" in value or "\r" in value:
         raise ValueError(f"project config {field} must be a single-line string")
+    return value
+
+
+def _shell_text(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ValueError(f"project config {field} must be non-empty shell text")
     return value
 
 
@@ -191,6 +224,39 @@ def _dev_project_pythons(raw: dict[str, Any]) -> dict[str, str]:
     return values
 
 
+def _dev_profiles(value: Any) -> dict[str, DevProfile]:
+    if value is None:
+        return {}
+    raw = _mapping(value, "dev.profiles")
+    if any(not isinstance(name, str) for name in raw):
+        raise ValueError("project config dev.profiles names must be strings")
+    profiles: dict[str, DevProfile] = {}
+    for name in sorted(raw):
+        if not isinstance(name, str) or PROJECT_ID_RE.fullmatch(name) is None:
+            raise ValueError(
+                "project config dev.profiles names must start with an alphanumeric "
+                "character and contain only letters, digits, dots, underscores, or hyphens"
+            )
+        profile = _mapping(raw[name], f"dev.profiles.{name}")
+        unknown = sorted(set(profile) - {"command", "include", "exclude"})
+        if unknown:
+            raise ValueError(
+                f"project config dev.profiles.{name} contains unsupported fields: "
+                + ", ".join(unknown)
+            )
+        profiles[name] = DevProfile(
+            name=name,
+            command=_shell_text(profile.get("command"), f"dev.profiles.{name}.command"),
+            include=_pattern_list(
+                profile.get("include"), f"dev.profiles.{name}.include"
+            ),
+            exclude=_pattern_list(
+                profile.get("exclude"), f"dev.profiles.{name}.exclude"
+            ),
+        )
+    return profiles
+
+
 def load_dev_project_config(path: Path) -> DevProjectConfig:
     """Load only the project fields owned by foreground development execution."""
 
@@ -219,7 +285,9 @@ def load_dev_project_config(path: Path) -> DevProjectConfig:
 
     dev_raw = raw.get("dev", {})
     dev = _mapping(dev_raw, "dev")
-    unknown = sorted(set(dev) - {"stale_after_seconds", "include", "exclude"})
+    unknown = sorted(
+        set(dev) - {"stale_after_seconds", "include", "exclude", "profiles"}
+    )
     if unknown:
         raise ValueError(
             "project config dev contains unsupported fields: " + ", ".join(unknown)
@@ -236,6 +304,7 @@ def load_dev_project_config(path: Path) -> DevProjectConfig:
         ),
         include=_pattern_list(dev.get("include"), "dev.include"),
         exclude=_pattern_list(dev.get("exclude"), "dev.exclude"),
+        profiles=_dev_profiles(dev.get("profiles")),
         project_python_by_server=_dev_project_pythons(raw),
     )
 

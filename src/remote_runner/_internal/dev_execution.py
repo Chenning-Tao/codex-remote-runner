@@ -83,6 +83,44 @@ class DevSession:
         return str(PurePosixPath(self.remote_root) / "runner.py")
 
 
+@dataclass(frozen=True)
+class DevInvocation:
+    profile: str | None
+    command: str
+    include: tuple[str, ...]
+    exclude: tuple[str, ...]
+
+
+def resolve_dev_invocation(
+    config: DevProjectConfig,
+    *,
+    command: object,
+    profile: object,
+) -> DevInvocation:
+    if command is not None and profile is not None:
+        raise ValueError("--command and --profile cannot be combined")
+    if profile is not None:
+        if not isinstance(profile, str) or not profile.strip():
+            raise ValueError("--profile must be a non-empty profile name")
+        selected = config.profile_for(profile)
+        include, exclude = config.source_patterns(selected)
+        return DevInvocation(
+            profile=selected.name,
+            command=selected.command,
+            include=include,
+            exclude=exclude,
+        )
+    if not isinstance(command, str) or not command.strip() or "\x00" in command:
+        raise ValueError("--command must be non-empty shell text without NUL bytes")
+    include, exclude = config.source_patterns(None)
+    return DevInvocation(
+        profile=None,
+        command=command,
+        include=include,
+        exclude=exclude,
+    )
+
+
 def normalize_dev_root(value: object, field: str = "dev_root") -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValueError(f"global server {field} must be a non-empty string")
@@ -173,6 +211,7 @@ DEV_RUNNER_SOURCE = r'''from __future__ import annotations
 
 import json
 import os
+import platform
 import signal
 import subprocess
 import sys
@@ -186,6 +225,81 @@ BUILD_ENVIRONMENT = (
     "CMAKE_BUILD_PARALLEL_LEVEL",
     "CARGO_BUILD_JOBS",
 )
+
+
+def memory_snapshot():
+    total = None
+    available = None
+    try:
+        values = {}
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            key, raw = line.split(":", 1)
+            parts = raw.strip().split()
+            if not parts:
+                continue
+            multiplier = 1024 if len(parts) > 1 and parts[1] == "kB" else 1
+            values[key] = int(parts[0]) * multiplier
+        total = values.get("MemTotal")
+        available = values.get("MemAvailable")
+        if available is None and total is not None:
+            available = sum(
+                values.get(key, 0) for key in ("MemFree", "Buffers", "Cached")
+            )
+    except (OSError, ValueError):
+        pass
+
+    if total is None:
+        try:
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            total_pages = int(os.sysconf("SC_PHYS_PAGES"))
+            available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+            if page_size > 0 and total_pages > 0:
+                total = page_size * total_pages
+                if available_pages >= 0:
+                    available = page_size * available_pages
+        except (OSError, ValueError, TypeError):
+            pass
+
+    if total is None:
+        try:
+            completed = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                text=True,
+                timeout=2,
+            )
+            if completed.returncode == 0:
+                total = int(completed.stdout.strip())
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+
+    if total is None or total <= 0:
+        total = None
+        available = None
+    elif available is not None and not 0 <= available <= total:
+        available = None
+    return total, available
+
+
+def resource_snapshot(config):
+    total, available = memory_snapshot()
+    return {
+        "schema": "remote-runner-dev-resources/v1",
+        "server": config["server_name"],
+        "machine_id": config["machine_id"],
+        "profile": config["profile"],
+        "configured_cores": config["cores"],
+        "assigned_cores": config["cores"],
+        "observed_logical_cpus": os.cpu_count(),
+        "memory_total_bytes": total,
+        "memory_available_bytes": available,
+        "platform": {
+            "system": platform.system(),
+            "machine": platform.machine(),
+        },
+    }
 
 
 def process_start(pid):
@@ -348,8 +462,11 @@ expected_keys = {
     "cache_root",
     "build_environment",
     "project_python",
+    "server_name",
+    "machine_id",
+    "profile",
 }
-if not isinstance(config, dict) or set(config) != expected_keys or config.get("schema_version") != 1:
+if not isinstance(config, dict) or set(config) != expected_keys or config.get("schema_version") != 2:
     print("[remote-runner dev] runner configuration is invalid", file=sys.stderr)
     raise SystemExit(125)
 
@@ -358,6 +475,12 @@ cores = str(config["cores"])
 environment["RR_SERVER_CORES"] = cores
 environment["RR_ASSIGNED_CORES"] = cores
 environment["RR_DEV_CACHE_DIR"] = config["cache_root"]
+environment["RR_RESOURCE_JSON"] = json.dumps(
+    resource_snapshot(config), sort_keys=True, separators=(",", ":")
+)
+environment.pop("RR_DEV_PROFILE", None)
+if config["profile"] is not None:
+    environment["RR_DEV_PROFILE"] = config["profile"]
 project_python = config["project_python"]
 if project_python is not None:
     if (
@@ -1023,11 +1146,14 @@ def validate_runner_config(config, dev_root, project_id, session_id, token):
         "cache_root",
         "build_environment",
         "project_python",
+        "server_name",
+        "machine_id",
+        "profile",
     }
     if not isinstance(config, dict) or set(config) != expected_keys:
         raise ValueError("runner configuration is invalid")
     expected_cache = dev_root + "/" + project_id + "/cache"
-    if config.get("schema_version") != 1:
+    if config.get("schema_version") != 2:
         raise ValueError("runner configuration is invalid")
     if config.get("dev_root") != dev_root or config.get("project_id") != project_id:
         raise ValueError("runner configuration path ownership is invalid")
@@ -1038,6 +1164,15 @@ def validate_runner_config(config, dev_root, project_id, session_id, token):
         raise ValueError("runner configuration cores are invalid")
     if config.get("cache_root") != expected_cache:
         raise ValueError("runner configuration cache path is invalid")
+    for field in ("server_name", "machine_id"):
+        value = config.get(field)
+        if not isinstance(value, str) or PROJECT_RE.fullmatch(value) is None:
+            raise ValueError(f"runner configuration {field} is invalid")
+    profile = config.get("profile")
+    if profile is not None and (
+        not isinstance(profile, str) or PROJECT_RE.fullmatch(profile) is None
+    ):
+        raise ValueError("runner configuration profile is invalid")
     build_environment = config.get("build_environment")
     if not isinstance(build_environment, dict):
         raise ValueError("runner build environment is invalid")
@@ -1378,6 +1513,7 @@ def _session_payload(
     server: DevServer,
     session: DevSession,
     command: str | None = None,
+    profile: str | None = None,
     cancel_timeout: int | None = None,
     record_if_absent: bool = False,
 ) -> dict[str, Any]:
@@ -1399,7 +1535,7 @@ def _session_payload(
                 "runner_source": DEV_RUNNER_SOURCE,
                 "cleanup_source": REMOTE_HELPER_SOURCE,
                 "runner_config": {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "dev_root": server.dev_root,
                     "project_id": config.project_id,
                     "session_id": session.session_id,
@@ -1408,6 +1544,9 @@ def _session_payload(
                     "cache_root": session.cache_root,
                     "build_environment": build_environment,
                     "project_python": config.project_python_for(server.name),
+                    "server_name": server.name,
+                    "machine_id": server.machine_id,
+                    "profile": profile,
                 },
             }
         )
@@ -1472,19 +1611,18 @@ def resolve_source_root(config: DevProjectConfig, override: Path | None) -> Path
 
 
 def run_dev(args: argparse.Namespace) -> int:
-    if (
-        not isinstance(args.command, str)
-        or not args.command.strip()
-        or "\x00" in args.command
-    ):
-        raise ValueError("--command must be non-empty shell text without NUL bytes")
     config_path = resolve_project_config(args.project_config)
     config = load_dev_project_config(config_path)
+    invocation = resolve_dev_invocation(
+        config,
+        command=getattr(args, "command", None),
+        profile=getattr(args, "profile", None),
+    )
     source_root = resolve_source_root(config, args.source_root)
     plan = build_source_plan(
         source_root,
-        include=config.include,
-        exclude=config.exclude,
+        include=invocation.include,
+        exclude=invocation.exclude,
     )
     registry_path = args.server_registry.expanduser().resolve(strict=True)
     server = resolve_dev_server(
@@ -1531,7 +1669,8 @@ def run_dev(args: argparse.Namespace) -> int:
                 config=config,
                 server=server,
                 session=session,
-                command=args.command,
+                command=invocation.command,
+                profile=invocation.profile,
             ),
             timeout=args.timeout,
         )

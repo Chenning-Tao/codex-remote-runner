@@ -206,7 +206,12 @@ def build_parser() -> argparse.ArgumentParser:
     dev_parser.add_argument("--server", required=True)
     dev_parser.add_argument("--ssh-profile", default="auto")
     dev_parser.add_argument("--timeout", type=_positive_int, default=8)
-    dev_parser.add_argument("--command", required=True)
+    dev_invocation = dev_parser.add_mutually_exclusive_group(required=True)
+    dev_invocation.add_argument("--command")
+    dev_invocation.add_argument(
+        "--profile",
+        help="use one named opaque command and source-filter profile from project config",
+    )
 
     monitor_parser = subparsers.add_parser(
         "monitor",

@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## Unreleased
+
+### Added
+
+- Added named foreground dev profiles that bind one opaque project command to
+  profile-specific source include/exclude filters while preserving direct `--command`.
+- Added `RR_RESOURCE_JSON` and `RR_DEV_PROFILE` so workloads can consume selected
+  machine/core, live memory, platform, and profile facts without Remote Runner
+  deciding project worker topology.
+
 ## 0.9.8 - 2026-08-17
 
 ### Added

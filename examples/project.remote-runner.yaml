@@ -13,6 +13,11 @@ dev:
   include: []
   exclude:
     - local-large-data/
+  profiles:
+    full-tests:
+      command: scripts/validate-full-tests.sh
+      include:
+        - artifacts/native-program.bin
 
 remote:
   compute-a:

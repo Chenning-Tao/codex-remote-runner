@@ -104,6 +104,63 @@ def test_dev_config_reuses_selected_remote_project_python(tmp_path: Path) -> Non
     assert config.project_python_for("compute-b") is None
 
 
+def test_dev_config_loads_named_profiles_and_extends_source_filters(tmp_path: Path) -> None:
+    config_path = tmp_path / ".remote-runner.yaml"
+    write_yaml(
+        config_path,
+        {
+            "project_id": "example",
+            "source": {"local_repo": "."},
+            "dev": {
+                "include": ["shared/generated.json"],
+                "exclude": ["local-data/"],
+                "profiles": {
+                    "full-tests": {
+                        "command": "scripts/validate.sh\n",
+                        "include": [
+                            "shared/generated.json",
+                            "artifacts/program.bin",
+                        ],
+                        "exclude": ["scratch/"],
+                    }
+                },
+            },
+        },
+    )
+
+    config = load_dev_project_config(config_path)
+    profile = config.profile_for("full-tests")
+
+    assert profile.command == "scripts/validate.sh\n"
+    assert config.source_patterns(profile) == (
+        ("shared/generated.json", "artifacts/program.bin"),
+        ("local-data/", "scratch/"),
+    )
+    with pytest.raises(ValueError, match="is not configured"):
+        config.profile_for("missing")
+
+
+def test_dev_config_rejects_unknown_profile_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / ".remote-runner.yaml"
+    write_yaml(
+        config_path,
+        {
+            "project_id": "example",
+            "dev": {
+                "profiles": {
+                    "full-tests": {
+                        "command": "scripts/validate.sh",
+                        "server": "compute-a",
+                    }
+                }
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="unsupported fields: server"):
+        load_dev_project_config(config_path)
+
+
 def test_loads_default_all_succeeded_output_sync_config(tmp_path: Path) -> None:
     path = managed_config(tmp_path)
     raw = load_yaml(path)

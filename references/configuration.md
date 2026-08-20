@@ -151,6 +151,13 @@ dev:
     - build/generated-schema.py
   exclude:
     - local-large-data/
+  profiles:
+    full-tests:
+      command: scripts/validate-full-tests.sh
+      include:
+        - artifacts/native-program.bin
+      exclude:
+        - local-benchmarks/
 ```
 
 `source.local_repo` may point at dirty, untracked, or non-Git source for `dev`. This is
@@ -159,6 +166,20 @@ not an outer notes/results repository. Unknown `dev` fields, duplicate/non-norma
 patterns, and non-positive stale thresholds fail closed. A project file containing
 only `project_id`, optional `source.local_repo`, and optional `dev` is sufficient for
 `dev`; the managed `run` loader remains strict and unchanged.
+
+Each profile stores one opaque shell command plus optional source filters. Profile
+`include`/`exclude` entries extend the top-level dev filters with stable de-duplication;
+they do not replace them. Profile names use the same safe component alphabet as
+`project_id`. Invoke exactly one of `dev --profile NAME` and `dev --command TEXT`;
+the direct command path remains backward compatible.
+
+The workload receives `RR_DEV_PROFILE` when a profile was selected and always receives
+`RR_RESOURCE_JSON`. The latter is compact JSON with schema
+`remote-runner-dev-resources/v1` and contains the selected server alias, stable
+`machine_id`, selected profile or null, configured/assigned cores, observed logical
+CPU count, live total/available memory when observable, and remote platform system and
+machine. These are resource facts only: Remote Runner does not derive a worker count,
+rewrite the opaque command, or make memory an admission constraint.
 
 ## Eligibility And Maintenance
 

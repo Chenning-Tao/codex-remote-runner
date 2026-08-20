@@ -44,6 +44,12 @@ remote-runner dev \
   --command 'python3 -m pytest -q'
 ```
 
+When the project config defines the requested named dev profile, prefer
+`--profile NAME` and do not reconstruct its opaque command or ignored source inputs in
+the model turn. Use direct `--command` only when no suitable profile exists. Workloads
+may consume `RR_RESOURCE_JSON`; Remote Runner supplies resource facts but never chooses
+project worker topology.
+
 It creates no run ID, queue record, Web entry, output sync, or scientific provenance.
 It also acquires no controller lease. Treat both core variables as whole-machine usage
 hints, avoid contention with durable work, and remember that the persistent dev cache
