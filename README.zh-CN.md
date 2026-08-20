@@ -45,7 +45,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.6'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.9'
 remote-runner --help
 ```
 
@@ -91,7 +91,7 @@ Remote Runner 使用两个 YAML 文件：
 
 可以从 [examples/remote-servers.yaml](examples/remote-servers.yaml) 和 [examples/project.remote-runner.yaml](examples/project.remote-runner.yaml) 开始。完整配置契约和环境准备要求见 [references/configuration.md](references/configuration.md)。
 
-例如，为一台服务器设置 `dev_root: /srv/remote-runner-dev` 即可启用直接开发测试。项目可选配置 `dev.include`、`dev.exclude` 和 `dev.stale_after_seconds`；最小 schema 见上述示例。
+例如，为一台服务器设置 `dev_root: /srv/remote-runner-dev` 即可启用直接开发测试。项目可选配置 `dev.include`、`dev.exclude`、`dev.stale_after_seconds` 和具名 `dev.profiles`；最小 schema 见上述示例。
 
 ## 网页控制台
 
@@ -155,6 +155,19 @@ remote-runner dev \
   --command 'python3 -m pytest -q'
 ```
 
+项目已经定义稳定 profile 时，直接选择 profile，不再让每次调用重新拼接命令和 ignored
+输入：
+
+```bash
+remote-runner dev \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --server compute-a \
+  --profile full-tests
+```
+
+`--profile` 与 `--command` 互斥。profile 保存一条 opaque command，并在项目级 dev
+过滤器之上追加 include/exclude；Remote Runner 仍不理解或改写命令。
+
 除非用 `--source-root` 指定另一个绝对目录，`dev` 会使用
 `source.local_repo`。Git 源码根会传输 tracked 文件的当前磁盘字节和未被 ignore
 的 untracked 文件；被 ignore 的文件必须通过 `dev.include` 明确加入。非 Git 根
@@ -173,6 +186,10 @@ remote-runner dev \
 服务器可能与正式任务争用资源。若本地未显式设置，`MAKEFLAGS`、
 `CMAKE_BUILD_PARALLEL_LEVEL` 与 `CARGO_BUILD_JOBS` 默认使用全部注册核心；opaque
 命令本身不会被改写。
+每个 workload 还会收到紧凑的 `RR_RESOURCE_JSON`，其中包含所选 server、稳定
+machine identity、configured/assigned cores、观测到的逻辑 CPU、可观测时的实时总/可用
+内存、平台信息，以及所选 profile 或 null。profile 调用另有 `RR_DEV_PROFILE`。这些只是
+交给项目命令的资源事实；内存仍是 telemetry，Remote Runner 不替项目决定 worker 拓扑。
 
 常用的后续命令：
 

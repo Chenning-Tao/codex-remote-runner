@@ -30,6 +30,7 @@ def help_text(*args: str) -> str:
 def test_public_cli_has_exact_lifecycle_subcommands() -> None:
     top_level = help_text()
     for subcommand in (
+        "dev",
         "prepare",
         "run",
         "monitor",
@@ -58,6 +59,33 @@ def test_public_cli_has_exact_lifecycle_subcommands() -> None:
 
 
 def test_public_subcommands_preserve_lifecycle_arguments() -> None:
+    dev_help = help_text("dev")
+    assert "--command" in dev_help
+    assert "--profile" in dev_help
+    parsed_dev_profile = cli.build_parser().parse_args(
+        ["dev", "--server", "compute-a", "--profile", "full-tests"]
+    )
+    assert parsed_dev_profile.profile == "full-tests"
+    assert parsed_dev_profile.command is None
+    parsed_dev_command = cli.build_parser().parse_args(
+        ["dev", "--server", "compute-a", "--command", "true"]
+    )
+    assert parsed_dev_command.command == "true"
+    assert parsed_dev_command.profile is None
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["dev", "--server", "compute-a"])
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            [
+                "dev",
+                "--server",
+                "compute-a",
+                "--command",
+                "true",
+                "--profile",
+                "full-tests",
+            ]
+        )
     prepare_help = help_text("prepare")
     assert "--out" in prepare_help
     assert "--candidate-server" in prepare_help
@@ -188,6 +216,8 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
     ):
         assert command in skill
     assert "remote-runner tui" not in skill
+    assert "--profile NAME" in skill
+    assert "RR_RESOURCE_JSON" in skill
     assert "Treat the local Git repository as the only source authority" in skill
     assert (
         "Run and follow durable remote workloads"
