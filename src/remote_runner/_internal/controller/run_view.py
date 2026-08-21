@@ -27,7 +27,7 @@ def _queue_projection(
     job: dict[str, Any],
     state: dict[str, Any],
 ) -> dict[str, Any]:
-    return {
+    projection = {
         "status": state["status"],
         "revision": state["revision"],
         "updated_at": state["updated_at"],
@@ -36,6 +36,10 @@ def _queue_projection(
         "task_id": job["task_id"],
         "workload_class": job["workload_class"],
     }
+    derivation = job.get("derivation")
+    if derivation is not None:
+        projection["derivation"] = derivation
+    return projection
 
 
 def _execution_projection(row: dict[str, Any]) -> dict[str, Any]:

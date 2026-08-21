@@ -36,6 +36,7 @@ from ..machine_identity import (
     normalize_machine_fingerprint,
     normalize_server_identity,
 )
+from ..derivation import derived_run_id, spec_digest, validate_relation
 from ..output_sync import validate_config_payload
 from ..scheduling import (
     normalize_minimum_cores,
@@ -47,6 +48,10 @@ from ..scheduling import (
 
 
 QUEUE_SCHEMA = 5
+# Derived validation jobs use their own queue format instead of an optional field
+# on the ordinary one. A runtime that predates derived runs must not be able to
+# dispatch one: it would launch the validator without its frozen source identity.
+DERIVED_QUEUE_SCHEMA = 6
 PREVIOUS_QUEUE_SCHEMA = 4
 PRIORITY_QUEUE_SCHEMA = 3
 RELATIVE_OUTPUT_QUEUE_SCHEMA = 2
@@ -956,8 +961,16 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
         PRIORITY_QUEUE_SCHEMA,
         PREVIOUS_QUEUE_SCHEMA,
         QUEUE_SCHEMA,
+        DERIVED_QUEUE_SCHEMA,
     }:
         raise ValueError("unsupported queued job schema")
+    derivation = job.get("derivation")
+    if schema == DERIVED_QUEUE_SCHEMA:
+        if derivation is None:
+            raise ValueError("derived queued job requires a derivation relation")
+        job["derivation"] = validate_relation(derivation)
+    elif derivation is not None:
+        raise ValueError("only derived queued jobs may carry a derivation relation")
     for field in (
         "run_id",
         "project_id",
@@ -999,6 +1012,8 @@ def _validate_job(job: dict[str, Any]) -> dict[str, Any]:
         job["workload_class"] = "standard"
     else:
         job["workload_class"] = normalize_workload_class(job["workload_class"])
+    if schema == DERIVED_QUEUE_SCHEMA and job["workload_class"] != "test":
+        raise ValueError("derived queued job must use the test workload class")
     if "minimum_cores" not in job:
         job["minimum_cores"] = 1
     else:
@@ -1234,6 +1249,120 @@ def submit_job(
             with contextlib.suppress(FileNotFoundError):
                 temporary.rmdir()
     return destination
+
+
+def _derived_spec_sha256(job: dict[str, Any]) -> str:
+    return spec_digest(
+        job["derivation"],
+        label=str(job["label"]),
+        task_id=str(job["task_id"]),
+        submitted_command_sha256=str(job["submitted_command_sha256"]),
+        minimum_cores=int(job["minimum_cores"]),
+        requested_cores=job.get("requested_cores"),
+        workload_class=str(job["workload_class"]),
+        output_relpath=str(job["output_relpath"]),
+        privacy=job.get("privacy"),
+        eligible_servers=[str(name) for name in job["eligible_servers"]],
+    )
+
+
+def ensure_derived_job(
+    paths: ControllerPaths,
+    job: dict[str, Any],
+    *,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Submit or reuse the one validator run a derivation identity may own.
+
+    `submit_job` cannot express this: it stamps the ordinary queue schema, always
+    takes a fresh queue position, and treats an existing entry as an error instead
+    of as the answer. The run ID is recomputed here from the relation, so a client
+    can only confirm the identity it was given, never choose one.
+    """
+    job = dict(job)
+    if isinstance(job.get("prepared_servers"), list):
+        job["prepared_servers"] = [
+            dict(server) if isinstance(server, dict) else server
+            for server in job["prepared_servers"]
+        ]
+    relation = validate_relation(job.get("derivation"))
+    job["derivation"] = relation
+    run_id = derived_run_id(
+        project_id=paths.project_id,
+        source_run_id=relation["source_run_id"],
+        validator_key=relation["validator_key"],
+    )
+    submitted_run_id = job.get("run_id")
+    if submitted_run_id is not None and str(submitted_run_id) != run_id:
+        raise ValueError(
+            f"submitted validator run id {submitted_run_id!r} does not match the "
+            f"derived identity {run_id!r}"
+        )
+    created_at = now or utc_now()
+    job.update(
+        {
+            "schema_version": DERIVED_QUEUE_SCHEMA,
+            "run_id": run_id,
+            "project_id": paths.project_id,
+            "created_at": created_at,
+            "queue_position": time.time_ns(),
+        }
+    )
+    _validate_job(job)
+    recomputed = _derived_spec_sha256(job)
+    if recomputed != relation["spec_sha256"]:
+        raise ValueError(
+            "submitted validator spec digest does not match the submitted job"
+        )
+    state = {
+        "state_schema_version": QUEUE_STATE_SCHEMA,
+        "run_id": run_id,
+        "revision": 0,
+        "status": "queued",
+        "created_at": created_at,
+        "updated_at": created_at,
+        "error": None,
+    }
+    _ensure_controller_tree(paths)
+    _private_tree(paths.queue_dir)
+    with _queue_lock(paths):
+        if _load_run_tombstone_unlocked(paths, run_id) is not None:
+            raise ValueError(f"run id has been purged and cannot be reused: {run_id}")
+        destination = _queue_entry_dir(paths, run_id)
+        if destination.exists():
+            existing_job, existing_state = load_job(paths, run_id)
+            existing = validate_relation(existing_job.get("derivation"))
+            # Comparing relations is enough: each side's spec digest was recomputed
+            # from its own job before it was written, so equal relations mean equal
+            # commands, resources, output paths, and placement.
+            if existing != relation:
+                raise ValueError(
+                    f"validator run {run_id} already exists with a different "
+                    "immutable spec; submit the changed validator under a new key"
+                )
+            return {
+                "disposition": "reused",
+                "run_id": run_id,
+                "queue_entry": str(destination),
+                "queue_status": existing_state["status"],
+                "derivation": existing,
+            }
+        temporary = Path(tempfile.mkdtemp(prefix=f".{run_id}.", dir=paths.queue_dir))
+        try:
+            os.chmod(temporary, 0o700)
+            write_yaml(temporary / "job.yaml", job)
+            write_yaml(temporary / "state.yaml", state)
+            os.rename(temporary, destination)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                temporary.rmdir()
+        return {
+            "disposition": "created",
+            "run_id": run_id,
+            "queue_entry": str(destination),
+            "queue_status": state["status"],
+            "derivation": relation,
+        }
 
 
 def load_job(

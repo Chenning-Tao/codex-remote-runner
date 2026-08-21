@@ -18,9 +18,34 @@ from .execution_registry import (
     runtime_path,
     sha256_bytes,
 )
+from .derivation import validate_relation
 from .output_paths import validate_resolved_output
 from .remote_shell import remote_python_stdin_command, ssh_connection_options
 from .tmux import run_tmux_session
+
+
+SOURCE_CONTEXT_ENVIRONMENT = (
+    "RR_SOURCE_RUN_ID",
+    "RR_SOURCE_REVISION",
+    "RR_SOURCE_SERVER",
+    "RR_SOURCE_ARTIFACT_PATH",
+    "RR_VALIDATOR_KEY",
+)
+
+
+def source_context_environment(manifest: dict[str, Any]) -> dict[str, str] | None:
+    """Return the frozen source identity a derived validation run runs with."""
+    derivation = manifest.get("derivation")
+    if derivation is None:
+        return None
+    relation = validate_relation(derivation)
+    return {
+        "RR_SOURCE_RUN_ID": relation["source_run_id"],
+        "RR_SOURCE_REVISION": relation["source_revision"],
+        "RR_SOURCE_SERVER": relation["source_server"],
+        "RR_SOURCE_ARTIFACT_PATH": relation["source_artifact"]["target_path"],
+        "RR_VALIDATOR_KEY": relation["validator_key"],
+    }
 
 
 @dataclass(frozen=True)
@@ -245,12 +270,14 @@ def _wrapper_source(
     *,
     output_root: str | None = None,
     output_path: str | None = None,
+    source_context: dict[str, str] | None = None,
 ) -> str:
     quoted_run_id = shlex.quote(run_id)
     quoted_label_json = shlex.quote(json.dumps(label, ensure_ascii=True))
     quoted_workdir = shlex.quote(workdir)
     quoted_project_python = shlex.quote(project_python)
     quoted_workload_class = shlex.quote(workload_class)
+    source_context_unset = " ".join(SOURCE_CONTEXT_ENVIRONMENT)
     workload_environment = [
         f"RR_PROJECT_PYTHON={quoted_project_python}",
         f"RR_ASSIGNED_CORES={assigned_cores}",
@@ -264,6 +291,11 @@ def _wrapper_source(
                 f"RR_OUTPUT_PATH={shlex.quote(output_path)}",
                 f"RR_OUTPUT_DIR={shlex.quote(str(PurePosixPath(output_path).parent))}",
             )
+        )
+    if source_context is not None:
+        workload_environment.extend(
+            f"{name}={shlex.quote(source_context[name])}"
+            for name in SOURCE_CONTEXT_ENVIRONMENT
         )
     workload_prefix = " ".join(workload_environment)
     supervisor_b64 = base64.b64encode(
@@ -335,7 +367,7 @@ printf '[REMOTE_RUNNER_START] %s\n' "$started_at"
 write_status running null null || exit 125
 cd -- "$workdir" || exit 125
 
-unset RR_OUTPUT_ROOT RR_OUTPUT_PATH RR_OUTPUT_DIR RR_ASSIGNED_CORES RR_SERVER_CORES
+unset RR_OUTPUT_ROOT RR_OUTPUT_PATH RR_OUTPUT_DIR RR_ASSIGNED_CORES RR_SERVER_CORES {source_context_unset}
 {workload_prefix} {quoted_project_python} -c 'import base64,os,sys; os.setsid(); os.execv(sys.executable, ("remote-runner:" + sys.argv[1], "-c", base64.b64decode(sys.argv[3]).decode(), sys.argv[1], sys.argv[2]))' "$run_id" "$runtime_dir" {supervisor_b64!r} \
   < "${{runtime_dir}}/command.sh" &
 workload_pid=$!
@@ -838,6 +870,7 @@ def build_launch_plan(paths: ProjectPaths, run_id: str) -> LaunchPlan:
         int(manifest["configured_cores"]),
         output_root=output_root,
         output_path=output_path,
+        source_context=source_context_environment(manifest),
     ).encode()
     asset_list = [
         LaunchAsset("run.sh", wrapper_bytes, sha256_bytes(wrapper_bytes), 0o700),
