@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- Made the workload supervisor fail closed with internal exit code 125 when it
+  cannot inspect process-group membership, instead of retrying forever and
+  leaking a CPU-consuming supervisor. Test teardown can now reap its owned
+  process group even when the sandbox denies `ps`.
+
 ## 0.9.9 - 2026-08-20
 
 ### Added

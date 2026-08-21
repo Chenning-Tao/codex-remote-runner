@@ -39,13 +39,19 @@ def _owned_test_group(runtime: Path) -> tuple[int, str] | None:
         or pgid == os.getpgrp()
     ):
         return None
-    inspected = subprocess.run(
-        ["ps", "-ww", "-p", str(pid), "-o", "pid=,pgid=,command="],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        check=False,
-    )
+    try:
+        inspected = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "pid=,pgid=,command="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        try:
+            return (pgid, run_id) if os.getpgid(pid) == pgid else None
+        except (ProcessLookupError, PermissionError):
+            return None
     fields = inspected.stdout.strip().split(None, 2)
     if len(fields) != 3:
         return None

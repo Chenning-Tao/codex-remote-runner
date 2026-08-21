@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import shlex
 import signal
 import stat
@@ -417,6 +418,61 @@ def test_wrapper_does_not_depend_on_path_python3(tmp_path: Path) -> None:
 
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
     assert wait_for_json(runtime / "status.json")["state"] == "succeeded"
+
+
+def test_wrapper_never_hangs_without_process_group_inspection_tools(
+    tmp_path: Path,
+) -> None:
+    """Removing `ps` must never leave a spinning supervisor behind.
+
+    The two supported inspection mechanisms fail differently and the test asserts
+    both: where `/proc` exists the supervisor reads group membership from it,
+    needs no external tool, and the run simply succeeds; where it does not, the
+    `ps` fallback fails closed with internal status 125 instead of looping.
+    """
+    _config, plan = register_local_run(tmp_path, "printf 'ok\\n'\n")
+    runtime = install_plan_runtime(plan, tmp_path / "home")
+    restricted_bin = tmp_path / "bin-without-ps"
+    restricted_bin.mkdir()
+    for executable in ("bash", "chmod", "date", "mv", "sleep"):
+        resolved = shutil.which(executable)
+        assert resolved is not None
+        (restricted_bin / executable).symlink_to(resolved)
+
+    wrapper = subprocess.Popen(
+        ["bash", str(runtime / "run.sh")],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PATH": str(restricted_bin)},
+        text=True,
+    )
+    try:
+        try:
+            returncode = wrapper.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pytest.fail("wrapper hung when process-group inspection was unavailable")
+        status = wait_for_json(runtime / "status.json")
+        if Path("/proc").is_dir():
+            assert returncode == 0, wrapper.stderr
+            assert status["state"] == "succeeded"
+        else:
+            assert returncode == 125
+            assert status["state"] == "failed"
+            assert status["exit_code"] == 125
+            assert "process-group inspection failed" in (
+                runtime / "log"
+            ).read_text(encoding="utf-8")
+    finally:
+        if wrapper.poll() is None:
+            try:
+                owner = json.loads(
+                    (runtime / "owner.json").read_text(encoding="utf-8")
+                )
+                os.killpg(int(owner["pgid"]), signal.SIGKILL)
+            except (FileNotFoundError, ProcessLookupError, KeyError, ValueError):
+                pass
+            wrapper.terminate()
+            wrapper.wait(timeout=5)
 
 
 def test_bootstrap_installs_private_runtime_and_starts_tmux(tmp_path: Path) -> None:

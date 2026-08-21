@@ -159,8 +159,10 @@ def group_has_other_members() -> bool:
             start_new_session=True,
         )
         stdout, _ = process.communicate()
-    except OSError:
-        return True
+    except OSError as exc:
+        raise RuntimeError("process-group inspection failed") from exc
+    if process.returncode != 0:
+        raise RuntimeError("process-group inspection failed")
     for line in stdout.splitlines():
         fields = line.strip().split()
         try:
@@ -192,8 +194,12 @@ elif os.WIFSIGNALED(child_status):
 else:
     child_exit_code = 1
 
-while group_has_other_members():
-    time.sleep(0.05)
+try:
+    while group_has_other_members():
+        time.sleep(0.05)
+except RuntimeError as exc:
+    print("[REMOTE_RUNNER_ERROR] " + str(exc), file=sys.stderr, flush=True)
+    raise SystemExit(125)
 
 if stopping or (runtime_dir / "stop.request").exists():
     raise SystemExit(143)
