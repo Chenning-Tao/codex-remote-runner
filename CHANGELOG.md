@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## 0.10.1 - 2026-08-21
+
+### Changed
+
+- The skill contract now leads with the three entry points (`dev`, `run`,
+  `validate-run`) instead of with reference loading, states the exit codes that
+  `wait`, `wait-cohort`, and `validate-run` return, and completes the command map with
+  `sync-pool`, `add-server`, `drain-server`, `resume-server`, `retire-server`, and
+  `web`. The skill and agent descriptions now name derived validation and cohort
+  waiting, so sessions asking for either can match them.
+
 ## 0.10.0 - 2026-08-21
 
 ### Added

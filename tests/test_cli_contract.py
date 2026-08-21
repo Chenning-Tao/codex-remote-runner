@@ -204,6 +204,7 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
     for command in (
         "remote-runner prepare",
         "remote-runner run",
+        "remote-runner validate-run",
         "remote-runner monitor",
         "remote-runner wait",
         "remote-runner wait-cohort",
@@ -220,7 +221,7 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
     assert "RR_RESOURCE_JSON" in skill
     assert "Treat the local Git repository as the only source authority" in skill
     assert (
-        "Run and follow durable remote workloads"
+        "Run, follow, and validate durable remote workloads"
         == metadata["interface"]["short_description"]
     )
     prompt = metadata["interface"]["default_prompt"]

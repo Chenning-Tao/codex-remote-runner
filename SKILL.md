@@ -1,23 +1,26 @@
 ---
 name: remote-runner
-description: Run disposable dirty-tree development tests or submit, monitor, wait for, stop, purge, and synchronize durable workloads on project-configured remote servers. Use dev only for foreground direct execution; durable work executes an exact clean committed Git revision through the controller-owned lifecycle.
+description: Submit, monitor, wait for, stop, purge, and synchronize durable workloads on project-configured remote servers; wait for one run or an exact multi-run cohort; derive one validator run from a reportable run and read back its project result JSON; or run an explicitly requested foreground test of the current dirty or untracked source. Durable work executes an exact clean committed Git revision through the controller-owned lifecycle.
 ---
 
 # Remote Runner
 
-Use direct SSH only for short probes. Use `remote-runner` when work must persist,
-queue, remain discoverable, or support later status, wait, stop, and artifact sync.
-Use `remote-runner dev` only for an explicitly requested foreground test of current
-local source that does not need those durable properties.
+Use direct SSH only for a short read-only probe. Anything that must persist, queue,
+stay discoverable, or support later status, wait, stop, and artifact retrieval belongs
+to `remote-runner`.
 
-## Load Relevant Context
+## Choose One Entry Point
 
-- Read [references/configuration.md](references/configuration.md) for infrastructure,
-  capacity, drains, output transport, and retirement.
-- Read [references/submission.md](references/submission.md) for source preparation,
-  placement, priority, workload class, command, and output identity.
-- Read [references/lifecycle.md](references/lifecycle.md) for status, explicit waits,
-  stop, cleanup, purge, output sync, and pruning.
+- `dev`: an explicitly requested foreground test of current local source, including
+  dirty or untracked files. No run ID, no queue record, no provenance.
+- `run`: durable queued work. It requires a clean committed revision and returns the
+  exact run ID that later status, waits, and artifacts hang from.
+- `validate-run`: one validator derived from an already reportable run. Its revision,
+  placement, run ID, and duplicate protection are derived rather than chosen.
+
+Do not build a second scheduler, run registry, or artifact-retrieval path around these.
+The workload may run its own internal workers, but server choice, allocation, queue
+state, run identity, lifecycle, and artifact reads stay with Remote Runner.
 
 ## Preserve The Boundary
 
@@ -134,6 +137,21 @@ long polls keyed by exact etags; cohort waits use one batched controller request
 than one process per run. Unchanged timeouts renew transport inside the CLI and do not
 trigger model polling. Process exit plus final stdout JSON is the completion signal.
 
+## Read The Exit Code
+
+Waits and derived validations report their outcome in the process exit status, not only
+in prose:
+
+- `wait` and `wait-cohort`: `0` the requested condition held; `3` the observation window
+  expired while the controller still owns the run; `4` a run failed, stopped, or needs
+  attention.
+- `validate-run`: `0` validated and the result JSON retrieved; `1` reportable but the
+  guarded result read failed; `2` invalid usage, configuration, or identity contract;
+  `3` observation window expired; `4` validator failure or attention.
+
+A non-zero code is a fact to report, not a reason to resubmit. Rerun the identical
+command to resume the same run; never rotate a run ID or validator key to escape one.
+
 ## Keep Execution And Bytes Orthogonal
 
 Output sync proves source/target paths, transferred bytes, checksum verification, and
@@ -181,3 +199,18 @@ or destruction remains the user's responsibility.
 - `remote-runner purge-task`: preview and remove exact expanded run IDs.
 - `remote-runner sync-outputs`: configure or resume artifact transport.
 - `remote-runner prune-outputs`: remove checksum-verified source bytes.
+- `remote-runner sync-pool`: extend queued automatic pools to newly prepared servers.
+- `remote-runner add-server`: append one prepared server to one exact queued run.
+- `remote-runner drain-server` and `resume-server`: control controller-wide admission
+  without stopping active work.
+- `remote-runner retire-server`: preview and remove one server's runner configuration.
+- `remote-runner web`: open the optional local dashboard for the current project.
+
+## Load Details Only When Needed
+
+- [references/configuration.md](references/configuration.md): infrastructure, capacity,
+  drains, output transport, retirement.
+- [references/submission.md](references/submission.md): source preparation, placement,
+  priority, workload class, command, output identity, derived validation.
+- [references/lifecycle.md](references/lifecycle.md): status, explicit waits, exit
+  codes, stop, cleanup, purge, output sync, pruning.
