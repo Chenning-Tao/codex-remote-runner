@@ -434,6 +434,11 @@ def validate_current_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             f"core manifest contains deferred fields: {', '.join(forbidden)}"
         )
     process_title_privacy_mode(manifest)
+    derivation = manifest.get("derivation")
+    if derivation is not None and not isinstance(derivation, dict):
+        # The relation itself is validated where it is produced and consumed; this
+        # low-level record only refuses a shape it could never carry.
+        raise ValueError("manifest derivation must be a mapping")
     manifest["workload_class"] = normalize_workload_class(
         manifest.get("workload_class", "standard")
     )

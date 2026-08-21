@@ -88,6 +88,11 @@ appends `--num-workers` or rewrites another workload argument. The workload rece
 - `RR_OUTPUT_PATH`: exact resolved output path;
 - `RR_OUTPUT_DIR`: parent directory of the resolved output path.
 
+Derived validation runs additionally receive `RR_SOURCE_RUN_ID`,
+`RR_SOURCE_REVISION`, `RR_SOURCE_SERVER`, `RR_SOURCE_ARTIFACT_PATH`, and
+`RR_VALIDATOR_KEY`. Those values are frozen from controller-owned records at
+submission and are never rebuilt from a label, output metadata, or caller text.
+
 The workload owns all domain interpretation and parallelism choices.
 
 ## Output Identity
@@ -96,6 +101,40 @@ Prefer normalized relative POSIX `--output-relpath`. Every eligible server must 
 an `output_root`; the controller resolves the physical path only after placement.
 Output metadata is opaque JSON. Remote Runner does not infer a result, verdict, or
 scientific identity from paths, metadata, commands, labels, stdout, or timestamps.
+
+## Derived Validation Runs
+
+`validate-run` submits one validator for one exact reportable source run. The caller
+declares only the source run, a stable validator key, an opaque project command, and the
+relative path of one small result JSON. Remote Runner derives everything else from its
+own records: the source revision, the canonical artifact and its archive target, the
+test-lane placement, a portable output path, and the validator run ID.
+
+Placement is fixed: the validator runs on the archive target that already holds the
+canonical artifact, so the archive target must also appear in
+`scheduling.testing.servers` and must configure positive `testing.slots`. That coupling
+is part of the contract, not an incidental restriction. The validator defaults to one
+core and shares the same physical core budget as the standard lane.
+
+Identity is deterministic. A `(project, source run, validator key)` triple resolves to
+one run ID, and the controller recomputes that ID rather than trusting a submitted one.
+An exact retry returns the same run as `reused`; a different command, core count, result
+path, or privacy mode is a conflict. Because the run ID does not include the spec digest,
+one validator key owns one terminal validator run: a failed validator is not rerun under
+the same key, and reverifying requires a new key.
+
+The source gate refuses anything it cannot prove from controller-local records: a
+missing, failed, stopped, unsynchronized, or attention-required source, a receipt that
+is not checksum verified, a revision or server that disagrees across queue, execution,
+and receipt, an archive path outside the configured archive root, and any attempt to
+derive a validator from a validator.
+
+Result retrieval is bounded and one-directional. After the validator is reportable and
+succeeded, Remote Runner reads exactly one file below the checksum-verified validator
+artifact: normalized relative path, no symlink in the root or any component, regular
+file only, at most 1 MiB, digest verified end to end, and a JSON object at the top
+level. The payload is returned verbatim. Remote Runner reports `result_retrieved`, never
+`accepted`.
 
 ## Queue Controls
 

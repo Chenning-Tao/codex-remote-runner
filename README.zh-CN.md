@@ -144,6 +144,30 @@ workload 命令不会被追加 `--num-workers` 或做其他改写；程序自行
 输出同步只证明路径、传输字节、checksum 和 receipt。failed/stopped run 也可以
 同步 checkpoint；同步完成不会改写 execution 状态，也不会判断科学有效性。
 
+## 派生验证 run
+
+`validate-run` 把一个已经 reportable 的 source run 派生成恰好一个 validator run。
+Remote Runner 从自己的记录冻结 source revision、canonical artifact 和 archive target，
+在 archive target 的 test lane 排队，并在结束后取回一个小的项目结果 JSON：
+
+```bash
+remote-runner validate-run \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --source-run-id rr-0123456789abcdef \
+  --validator-key portable-smoke/v1 \
+  --command 'project-owned-validator-command' \
+  --result-relpath acceptance.json \
+  --wait --max-wait 900
+```
+
+validator 会收到 `RR_SOURCE_RUN_ID`、`RR_SOURCE_REVISION`、`RR_SOURCE_SERVER`、
+`RR_SOURCE_ARTIFACT_PATH` 和 `RR_VALIDATOR_KEY`。一个 source run 加一个 validator key
+只拥有一个 validator run：原样重跑会续接该 run 并返回 `reused`；命令改变或失败后想重跑，
+都必须换一个新的 validator key。archive target 必须同时出现在 `scheduling.testing.servers`。
+
+返回的结果 JSON 只被传输，不被解释。Remote Runner 只声明 lifecycle 完成、字节完整；
+其中的 `passed`、`failed` 等字段仍由产出它们的项目负责。
+
 ## 开发测试
 
 用 `dev` 对当前 working tree 做一次性前台测试：

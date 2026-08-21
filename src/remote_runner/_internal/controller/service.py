@@ -13,6 +13,12 @@ from typing import Any
 from .. import monitoring
 from ..cleanup import CleanupOutcomeUnknown, cleanup_remote_runtime
 from ..decommissioned_run import inspect_or_close, validate_request
+from ..derivation import (
+    build_relation,
+    derived_run_id,
+    relation_identity,
+    validate_relation,
+)
 from ..execution_registry import (
     load_current_run,
     project_paths,
@@ -40,6 +46,7 @@ from .registry import (
     ControllerPaths,
     QUEUE_TERMINAL,
     controller_paths,
+    ensure_derived_job,
     ensure_server_capacities,
     eligible_prepared_servers,
     list_drained_servers,
@@ -61,6 +68,7 @@ from .registry import (
 )
 from .output_sync_worker import ensure_output_sync_worker
 from .run_view import ACTIVE_PHASES, load_run_view
+from .validation_gate import source_facts
 
 
 OVERVIEW_RECORD_LIMIT = 20
@@ -177,6 +185,88 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "queue_entry": str(entry),
         "outcome": {"action": "submitted", "run_id": entry.name},
+        "dispatcher_started": dispatcher_started,
+    }
+
+
+def validation_lookup(args: argparse.Namespace) -> dict[str, Any]:
+    """Report the derived identity, any existing validator, and the source gate.
+
+    A source record can disappear after its validator was created, so a failing
+    gate is reported rather than raised: an existing validator must stay
+    observable and retrievable on its own frozen relation.
+    """
+    paths = controller_paths(args.controller_root, args.project_id)
+    validator_run_id = derived_run_id(
+        project_id=paths.project_id,
+        source_run_id=validate_current_run_id(args.source_run_id),
+        validator_key=args.validator_key,
+    )
+    view = load_run_view(paths, validator_run_id)
+    source: dict[str, Any] | None = None
+    source_error: str | None = None
+    try:
+        source = source_facts(paths, args.source_run_id)
+    except (OSError, RuntimeError, ValueError) as exc:
+        source_error = str(exc)
+    return {
+        "validator_run_id": validator_run_id,
+        "validator": None if view.get("phase") == "missing" else view,
+        "source": source,
+        "source_error": source_error,
+    }
+
+
+def submit_validation(args: argparse.Namespace) -> dict[str, Any]:
+    paths = controller_paths(args.controller_root, args.project_id)
+    job = _read_object("validation job")
+    prepared_servers = job.get("prepared_servers")
+    if not isinstance(prepared_servers, list) or any(
+        not isinstance(server, dict) for server in prepared_servers
+    ):
+        raise ValueError("job prepared_servers must be a list of mappings")
+    relation = validate_relation(job.get("derivation"))
+    facts = source_facts(paths, relation["source_run_id"])
+    expected = build_relation(
+        source_run_id=facts["source_run_id"],
+        source_revision=facts["revision"],
+        source_server=facts["server"],
+        target_server=facts["artifact"]["target_server"],
+        target_path=facts["artifact"]["target_path"],
+        receipt_sha256=facts["artifact"]["receipt_sha256"],
+        validator_key=relation["validator_key"],
+        result_relpath=relation["result_relpath"],
+    )
+    if relation_identity(relation) != expected:
+        raise ValueError(
+            "submitted derivation does not match the current source authority"
+        )
+    if str(job.get("revision")) != facts["revision"]:
+        raise ValueError("validator revision must equal the frozen source revision")
+    archive_target = facts["artifact"]["target_server"]
+    placement = {str(server.get("name")) for server in prepared_servers}
+    if placement != {archive_target}:
+        raise ValueError(
+            f"validator placement must be exactly the archive target {archive_target!r}"
+        )
+    ensure_server_capacities(paths, prepared_servers)
+    outcome = ensure_derived_job(paths, job)
+    dispatcher_started = ensure_dispatcher(
+        controller_root=args.controller_root,
+        project_id=args.project_id,
+        timeout=args.timeout,
+        interval=args.interval,
+    )
+    return {
+        "source": facts,
+        "queue_entry": outcome["queue_entry"],
+        "outcome": {
+            "action": "submitted",
+            "run_id": outcome["run_id"],
+            "submission_disposition": outcome["disposition"],
+            "queue_status": outcome["queue_status"],
+            "derivation": outcome["derivation"],
+        },
         "dispatcher_started": dispatcher_started,
     }
 
@@ -1337,6 +1427,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval", type=int, default=60)
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("submit")
+    subparsers.add_parser("submit-validation")
+    validation_lookup_parser = subparsers.add_parser("validation-lookup")
+    validation_lookup_parser.add_argument("--source-run-id", required=True)
+    validation_lookup_parser.add_argument("--validator-key", required=True)
     subparsers.add_parser("pending-all")
     subparsers.add_parser("extend-all")
     queued_job_parser = subparsers.add_parser("queued-job")
@@ -1400,6 +1494,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action == "submit":
             result = submit(args)
+        elif args.action == "submit-validation":
+            result = submit_validation(args)
+        elif args.action == "validation-lookup":
+            result = validation_lookup(args)
         elif args.action == "pending-all":
             result = pending_all(args)
         elif args.action == "extend-all":

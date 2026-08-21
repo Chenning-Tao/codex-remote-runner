@@ -3,7 +3,29 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
-## Unreleased
+## 0.10.0 - 2026-08-21
+
+### Added
+
+- Added `remote-runner validate-run`, which derives exactly one durable validator run
+  from one exact reportable source run. Remote Runner freezes the source revision,
+  canonical artifact, and archive target from controller-owned records, schedules the
+  validator in the archive target's test lane at one core by default, and exposes
+  `RR_SOURCE_RUN_ID`, `RR_SOURCE_REVISION`, `RR_SOURCE_SERVER`,
+  `RR_SOURCE_ARTIFACT_PATH`, and `RR_VALIDATOR_KEY` to the project command.
+- A `(project, source run, validator key)` triple derives one validator run ID that the
+  controller recomputes and deduplicates atomically, so an exact retry resumes the same
+  run as `reused` and a changed immutable spec is a conflict instead of a second run.
+- After the validator is reportable and succeeded, `--wait` reads back exactly one small
+  JSON object from below the checksum-verified validator artifact under path, symlink,
+  type, size, and digest guards, and returns the project payload verbatim.
+
+### Changed
+
+- Derived validation jobs use their own queue record format, so a controller runtime
+  that predates them cannot dispatch one without its frozen source identity.
+- Workload wrappers now also clear inherited `RR_SOURCE_*` and `RR_VALIDATOR_KEY`
+  variables before running the project command.
 
 ### Fixed
 

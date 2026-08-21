@@ -17,6 +17,7 @@ from .execution_registry import (
     utc_now,
     validate_current_run_id,
 )
+from .derivation import validate_relation
 from .output_paths import validate_resolved_output
 from .machine_identity import normalize_machine_fingerprint, normalize_machine_id
 from .scheduling import (
@@ -134,6 +135,9 @@ def register(args: argparse.Namespace) -> Path:
     if submitted_command is not None:
         manifest["submitted_command"] = submitted_command
         manifest["submitted_command_sha256"] = sha256_bytes(submitted_command.encode("utf-8"))
+    derivation = getattr(args, "derivation", None)
+    if derivation is not None:
+        manifest["derivation"] = validate_relation(derivation)
     privacy = getattr(args, "privacy", None)
     if privacy is not None:
         if privacy != PROCESS_TITLE_PRIVACY_MODE:

@@ -560,11 +560,11 @@ def test_minimum_cores_filters_reused_prepared_candidates() -> None:
         {"name": "archive", "configured_cores": 32},
     ]
 
-    assert submission._eligible_prepared_servers(
+    assert submission.filter_eligible_prepared_servers(
         prepared,
         minimum_cores=256,
     ) == [{**prepared[0], "output_root": None, "test_slots": 0}]
-    assert submission._eligible_prepared_servers(
+    assert submission.filter_eligible_prepared_servers(
         prepared,
         minimum_cores=1,
         requested_cores=200,
@@ -573,7 +573,7 @@ def test_minimum_cores_filters_reused_prepared_candidates() -> None:
 
 def test_minimum_cores_rejects_empty_prepared_candidate_set() -> None:
     with pytest.raises(ValueError, match="no prepared server has at least 256"):
-        submission._eligible_prepared_servers(
+        submission.filter_eligible_prepared_servers(
             [{"name": "archive", "configured_cores": 32}],
             minimum_cores=256,
         )
@@ -589,7 +589,7 @@ def test_candidate_allow_list_filters_reused_prepared_candidates() -> None:
 
     assert [
         server["name"]
-        for server in submission._eligible_prepared_servers(
+        for server in submission.filter_eligible_prepared_servers(
             prepared,
             minimum_cores=1,
             candidate_servers=("compute-b", "compute-a", "compute-c"),
@@ -599,7 +599,7 @@ def test_candidate_allow_list_filters_reused_prepared_candidates() -> None:
 
 def test_candidate_allow_list_rejects_empty_prepared_intersection() -> None:
     with pytest.raises(ValueError, match="no allowed candidate server"):
-        submission._eligible_prepared_servers(
+        submission.filter_eligible_prepared_servers(
             [{"name": "CPU128", "configured_cores": 128}],
             minimum_cores=1,
             candidate_servers=("compute-b", "compute-a", "compute-c"),

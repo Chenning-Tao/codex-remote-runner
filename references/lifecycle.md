@@ -33,6 +33,30 @@ returns only after every member is reportable. For an event-driven Codex complet
 path, keep one `wait-cohort` tool call attached without `--max-wait`; do not poll its
 PTY or restart bounded waits from model turns.
 
+## Derived Validation
+
+`validate-run` is detached unless `--wait` is given, and `--wait` always observes until
+the validator is reportable. Waiting only observes: `--max-wait` ends the observation,
+never the run.
+
+Its exit codes extend the ones `wait` already uses: `0` reportable, succeeded, and the
+requested result JSON retrieved; `1` reportable but the guarded result read was refused
+or failed; `2` invalid usage, configuration, or identity contract, including a spec that
+conflicts with an already frozen validator; `3` the observation window expired while the
+controller still owns the run; `4` the validator failed, was stopped, or requires
+attention. Every outcome, including failures, prints the same
+`remote-runner-derived-validation/v1` JSON.
+
+After a timeout, rerunning the same command resumes the exact same validator run rather
+than creating a second one. A resume works from the validator's own frozen relation, so
+it continues even when the source record has since been pruned. A validator that has
+already failed is terminal for its key; reverification requires a new validator key.
+
+Derived jobs use their own queue record format. A controller runtime that predates them
+cannot dispatch one — it would otherwise launch a validator without its frozen source
+identity — so rolling back to an earlier runtime requires letting derived jobs reach a
+terminal state, or stopping them explicitly, first.
+
 ## Stop And Cleanup
 
 Stop one exact queued or running run through controller authority. Cleanup remains a

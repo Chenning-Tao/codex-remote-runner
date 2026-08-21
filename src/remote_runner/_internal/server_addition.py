@@ -13,8 +13,8 @@ from .source import (
     select_historical_source_repo,
 )
 from .submission import (
-    _prepared_manifest,
-    _reachable_targets,
+    prepared_server_manifest,
+    reachable_targets,
     resolve_source_repo,
 )
 
@@ -104,7 +104,7 @@ def add(args: argparse.Namespace) -> dict[str, Any]:
         timeout=args.timeout,
         minimum_cores=int(queued["minimum_cores"]),
     )
-    targets, candidates = _reachable_targets(pool, explicit_server=args.server)
+    targets, candidates = reachable_targets(pool, explicit_server=args.server)
     candidate = candidates[args.server]
     if (
         queued.get("output_relpath") is not None
@@ -132,7 +132,7 @@ def add(args: argparse.Namespace) -> dict[str, Any]:
         revision=revision,
         timeout=args.prepare_timeout,
     )
-    descriptor = _prepared_manifest(preparation, candidates)[0]
+    descriptor = prepared_server_manifest(preparation, candidates)[0]
     controller = call_controller(
         config,
         "extend-job",
