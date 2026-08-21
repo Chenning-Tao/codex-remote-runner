@@ -420,9 +420,16 @@ def test_wrapper_does_not_depend_on_path_python3(tmp_path: Path) -> None:
     assert wait_for_json(runtime / "status.json")["state"] == "succeeded"
 
 
-def test_wrapper_fails_closed_when_process_group_inspection_is_unavailable(
+def test_wrapper_never_hangs_without_process_group_inspection_tools(
     tmp_path: Path,
 ) -> None:
+    """Removing `ps` must never leave a spinning supervisor behind.
+
+    The two supported inspection mechanisms fail differently and the test asserts
+    both: where `/proc` exists the supervisor reads group membership from it,
+    needs no external tool, and the run simply succeeds; where it does not, the
+    `ps` fallback fails closed with internal status 125 instead of looping.
+    """
     _config, plan = register_local_run(tmp_path, "printf 'ok\\n'\n")
     runtime = install_plan_runtime(plan, tmp_path / "home")
     restricted_bin = tmp_path / "bin-without-ps"
@@ -444,13 +451,17 @@ def test_wrapper_fails_closed_when_process_group_inspection_is_unavailable(
             returncode = wrapper.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pytest.fail("wrapper hung when process-group inspection was unavailable")
-        assert returncode == 125
         status = wait_for_json(runtime / "status.json")
-        assert status["state"] == "failed"
-        assert status["exit_code"] == 125
-        assert "process-group inspection failed" in (
-            runtime / "log"
-        ).read_text(encoding="utf-8")
+        if Path("/proc").is_dir():
+            assert returncode == 0, wrapper.stderr
+            assert status["state"] == "succeeded"
+        else:
+            assert returncode == 125
+            assert status["state"] == "failed"
+            assert status["exit_code"] == 125
+            assert "process-group inspection failed" in (
+                runtime / "log"
+            ).read_text(encoding="utf-8")
     finally:
         if wrapper.poll() is None:
             try:
