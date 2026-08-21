@@ -12,8 +12,8 @@ from .pool import (
 from .preparation_manifest import build_preparation_manifest
 from .source import prepare_revision
 from .submission import (
-    _prepared_manifest,
-    _reachable_targets,
+    prepared_server_manifest,
+    reachable_targets,
     resolve_source_repo,
 )
 
@@ -35,7 +35,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         timeout=args.timeout,
         candidate_servers=candidate_servers,
     )
-    targets, candidates = _reachable_targets(pool, explicit_server=requested_server)
+    targets, candidates = reachable_targets(pool, explicit_server=requested_server)
     preparation = prepare_revision(
         source_repo,
         project_id=config.project_id,
@@ -47,5 +47,5 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         config=config,
         server_registry_path=server_registry,
         preparation=preparation,
-        prepared_servers=_prepared_manifest(preparation, candidates),
+        prepared_servers=prepared_server_manifest(preparation, candidates),
     )

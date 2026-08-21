@@ -14,8 +14,8 @@ from .source import (
     select_historical_source_repo,
 )
 from .submission import (
-    _prepared_manifest,
-    _reachable_targets,
+    prepared_server_manifest,
+    reachable_targets,
     resolve_source_repo,
 )
 
@@ -91,7 +91,7 @@ def sync(args: argparse.Namespace) -> dict[str, Any]:
                     ),
                 )
         try:
-            targets, candidates = _reachable_targets(
+            targets, candidates = reachable_targets(
                 missing_pool,
                 explicit_server=None,
             )
@@ -165,7 +165,7 @@ def sync(args: argparse.Namespace) -> dict[str, Any]:
             except (OSError, RuntimeError, ValueError) as exc:
                 failed_cache[key] = str(exc)
                 continue
-            descriptor = _prepared_manifest(preparation, candidates)[0]
+            descriptor = prepared_server_manifest(preparation, candidates)[0]
             prepared_cache[key] = descriptor
             additions.append(descriptor)
         if additions:

@@ -10,6 +10,7 @@ from . import __version__
 from ._internal import (
     cleanup,
     decommissioned_run,
+    derived_validation,
     dev_execution,
     monitoring,
     output_prune,
@@ -187,6 +188,82 @@ def build_parser() -> argparse.ArgumentParser:
         help="wait for the submitted run according to --until",
     )
     _add_wait_options(run_parser)
+
+    validate_parser = subparsers.add_parser(
+        "validate-run",
+        help="derive one durable validator run from an exact reportable source run",
+        description=(
+            "Submit exactly one validator run for a reportable source run and "
+            "return its project result JSON. A source run and validator key own "
+            "one terminal validator run: an exact retry resumes it, and a changed "
+            "command or a rerun after failure requires a new validator key."
+        ),
+    )
+    _add_project_config(validate_parser)
+    validate_parser.add_argument("--source-run-id", required=True)
+    validate_parser.add_argument(
+        "--validator-key",
+        required=True,
+        help=(
+            "stable key naming this validation of the source run; the same key "
+            "always resolves to the same validator run"
+        ),
+    )
+    validate_parser.add_argument(
+        "--command",
+        required=True,
+        help="project-owned validator command; Remote Runner never interprets it",
+    )
+    validate_parser.add_argument(
+        "--result-relpath",
+        required=True,
+        help=(
+            "relative POSIX path of one small JSON object to read back from the "
+            "validator artifact"
+        ),
+    )
+    validate_parser.add_argument(
+        "--cores",
+        dest="requested_cores",
+        type=_positive_int,
+        default=1,
+        help="cores to allocate on the archive target for the validator",
+    )
+    validate_parser.add_argument(
+        "--source-repo",
+        type=Path,
+        help=(
+            "absolute clean local Git repository that contains the source "
+            "revision; its HEAD may be newer than that revision"
+        ),
+    )
+    validate_parser.add_argument(
+        "--server-registry",
+        type=Path,
+        default=DEFAULT_SERVER_REGISTRY,
+    )
+    validate_parser.add_argument("--ssh-profile", default="auto")
+    validate_parser.add_argument("--timeout", type=int, default=8)
+    validate_parser.add_argument("--prepare-timeout", type=int, default=60)
+    validate_parser.add_argument("--privacy", choices=("process-title",))
+    validate_parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="wait until the validator is reportable, then read the result JSON",
+    )
+    validate_parser.add_argument(
+        "--max-wait",
+        type=_positive_int,
+        help="stop observing after this many seconds without stopping the run",
+    )
+    validate_parser.add_argument(
+        "--connection-grace",
+        type=_positive_int,
+        help=(
+            "stop after this many seconds of continuous controller transport "
+            "failure; default: retry indefinitely"
+        ),
+    )
 
     dev_parser = subparsers.add_parser(
         "dev",
@@ -596,6 +673,13 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, RuntimeError, ValueError) as exc:
             parser.error(str(exc))
         return 0
+    if args.subcommand == "validate-run":
+        # Every outcome of a derived validation is a reportable fact, so this
+        # subcommand returns its own schema and exit code instead of collapsing
+        # failures into argparse usage output.
+        validation = derived_validation.validate_run(args)
+        print(json.dumps(validation, indent=2, sort_keys=True))
+        return derived_validation.validation_exit_code(validation)
     try:
         result, returncode = _execute(args)
     except (OSError, RuntimeError, ValueError) as exc:

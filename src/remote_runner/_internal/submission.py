@@ -38,7 +38,7 @@ def _remote_url(ssh: str, bare_repo: str) -> str:
     return f"{ssh}:{bare_repo}"
 
 
-def _reachable_targets(
+def reachable_targets(
     pool: list[dict[str, Any]],
     *,
     explicit_server: str | None,
@@ -69,7 +69,7 @@ def _reachable_targets(
     return targets, candidates
 
 
-def _prepared_manifest(
+def prepared_server_manifest(
     preparation: PreparationResult,
     candidates: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -104,7 +104,7 @@ def _prepared_manifest(
     return prepared
 
 
-def _eligible_prepared_servers(
+def filter_eligible_prepared_servers(
     prepared_servers: list[dict[str, Any]],
     *,
     minimum_cores: int,
@@ -226,7 +226,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
             minimum_cores=max(minimum_cores, requested_cores or 1),
             candidate_servers=candidate_servers or testing_servers or None,
         )
-        targets, candidates = _reachable_targets(pool, explicit_server=requested_server)
+        targets, candidates = reachable_targets(pool, explicit_server=requested_server)
         preparation = prepare_revision(
             source_repo,
             project_id=config.project_id,
@@ -235,8 +235,8 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
             timeout=args.prepare_timeout,
         )
         revision = preparation.revision
-        prepared_servers = _eligible_prepared_servers(
-            _prepared_manifest(preparation, candidates),
+        prepared_servers = filter_eligible_prepared_servers(
+            prepared_server_manifest(preparation, candidates),
             minimum_cores=minimum_cores,
             requested_cores=requested_cores,
             candidate_servers=candidate_servers,
@@ -253,7 +253,7 @@ def submit(args: argparse.Namespace) -> dict[str, Any]:
             source_repo=source_repo,
         )
         revision = str(prepared["revision"])
-        prepared_servers = _eligible_prepared_servers(
+        prepared_servers = filter_eligible_prepared_servers(
             list(prepared["prepared_servers"]),
             minimum_cores=minimum_cores,
             requested_cores=requested_cores,
