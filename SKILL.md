@@ -83,6 +83,32 @@ Remote Runner executes the submitted command unchanged. It exposes the selected
 allocation through `RR_ASSIGNED_CORES`; the workload decides whether and how to use it.
 `RR_SERVER_CORES` exposes inventory separately from the consumable allocation.
 
+## Derive One Validation Run
+
+Use `validate-run` when a reportable source run must be validated by a project-owned
+command. Do not hand-build the source identity, historical checkout, archive placement,
+or duplicate-submission guard in the model turn.
+
+```bash
+remote-runner validate-run \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --source-run-id rr-0123456789abcdef \
+  --validator-key portable-smoke/v1 \
+  --command 'project-owned-validator-command' \
+  --result-relpath acceptance.json \
+  --wait --max-wait 900
+```
+
+One source run and validator key own exactly one validator run. Rerun the identical
+command to resume it; never rotate to a fresh key to work around a timeout, a conflict,
+or a failed validator, and change keys only when the validation itself is deliberately
+different. The validator command receives `RR_SOURCE_RUN_ID`, `RR_SOURCE_REVISION`,
+`RR_SOURCE_SERVER`, `RR_SOURCE_ARTIFACT_PATH`, and `RR_VALIDATOR_KEY`; keep the command
+text byte-stable so an exact retry stays an exact retry.
+
+The returned result JSON is opaque transport output. Report its fields as the project's
+own claim and never restate them as Remote Runner acceptance.
+
 ## Query Or Wait
 
 Use `monitor --run-id` for an immediate exact status query. It performs no model loop.
@@ -141,6 +167,8 @@ or destruction remains the user's responsibility.
   durable lifecycle.
 - `remote-runner prepare`: prepare one reusable revision.
 - `remote-runner run`: submit detached work; wait only with explicit `--wait`.
+- `remote-runner validate-run`: derive one idempotent validator run from one
+  reportable source run and return its opaque project result JSON.
 - `remote-runner monitor`: query bounded status.
 - `remote-runner wait`: attach to one exact run.
 - `remote-runner wait-cohort`: attach once to an ordered exact-ID cohort until every

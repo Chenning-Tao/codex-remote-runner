@@ -21,6 +21,8 @@ tested, but operators should review upgrades before applying them to active pool
 - Detached durable submission by default, with explicit attached waits when requested.
 - Local browser dashboard with confirmed run stopping.
 - Opaque workload commands with selected resources exposed through `RR_ASSIGNED_CORES`.
+- Derived validation runs that turn one reportable source run into exactly one
+  idempotent validator run and return its project result JSON.
 - Explicit stop, cleanup, purge, server drain/retirement, and output archival workflows.
 - Direct foreground development tests from dirty, untracked, or non-Git source trees.
 
@@ -183,6 +185,33 @@ reportable` only for an explicitly requested foreground wait.
 Output synchronization proves path identity, transferred bytes, checksum verification,
 and receipt identity. It can archive failed or stopped checkpoints and never rewrites
 execution state or interprets scientific validity.
+
+## Derived Validation Run
+
+`validate-run` derives one durable validator run from an exact reportable source run.
+Remote Runner freezes the source revision, canonical artifact, and archive target from
+its own records, schedules the validator in the archive target's test lane, and reads
+back one small project result file:
+
+```bash
+remote-runner validate-run \
+  --project-config /absolute/path/to/.remote-runner.yaml \
+  --source-run-id rr-0123456789abcdef \
+  --validator-key portable-smoke/v1 \
+  --command 'project-owned-validator-command' \
+  --result-relpath acceptance.json \
+  --wait --max-wait 900
+```
+
+The validator receives `RR_SOURCE_RUN_ID`, `RR_SOURCE_REVISION`, `RR_SOURCE_SERVER`,
+`RR_SOURCE_ARTIFACT_PATH`, and `RR_VALIDATOR_KEY`. A source run and validator key own
+exactly one validator run: an exact retry resumes that run and reports `reused`, while
+a changed command or a rerun after failure requires a new validator key. The archive
+target must also be listed in `scheduling.testing.servers`.
+
+The returned result JSON is transported, not interpreted. Remote Runner reports that a
+lifecycle completed and that bytes arrived intact; `passed`, `failed`, and every other
+field inside the payload belong to the project that produced them.
 
 ## Development Run
 
