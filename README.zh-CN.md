@@ -45,7 +45,7 @@ Codex Remote Runner 是一个命令行应用，用于将需要持久运行的任
 使用 `uv` 直接从 GitHub tag 安装当前版本：
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.9'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.10.2'
 remote-runner --help
 ```
 
@@ -235,10 +235,11 @@ remote-runner retire-server --project-config /path/to/.remote-runner.yaml --serv
 
 [SKILL.md](SKILL.md) 和 [agents/openai.yaml](agents/openai.yaml) 提供 Codex skill 的元数据与运行契约。它们用于补充 CLI；Python wheel 不会安装任何用户专属的 Codex 配置。
 
-明确要求当前 Codex App 任务自动回报时，发起任务的这一轮必须让 `run --wait`、
-`remote-runner wait --until reportable` 或一个 `remote-runner wait-cohort` 保持为
-尚未完成的工具调用。精确的多 run cohort 必须使用 `wait-cohort`，不得为每个 run
-分别启动 wait 进程。这是一条附着式完成链路，不是后台回调：
+明确要求 Codex App 任务自动回报时，只能有一个 Codex turn 持有附着式等待；它可以是
+发起任务的 turn，也可以是用户明确要求的后台 supervisor。该 owner 必须让 `run --wait`、
+`remote-runner wait --until reportable` 或一个 `remote-runner wait-cohort` 保持为尚未完成的
+工具调用。精确的多 run cohort 必须使用 `wait-cohort`，不得为每个 run 分别启动 wait
+进程。这是一条附着式完成链路，不是后台回调：
 
 1. CLI 首先读取精确 run 或按顺序排列的 exact cohort 权威聚合状态。
 2. 尚不可回报时，CLI 使用状态 etag 在 controller 上发起有界的 `wait-run` 或
@@ -248,7 +249,7 @@ remote-runner retire-server --project-config /path/to/.remote-runner.yaml --serv
 3. 达到所选条件后，CLI 只向 stdout 写入一份最终权威 JSON，然后退出。
    `wait-cohort` 在任一成员失败、停止、缺失或同步状态无效时立即以 attention required
    退出；只有所有成员都达到 reportable 时才成功退出。
-4. 正常的工具完成事件随后恢复发起等待的 Codex 回合。Codex 此时才能检查
+4. 正常的工具完成事件随后恢复持有等待的 Codex 回合。Codex 此时才能检查
    已有日志或同步产物并生成最终回复。是否显示未读标记或系统通知，由 Codex
    App 根据任务焦点和通知设置自行决定；Remote Runner 不写入 App 状态，也不
    保证一定出现这两种界面提示。
@@ -259,6 +260,13 @@ remote-runner retire-server --project-config /path/to/.remote-runner.yaml --serv
 远程 run 仍会继续，但系统不会自动生成 detached 回报；之后必须使用同一个
 精确 run ID 重新附着。Remote Runner 不再提供 detached Codex callback、独立
 App Server 回报、模型 heartbeat 或定时模型/工具轮询路径。
+
+如果用户明确要求独立的 Codex 后台 supervisor，只向它提供 canonical project config、
+按顺序排列的 exact source run IDs、expected revision、parent delivery target，以及逐 source
+run 冻结的 validator 规格。它保持一个不带 `--max-wait` 的 `wait-cohort`，不增加 `monitor`、
+SSH、进度消息或第二个 wait；client surface 要求重连时只续接同一个工具会话。exit 0 后逐
+source run 各执行一次 `validate-run`，exit 4 时跳过验证。Supervisor 向 parent 的一次终态
+投递仍在 Remote Runner 边界之外。
 
 需要跨会话引用时，Trellis 只保存精确 run ID 和决定，不复制 Remote Runner 的
 queue/execution record；后续使用 run ID 查询权威状态。

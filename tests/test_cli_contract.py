@@ -228,6 +228,8 @@ def test_skill_and_agent_metadata_match_normal_flow() -> None:
     assert "Detach by default" in prompt
     assert "--wait --until reportable" in prompt
     assert "only when I explicitly ask to wait" in prompt
+    assert "background supervisor" in prompt
+    assert "without --max-wait" in prompt
     assert "Never add model polling" in prompt
 
 
@@ -241,7 +243,12 @@ def test_codex_docs_define_the_attached_completion_boundary() -> None:
     assert "事件驱动的 Codex 任务历史回报" not in readme_zh
     assert "Process exit plus final stdout JSON is the completion signal" in skill
     assert "do not trigger model polling" in skill
+    assert "one `validate-run` per source run" in skill
+    assert "without `--max-wait`" in skill
     assert "Unchanged timeouts renew CLI transport without a model turn" in lifecycle
+    assert "one `validate-run` per source run" in lifecycle
+    assert "background supervisor" in readme
+    assert "后台 supervisor" in readme_zh
     for document in (readme, readme_zh, skill, lifecycle):
         assert "remote-runner wakeup" not in document
 
