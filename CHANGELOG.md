@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file. The format is
 based on Keep a Changelog, and the project intends to follow Semantic Versioning.
 
+## 0.10.2 - 2026-08-22
+
+### Changed
+
+- Slimmed the Codex cohort-supervision contract: one explicitly requested background
+  supervisor may own one attached `wait-cohort` without `--max-wait`, must not add
+  model polling or exploratory probes, validates each reportable source run through
+  its own frozen `validate-run`, and performs one terminal delivery outside Remote
+  Runner. Attention outcomes skip validation.
+- Clarified that Remote Runner neither creates nor manages the background supervisor;
+  it continues to expose only the attached wait and per-source derived-validation
+  primitives, while the external Codex layer owns parent-thread delivery.
+
 ## 0.10.1 - 2026-08-21
 
 ### Changed

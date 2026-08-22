@@ -33,6 +33,15 @@ returns only after every member is reportable. For an event-driven Codex complet
 path, keep one `wait-cohort` tool call attached without `--max-wait`; do not poll its
 PTY or restart bounded waits from model turns.
 
+When the user explicitly requests a separate Codex background supervisor, that thread
+is only an external delivery adapter. It owns the same single attached `wait-cohort`
+without `--max-wait`, receives no research context, and must not add `monitor`, SSH,
+progress messages, or a second wait. On successful cohort completion it runs
+one `validate-run` per source run using each frozen validator key, command, and result
+path;
+on attention it skips all validation. Parent-thread delivery is outside Remote Runner,
+which neither creates the supervisor nor stores Codex thread state.
+
 ## Derived Validation
 
 `validate-run` is detached unless `--wait` is given, and `--wait` always observes until

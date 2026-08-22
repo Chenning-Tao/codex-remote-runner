@@ -137,6 +137,17 @@ long polls keyed by exact etags; cohort waits use one batched controller request
 than one process per run. Unchanged timeouts renew transport inside the CLI and do not
 trigger model polling. Process exit plus final stdout JSON is the completion signal.
 
+An explicitly requested Codex background supervisor is an external delivery owner,
+not a Remote Runner lifecycle feature. Give it only the canonical project config,
+ordered exact source run IDs, expected revision, parent delivery target, and one frozen
+validator specification per source run. It must keep one
+`wait-cohort` attached without `--max-wait`, add no `monitor`, SSH, progress commentary,
+or second wait, and only
+reattach the same tool session when the surface requires it. Exit 0 permits one
+`validate-run` per source run: run one `validate-run` per source run using its frozen
+specification. Exit 4 skips validation. The external supervisor may
+then deliver one terminal report, while Remote Runner remains unaware of Codex threads.
+
 ## Read The Exit Code
 
 Waits and derived validations report their outcome in the process exit status, not only

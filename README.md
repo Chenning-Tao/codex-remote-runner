@@ -56,7 +56,7 @@ not as a hostile multi-tenant scheduler.
 Install the current release directly from its GitHub tag with `uv`:
 
 ```bash
-uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.9.9'
+uv tool install 'codex-remote-runner[web] @ git+https://github.com/Chenning-Tao/codex-remote-runner.git@v0.10.2'
 remote-runner --help
 ```
 
@@ -292,11 +292,12 @@ operations.
 skill metadata and operating contract. They complement the CLI; the Python wheel
 does not install user-specific Codex configuration.
 
-For an explicitly requested automatic report in the current Codex App task, the
-originating turn must keep `run --wait`, `remote-runner wait --until reportable`, or
-one `remote-runner wait-cohort` as an unfinished tool call. Use `wait-cohort` for an
-exact multi-run cohort instead of starting one wait process per run. This is an
-attached completion path, not a background callback:
+For an explicitly requested automatic report in a Codex App task, exactly one Codex
+turn owns the attached wait. That owner can be the originating turn or an explicitly
+requested background supervisor. It must keep `run --wait`, `remote-runner wait
+--until reportable`, or one `remote-runner wait-cohort` as an unfinished tool call.
+Use `wait-cohort` for an exact multi-run cohort instead of starting one wait process
+per run. This is an attached completion path, not a background callback:
 
 1. The CLI reads the exact run or ordered exact cohort's authoritative aggregate view.
 2. While the selected run or cohort is not reportable, the CLI blocks in bounded
@@ -308,7 +309,7 @@ attached completion path, not a background callback:
    stdout and exits. `wait-cohort` exits immediately with attention required if any
    member fails, stops, disappears, or reaches an invalid synchronization state; it
    exits successfully only after every member is reportable.
-4. Normal tool completion resumes the originating Codex turn. Codex can then inspect
+4. Normal tool completion resumes the owning Codex turn. Codex can then inspect
    existing logs or synchronized artifacts and produce the final response. The App
    itself decides whether that response gets an unread indicator or notification from
    its focus and notification settings; Remote Runner neither writes App state nor
@@ -321,6 +322,14 @@ turn or tool session ends, the run continues but there is no automatic detached
 follow-up; reattach later with the exact run ID. Remote Runner has no detached Codex
 callback, standalone App Server delivery, model heartbeat, or scheduled model/tool
 polling path.
+
+If the user explicitly requests a separate Codex background supervisor, give it only
+the canonical project config, ordered exact source run IDs, expected revision, parent
+delivery target, and one frozen validator specification per source run. It keeps one
+`wait-cohort` attached without `--max-wait`, adds no `monitor`, SSH, progress messages,
+or second wait, and only reattaches the same tool session when required by the client
+surface. Exit 0 permits one `validate-run` per source run; exit 4 skips validation.
+The supervisor's one terminal parent delivery remains outside Remote Runner.
 
 Persist exact run IDs and cross-session decisions in Trellis when needed. Do not copy
 Remote Runner queue or execution records into Trellis; query the authoritative run ID.
